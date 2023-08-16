@@ -1,2 +1,2 @@
 # Semantic-Functional-Communications
-Semantic-Functional Communications in Cyber-Physical Systems
+This repository is dedicated to sharing scripts to simulate Semantic-Functional-Communications.
