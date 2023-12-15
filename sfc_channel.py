@@ -4,9 +4,6 @@ from numpy.random import standard_normal
 import random as rnd
 
 
-# from scipy.fftpack import fft, fftfreq
-
-
 class PositionSensorNodes:
     def __init__(self, sensor_nodes=64, n_moves=0, random_method='circumference', random_state=None,
                  uniform_low=-300, uniform_high=300, standard_deviation=70, energy_slot_time=500 * 10 ** -6, **ops):
@@ -68,7 +65,7 @@ def ricean_fading(K_dB=1, n=1):
     return np.abs(h)
 
 
-class BBChannel(PositionSensorNodes):
+class SFCChannel(PositionSensorNodes):
     def __init__(self, base_station=np.array([[0, 0]]), sensor_nodes=64, carrier_frequency=2.4e9, energy_slot_time=500e-6,
                  n_sub_symbol=6, resource=7, **options):
         self.name = options.pop('name', 'Generic')
@@ -81,9 +78,11 @@ class BBChannel(PositionSensorNodes):
         self.sn_tx_power = options.pop('sn_tx_power', 1 * np.ones((sensor_nodes, 1)))
         self.n_sub_symbol = n_sub_symbol
         self.resource = resource
+        self.AWGN_std = options.pop('AWGN_std', 0.01)
         self.map_class = 'random'
-        self.maps = np.zeros((sensor_nodes, n_sub_symbol, resource))
+        # self.maps = np.zeros((sensor_nodes, n_sub_symbol, resource))
         self.dc_threshold = options.pop('dc_threshold', 1)
+        self.sensor_x_event = options.pop('sensor_x_event', [])  # np.identity(sensor_nodes)
         # self.tx_signal = np.zeros((sensor_nodes, n_sub_symbol, resource))
 
         if self.sn_movement_type == 'gaussian':
@@ -99,10 +98,21 @@ class BBChannel(PositionSensorNodes):
             self.sn_tx_power = 10 * np.ones((sensor_nodes, 1))
 
         self.path_loss = self.get_impulse()
-        self.tx_maps()
+        # self.tx_maps()
 
     def __call__(self, events, **options):
-        assert self.sensor_nodes == events.shape[1], 'error in parameter shape: events '
+
+        if len(self.sensor_x_event) == 0:
+            self.sensor_x_event = options.pop('sensor_x_event', np.identity(self.sensor_nodes))
+            self.maps = np.zeros((events.shape[1], self.n_sub_symbol, self.resource))
+            self.tx_maps()
+
+        if not ('maps' in dir(self)):
+            self.maps = np.zeros((events.shape[1], self.n_sub_symbol, self.resource))
+            self.tx_maps()
+
+        assert self.sensor_x_event.shape[1] == events.shape[1], 'error in parameter shape: events '
+        assert self.maps.shape[0] == events.shape[1], 'error in parameter shape: events '
 
         N = events.shape[0]
         received_signal = np.complex_(np.zeros((N + self.n_sub_symbol - 1, self.resource)))
@@ -110,11 +120,13 @@ class BBChannel(PositionSensorNodes):
         for e in range(0, N):
             inds = np.argwhere(events[e] == 1)
             for ind in inds:
-                received_signal[e:e + self.n_sub_symbol, :] = received_signal[e:e + self.n_sub_symbol, :] + self.maps[ind] * self.path_loss[ind] \
-                                                              * self.sn_tx_power[ind]
+                inds_sensor = np.argwhere(self.sensor_x_event[:, ind])[:, 0]
+                for ind_sensor in inds_sensor:
+                    received_signal[e:e + self.n_sub_symbol, :] = received_signal[e:e + self.n_sub_symbol, :] + self.maps[ind] * self.path_loss[
+                        ind_sensor] * self.sn_tx_power[ind_sensor]
 
-        received_signal = received_signal + np.random.normal(0, 0.01, size=received_signal.shape)
-        received_signal = received_signal + 1j * np.random.normal(0, 0.01, size=received_signal.shape)
+        received_signal = received_signal + np.random.normal(0, self.AWGN_std, size=received_signal.shape)
+        received_signal = received_signal + 1j * np.random.normal(0, self.AWGN_std, size=received_signal.shape)
         received_signal = np.abs(received_signal)
         rx_map = np.zeros(received_signal.shape)
         rx_map[np.argwhere(received_signal > self.dc_threshold)[:, 0], np.argwhere(received_signal > self.dc_threshold)[:, 1]] = 1
@@ -127,9 +139,9 @@ class BBChannel(PositionSensorNodes):
         if options.pop('update', False):
             self.update(n_steps=options.pop('n_steps', 1))
 
-        return rx_events
+        return rx_events, rx_map, received_signal
 
-    def update(self, n_steps=1):
+    def update(self, n_steps=1, **options):
         self.move_nodes(n_steps=n_steps)
         self.path_loss = self.get_impulse()
 
