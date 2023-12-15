@@ -4,7 +4,7 @@ import random as rnd
 
 N = 1000
 event_rate = 0.1
-n_sensors = 3
+n_sensors = 64
 n_resource = 7
 n_sub_symbol = 6
 
