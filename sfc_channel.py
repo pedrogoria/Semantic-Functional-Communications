@@ -66,22 +66,19 @@ def ricean_fading(K_dB=1, n=1):
 
 
 class SFCChannel(PositionSensorNodes):
-    def __init__(self, base_station=np.array([[0, 0]]), sensor_nodes=64, carrier_frequency=2.4e9, energy_slot_time=500e-6,
-                 n_sub_symbol=6, resource=7, **options):
+    def __init__(self, base_station=np.array([[0, 0]]), sensor_nodes=64, carrier_frequency=2.4e9, n_sub_symbol=6, resource=7, **options):
         self.name = options.pop('name', 'Generic')
         self.base_station = base_station
         self.carrier_frequency = options.pop('carrier_frequency', carrier_frequency)
         self.fading = options.pop('fading', None)
         self.path_loss_exp = options.pop('path_loss_exp', 0)  # 2 for for propagation in free space
-        self.energy_slot_time = energy_slot_time
+        self.bandwidth = options.pop('bandwidth', 1000)
+        self.energy_slot_time = 2 / (self.bandwidth / resource)
         self.sn_movement_type = options.pop('sn_movement_type', 'module')
-        self.sn_tx_power = options.pop('sn_tx_power', 1 * np.ones((sensor_nodes, 1)))
         self.n_sub_symbol = n_sub_symbol
         self.resource = resource
-        self.AWGN_std = options.pop('AWGN_std', 0.01)
         self.map_class = 'random'
         # self.maps = np.zeros((sensor_nodes, n_sub_symbol, resource))
-        self.dc_threshold = options.pop('dc_threshold', 1)
         self.sensor_x_event = options.pop('sensor_x_event', [])  # np.identity(sensor_nodes)
         # self.tx_signal = np.zeros((sensor_nodes, n_sub_symbol, resource))
 
@@ -94,11 +91,20 @@ class SFCChannel(PositionSensorNodes):
         if self.base_station.shape != (1, 2):
             self.base_station = np.array([[0, 0]])
 
-        if self.sn_tx_power.shape != (sensor_nodes,):
-            self.sn_tx_power = 10 * np.ones((sensor_nodes, 1))
-
         self.path_loss = self.get_impulse()
+
+        self.sn_tx_power = options.pop('sn_tx_power', np.ones((sensor_nodes, 1)))
+
+        if self.sn_tx_power.shape != (sensor_nodes, 1):
+            self.sn_tx_power = 10 * np.ones((sensor_nodes, 1))
+            self.dc_threshold = options.pop('dc_threshold', 5)
+
+        if options.pop('power_at_receiver', False):
+            self.sn_tx_power = self.sn_tx_power / np.abs(self.path_loss)
+        self.AWGN_std = options.pop('AWGN_std', 0.01)
+
         # self.tx_maps()
+        self.dc_threshold = options.pop('dc_threshold', 0.5 * np.min(self.sn_tx_power * np.abs(self.path_loss)))
 
     def __call__(self, events, **options):
 
@@ -125,15 +131,15 @@ class SFCChannel(PositionSensorNodes):
                     received_signal[e:e + self.n_sub_symbol, :] = received_signal[e:e + self.n_sub_symbol, :] + self.maps[ind] * self.path_loss[
                         ind_sensor] * self.sn_tx_power[ind_sensor]
 
-        received_signal = received_signal + np.random.normal(0, self.AWGN_std, size=received_signal.shape)
-        received_signal = received_signal + 1j * np.random.normal(0, self.AWGN_std, size=received_signal.shape)
+        received_signal = received_signal + np.random.normal(0, np.sqrt(0.5 * self.AWGN_std ** 2), size=received_signal.shape)
+        received_signal = received_signal + 1j * np.random.normal(0, np.sqrt(0.5 * self.AWGN_std ** 2), size=received_signal.shape)
         received_signal = np.abs(received_signal)
         rx_map = np.zeros(received_signal.shape)
         rx_map[np.argwhere(received_signal > self.dc_threshold)[:, 0], np.argwhere(received_signal > self.dc_threshold)[:, 1]] = 1
 
         rx_events = np.zeros(events.shape)
         for e in range(0, N):
-            for i in range(0, self.sensor_nodes):
+            for i in range(0, events.shape[1]):
                 rx_events[e, i] = 1 if np.sum(rx_map[e:e + self.n_sub_symbol, :] * self.maps[i, :, :]) == self.n_sub_symbol else 0
 
         if options.pop('update', False):

@@ -166,8 +166,8 @@ def print_new_samples_delta(fault):
     # return(compress)        #Uncomment this is you want to vizualize compression rate
 
 
-# cosine phase method
-class CPMSample:
+# cosine phase sampling
+class CPSample:
     def __init__(self, T=1, harmonics=3, n_sub_symbol=6, resource=7, sensor_nodes=5, bandwidth=100, **options):
         self.name = options.pop('name', 'CPM')
         self.T = T
@@ -183,6 +183,7 @@ class CPMSample:
         self.rs_per_period = np.floor(T / self.sub_symbol_time)
         self.n_periods = options.pop('periods', 'empty')
         self.threshold_harmonics = options.pop('threshold_harmonics', 0.001)
+        self.dft_signal_periods = int(options.pop('dft_signal_periods', 1))
         assert self.rs_per_period > 1, 'error in parameter rs_per_period '
         for i in range(self.sensors):
             self.sensors_x_event[i, (2 * i * self.harmonics): (2 * (i + 1) * self.harmonics)] = np.ones((1, 2 * self.harmonics))
@@ -242,9 +243,9 @@ class CPMSample:
         tb = np.zeros(an.shape)
         an[np.where(np.abs(an) < self.threshold_harmonics)] = 0
         bn[np.where(np.abs(bn) < self.threshold_harmonics)] = 0
-        # zero_ind = (an == 0) & (bn == 0)
-        # an[zero_ind] = 1
-        # bn[zero_ind] = 1
+        zero_ind = (an == 0) & (bn == 0)
+        an[zero_ind] = 1
+        bn[zero_ind] = 1
         for iii in range(self.sensors):
             for i in range(an.shape[0]):
                 ta[i, :, iii] = -2 * np.arctan((2 * bn[i, :, iii] - (-(an[i, :, iii] ** 2 + bn[i, :, iii] ** 2) *
@@ -258,8 +259,8 @@ class CPMSample:
                                               (an[i, :, iii] ** 2 + 2 * an[i, :, iii] + bn[i, :, iii] ** 2))
                 tb[i, :, iii] = tb[i, :, iii] / (self.n * self.w0)
 
-        # ta[zero_ind] = 9999
-        # tb[zero_ind] = 9999
+        ta[zero_ind] = 9999
+        tb[zero_ind] = 9999
         return ta, tb
 
     def calc_an_bn_dft(self, x, Tt, **opt):
@@ -271,12 +272,13 @@ class CPMSample:
             xx[:, :, 0] = x
             x = xx
 
-        t = np.arange(x.shape[0] * 1) * Tt
+        t = np.arange(x.shape[0] * self.dft_signal_periods) * Tt
         FX = np.zeros((x.shape[1], self.harmonics + 1, self.sensors)) * 1j
         for iii in range(self.sensors):
             for ii in range(x.shape[1]):
                 for i in range(0, self.harmonics + 1):
-                    FX[ii, i, iii] = Tt * np.sum(x[:, ii, iii] * np.exp(-1j * i * self.w0 * t)) / self.T
+                    FX[ii, i, iii] = Tt * np.sum(np.tile(x[:, ii, iii], self.dft_signal_periods) * np.exp(-1j * i * self.w0 * t)) / self.T
+                    FX[ii, i, iii] = FX[ii, i, iii] / self.dft_signal_periods
 
         an = 2 * np.real(FX[:, 1:, :])
         bn = -2 * np.imag(FX[:, 1:, :])
@@ -290,7 +292,8 @@ class CPMSample:
                         print('normalizing')
                         x[:, ii, iii] = x[:, ii, iii] * np.sqrt(nor_x / aux)
                         for i in range(0, self.harmonics + 1):
-                            FX[ii, i, iii] = Tt * np.sum(x[:, ii, iii] * np.exp(-1j * i * self.w0 * t)) / self.T
+                            FX[ii, i, iii] = Tt * np.sum(np.tile(x[:, ii, iii], self.dft_signal_periods) * np.exp(-1j * i * self.w0 * t)) / self.T
+                            FX[ii, i, iii] = FX[ii, i, iii] / self.dft_signal_periods
                         an[ii, :, iii] = 2 * np.real(FX[ii, 1:, iii])
                         bn[ii, :, iii] = -2 * np.imag(FX[ii, 1:, iii])
                         aux = max(an[ii, :, iii] ** 2 + bn[ii, :, iii] ** 2)
@@ -404,28 +407,29 @@ def recover_signal(ta, tb, t, w0):
     return np.sum(x, 0)
 
 
-def sinc_filter(x, BW=10, Tt=0.001, Tth=10):
+def sinc_filter(x, BW=10, Tt=0.001, Tth=10, x_clones=20):
     Ts = 1 / (2 * BW)
     th = np.arange(-Tth, Tth, Tt)
     h = np.sinc(th / Ts)
     N = x.shape[0]
-    Nh = h.shape[0]
-    if Nh > N:
-        out_ind = np.arange(Nh // 2 - N // 2, Nh // 2 + N // 2)
-    else:
-        out_ind = np.arange(N)
-    assert len(x.shape) < 4, 'error in parameter shape: x'
-    if len(x.shape) == 1:
-        xf = np.convolve(x, h, 'same')[out_ind]
-    elif len(x.shape) == 2:
-        xf = np.zeros(x.shape)
-        for ind in range(x.shape[1]):
-            xf[:, ind] = np.convolve(x[:, ind], h, 'same')[out_ind]
-    elif len(x.shape) == 3:
-        xf = np.zeros(x.shape)
+    H = int(len(h) / 2)
+
+    xf = np.zeros(x.shape)
+    if len(x.shape) == 3:
         for ind1 in range(x.shape[1]):
             for ind2 in range(x.shape[2]):
-                xf[:, ind1, ind2] = np.convolve(x[:, ind1, ind2], h, 'same')[out_ind]
+                xf[:, ind1, ind2] = np.convolve(h, np.tile(x[:, ind1, ind2], x_clones))[H + int(x_clones / 2) * N:H + int(1 + x_clones / 2) * N]
+        xf = xf / np.sum(h)
+    elif len(x.shape) == 2:
+        for ind1 in range(x.shape[1]):
+            xf[:, ind1] = np.convolve(h, np.tile(x[:, ind1], x_clones))[H + int(x_clones / 2) * N:H + int(1 + x_clones / 2) * N]
+        xf = xf / np.sum(h)
+    elif len(x.shape) == 1:
+        xf = np.convolve(h, np.tile(x, x_clones))[H + int(x_clones / 2) * N:H + int(1 + x_clones / 2) * N]
+        xf = xf / np.sum(h)
+    else:
+        print('x.shape is no valid')
+
     return xf
 
 
@@ -444,15 +448,29 @@ def plot_fft(x, Tt=0.001, p_log=True):
 
 # Sampling, Quantization and Encoding
 class Nyquist:
-    def __init__(self, T=1, Tt=0.001, sampling_rate=10, sensor_nodes=5, bandwidth=100, n_bits=8, T_sinc=10, **options):
+    def __init__(self, T=1, Tt=0.001, sampling_rate=10, sensor_nodes=5, bandwidth=100, **options):
         self.name = options.pop('name', 'Nyquist')
         self.sampling_rate = sampling_rate
         self.sensor_nodes = sensor_nodes
         self.bandwidth = bandwidth
         self.T = T
-        self.T_sinc = T_sinc
+        self.T_sinc = options.pop('T_sinc', 10)
         self.sensor_bw = bandwidth / sensor_nodes
-        self.n_bits = n_bits
+        self.snr_dB = options.pop('snr_dB', 3)
+        P_N0bw = (10 ** (self.snr_dB / 10))
+        self.sensor_channel_capacity = self.sensor_bw * np.log2(1 + P_N0bw)
+        self.bits_codeword = options.pop('bits_codeword', int(np.floor(self.sensor_channel_capacity / self.sampling_rate)))
+        if self.bits_codeword > 1000:
+            self.bits_codeword = 1000
+
+        assert self.bits_codeword * self.sampling_rate <= self.sensor_channel_capacity, 'bits per message exceeds the channel capacity'
+
+        self.header = options.pop('header', True)
+        if self.header:
+            self.bits_msg = int(self.bits_codeword - np.ceil(np.log2(sensor_nodes)))
+        else:
+            self.bits_msg = self.bits_codeword
+        self.bins = 2 ** self.bits_msg
         self.Tt = Tt
         self.x_clones = options.pop('x_clones', 20)
 
@@ -469,7 +487,11 @@ class Nyquist:
         if quantize:
             x_max = np.max(x, 0)
             x_min = np.min(x, 0)
-            bins = 2 ** self.n_bits
+            delta = (x_max - x_min) / self.bins
+
+            x_s = np.ceil((x_s - x_min) / delta)
+            x_s[np.where(x_s == 0)] = 1
+            x_s = x_s * delta - delta / 2 + x_min
 
         return x_s
 
@@ -485,7 +507,7 @@ class Nyquist:
         for ind1 in range(x_s.shape[1]):
             for ind2 in range(x_s.shape[2]):
                 x_s_t[t_s.astype(int)] = x_s[:, ind1, ind2]
-                x_r = np.convolve(h, np.tile(x_s_t, 20))
+                x_r = np.convolve(h, np.tile(x_s_t, self.x_clones))
                 xr[:, ind1, ind2] = x_r[H + int(self.x_clones / 2) * N:H + int(1 + self.x_clones / 2) * N]
 
         # xr = np.zeros((int(2 * self.n_samples_sinc - 1), x_s.shape[1], x_s.shape[2]))
