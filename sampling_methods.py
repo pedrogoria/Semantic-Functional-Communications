@@ -176,7 +176,7 @@ class CPSample:
         self.n_sub_symbol = n_sub_symbol
         self.resources = resource
         self.bandwidth = bandwidth
-        self.sub_symbol_time = 2 / (self.bandwidth / self.resources)
+        self.sub_symbol_time = 1 / (self.bandwidth / self.resources)
         self.sensors_x_event = np.zeros((self.sensors, 2 * self.sensors * self.harmonics))
         self.w0 = 2 * np.pi / T
         self.n = np.arange(harmonics) + 1
@@ -201,7 +201,7 @@ class CPSample:
             x = xx
 
         events = np.zeros((int(self.rs_per_period * x.shape[1]), int(self.harmonics * 2 * self.sensors)))
-        ta, tb, x = self.sample(x, Tt)
+        ta, tb, x = self.sample(x, Tt, **options)
         self.n_periods = int(events.shape[0] / self.rs_per_period)
 
         ta_z = np.zeros(ta.shape)
@@ -212,7 +212,7 @@ class CPSample:
                 tb_z[ii, :, iii] = tb[ii, :, iii] * self.n * self.w0
 
                 for i in self.n:
-                    if ta[ii, i-1, iii] != 9999:
+                    if ta[ii, i - 1, iii] != 9999:
                         pos_a = np.ceil((self.T * ta_z[ii, i - 1, iii] / (2 * np.pi) + self.T / 2) / self.sub_symbol_time)
                         if pos_a < 1:
                             pos_a = 1
@@ -221,7 +221,7 @@ class CPSample:
 
                         events[int(pos_a + self.rs_per_period * ii - 1), int(i - 1 + 2 * iii * self.harmonics)] = 1
 
-                    if tb[ii, i-1, iii] != 9999:
+                    if tb[ii, i - 1, iii] != 9999:
                         pos_b = np.ceil((self.T * tb_z[ii, i - 1, iii] / (2 * np.pi) + self.T / 2) / self.sub_symbol_time)
                         if pos_b < 1:
                             pos_b = 1
@@ -237,26 +237,31 @@ class CPSample:
         assert bn.shape[1] == self.harmonics, 'error in parameter shape: an '
         assert an.shape[2] == self.sensors, 'error in parameter shape: an '
         assert bn.shape[2] == self.sensors, 'error in parameter shape: an '
-        an = np.copy(an)
-        bn = np.copy(bn)
+        an1 = np.copy(an)
+        bn1 = np.copy(bn)
         ta = np.zeros(an.shape)
         tb = np.zeros(an.shape)
-        an[np.where(np.abs(an) < self.threshold_harmonics)] = 0
-        bn[np.where(np.abs(bn) < self.threshold_harmonics)] = 0
-        zero_ind = (an == 0) & (bn == 0)
-        an[zero_ind] = 1
-        bn[zero_ind] = 1
+        an1[np.where(np.abs(an) < self.threshold_harmonics)] = 0
+        bn1[np.where(np.abs(bn) < self.threshold_harmonics)] = 0
+        zero_ind = (an1 == 0) & (bn1 == 0)
         for iii in range(self.sensors):
             for i in range(an.shape[0]):
-                ta[i, :, iii] = -2 * np.arctan((2 * bn[i, :, iii] - (-(an[i, :, iii] ** 2 + bn[i, :, iii] ** 2) *
-                                                                     (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2 - 4)) ** (1 / 2)) /
-                                               (an[i, :, iii] ** 2 + 2 * an[i, :, iii] + bn[i, :, iii] ** 2) - (4 * bn[i, :, iii]) /
-                                               (an[i, :, iii] ** 2 + 2 * an[i, :, iii] + bn[i, :, iii] ** 2))
-                ta[i, :, iii] = ta[i, :, iii] / (self.n * self.w0)
+                ta[i, :, iii] = np.real(- 1j * np.log((1j * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2) - np.sign(bn[i, :, iii]) * np.sqrt(
+                    0j + (4 - an[i, :, iii] ** 2 - bn[i, :, iii] ** 2) * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2))) / (
+                                                                  2 * (1j * an[i, :, iii] + bn[i, :, iii]))))
+                tb[i, :, iii] = np.real(- 1j * np.log((1j * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2) + np.sign(bn[i, :, iii]) * np.sqrt(
+                    0j + (4 - an[i, :, iii] ** 2 - bn[i, :, iii] ** 2) * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2))) / (
+                                                                  2 * (1j * an[i, :, iii] + bn[i, :, iii]))))
 
-                tb[i, :, iii] = 2 * np.arctan((2 * bn[i, :, iii] - (-(an[i, :, iii] ** 2 + bn[i, :, iii] ** 2) *
-                                                                    (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2 - 4)) ** (1 / 2)) /
-                                              (an[i, :, iii] ** 2 + 2 * an[i, :, iii] + bn[i, :, iii] ** 2))
+                # ta[i, :, iii] = -2 * np.arctan((2 * bn[i, :, iii] - (-(an[i, :, iii] ** 2 + bn[i, :, iii] ** 2) *
+                #                                                      (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2 - 4)) ** (1 / 2)) /
+                #                                (an[i, :, iii] ** 2 + 2 * an[i, :, iii] + bn[i, :, iii] ** 2) - (4 * bn[i, :, iii]) /
+                #                                (an[i, :, iii] ** 2 + 2 * an[i, :, iii] + bn[i, :, iii] ** 2))
+                ta[i, :, iii] = ta[i, :, iii] / (self.n * self.w0)
+                #
+                # tb[i, :, iii] = 2 * np.arctan((2 * bn[i, :, iii] - (-(an[i, :, iii] ** 2 + bn[i, :, iii] ** 2) *
+                #                                                     (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2 - 4)) ** (1 / 2)) /
+                #                               (an[i, :, iii] ** 2 + 2 * an[i, :, iii] + bn[i, :, iii] ** 2))
                 tb[i, :, iii] = tb[i, :, iii] / (self.n * self.w0)
 
         ta[zero_ind] = 9999
@@ -272,7 +277,7 @@ class CPSample:
             xx[:, :, 0] = x
             x = xx
 
-        t = np.arange(x.shape[0] * self.dft_signal_periods) * Tt
+        t = opt.pop('t', np.arange(x.shape[0] * self.dft_signal_periods) * Tt)
         FX = np.zeros((x.shape[1], self.harmonics + 1, self.sensors)) * 1j
         for iii in range(self.sensors):
             for ii in range(x.shape[1]):
@@ -301,8 +306,8 @@ class CPSample:
         return an, bn, x
 
     def sample(self, x, Tt, **options):
-        an, bn, x = self.calc_an_bn_dft(x, Tt)
-        ta, tb = self.calc_ta_tb(an, bn)
+        an, bn, x = self.calc_an_bn_dft(x, Tt, **options)
+        ta, tb = self.calc_ta_tb(an, bn, **options)
         return ta, tb, x
 
     def event_to_ta_tb(self, events, **options):
@@ -436,13 +441,14 @@ def sinc_filter(x, BW=10, Tt=0.001, Tth=10, x_clones=20):
 def plot_fft(x, Tt=0.001, p_log=True):
     N = len(x)
     yf = scipy.fftpack.fft(x)
-    yf = (np.abs(2 * yf) ** 2)
+    yf = (np.abs(yf)) / N
     xf = np.linspace(0.0, 1.0 / (2.0 * Tt), N // 2)
-    if p_log:
-        yf = np.log10(yf)
-
     fig, ax = plt.subplots()
-    ax.plot(xf, yf[:N // 2])
+    if p_log:
+        # yf = np.log10(yf)
+        plt.semilogy(xf, yf[:N // 2])
+    else:
+        plt.plot(xf, yf[:N // 2])
     plt.show()
 
 
@@ -476,24 +482,57 @@ class Nyquist:
 
     def __call__(self, x, t, **options):
         quantize = options.pop('quantize', True)
+        peak2peak = options.pop('peak2peak', 'sample')
 
         t_s = np.floor(np.arange(self.T * self.sampling_rate) * (1 / self.Tt) / self.sampling_rate)
-
-        x_s = np.zeros((len(t_s), x.shape[1], x.shape[2]))
-        for ind1 in range(x.shape[1]):
-            for ind2 in range(x.shape[2]):
-                x_s[:, ind1, ind2] = x[t_s.astype(int), ind1, ind2]
+        assert len(x.shape) < 4, 'input shape'
+        if len(x.shape) == 3:
+            x_s = np.zeros((len(t_s), x.shape[1], x.shape[2]))
+            for ind1 in range(x.shape[1]):
+                for ind2 in range(x.shape[2]):
+                    x_s[:, ind1, ind2] = x[t_s.astype(int), ind1, ind2]
+        elif len(x.shape) == 2:
+            x_s = np.zeros((len(t_s), x.shape[1]))
+            for ind1 in range(x.shape[1]):
+                x_s[:, ind1] = x[t_s.astype(int), ind1]
+        else:
+            x_s = x[t_s.astype(int)]
 
         if quantize:
-            x_max = np.max(x, 0)
-            x_min = np.min(x, 0)
-            delta = (x_max - x_min) / self.bins
+            peak2peak = options.pop('peak2peak', 'sample')
 
-            x_s = np.ceil((x_s - x_min) / delta)
-            x_s[np.where(x_s == 0)] = 1
-            x_s = x_s * delta - delta / 2 + x_min
+            if peak2peak == 'sample':
+                x_max = np.max(x, 0)
+                x_min = np.min(x, 0)
+                delta_bin = (x_max - x_min) / self.bins
+            else:
+                x_max = peak2peak/2
+                x_min = -peak2peak/2
+                delta_bin = (x_max - x_min) / self.bins
+
+            x_s = np.ceil((x_s - x_min) / delta_bin)
+            x_s[np.where(x_s > self.bins)] = self.bins
+            x_s[np.where(x_s <= 0)] = 1
+            x_s = x_s * delta_bin - delta_bin / 2 + x_min
 
         return x_s
+
+    def quantize(self, x, **options):
+        peak2peak = options.pop('peak2peak', 'sample')
+
+        if peak2peak == 'sample':
+            x_max = np.max(x, 0)
+            x_min = np.min(x, 0)
+            delta_bin = (x_max - x_min) / self.bins
+        else:
+            x_max = peak2peak / 2
+            x_min = -peak2peak / 2
+            delta_bin = (x_max - x_min) / self.bins
+
+        x_s = np.ceil((x - x_min) / delta_bin)
+        x_s[np.where(x_s > self.bins)] = self.bins
+        x_s[np.where(x_s <= 0)] = 1
+        return x_s * delta_bin - delta_bin / 2 + x_min
 
     def recover_signal(self, x_s):
         th = np.arange(-int(self.T_sinc), int(self.T_sinc), self.Tt)
@@ -502,13 +541,29 @@ class Nyquist:
         t_s = np.floor(np.arange(self.T * self.sampling_rate) * (1 / self.Tt) / self.sampling_rate)
 
         N = int(self.T / self.Tt)
-        xr = np.zeros((N, x_s.shape[1], x_s.shape[2]))
-        x_s_t = np.zeros(N)
-        for ind1 in range(x_s.shape[1]):
-            for ind2 in range(x_s.shape[2]):
-                x_s_t[t_s.astype(int)] = x_s[:, ind1, ind2]
+
+        assert len(x_s.shape) < 4, 'input shape'
+
+        if len(x_s.shape) == 3:
+            xr = np.zeros((N, x_s.shape[1], x_s.shape[2]))
+            x_s_t = np.zeros(N)
+            for ind1 in range(x_s.shape[1]):
+                for ind2 in range(x_s.shape[2]):
+                    x_s_t[t_s.astype(int)] = x_s[:, ind1, ind2]
+                    x_r = np.convolve(h, np.tile(x_s_t, self.x_clones))
+                    xr[:, ind1, ind2] = x_r[H + int(self.x_clones / 2) * N:H + int(1 + self.x_clones / 2) * N]
+        elif len(x_s.shape) == 2:
+            xr = np.zeros((N, x_s.shape[1]))
+            x_s_t = np.zeros(N)
+            for ind1 in range(x_s.shape[1]):
+                x_s_t[t_s.astype(int)] = x_s[:, ind1]
                 x_r = np.convolve(h, np.tile(x_s_t, self.x_clones))
-                xr[:, ind1, ind2] = x_r[H + int(self.x_clones / 2) * N:H + int(1 + self.x_clones / 2) * N]
+                xr[:, ind1] = x_r[H + int(self.x_clones / 2) * N:H + int(1 + self.x_clones / 2) * N]
+        else:
+            x_s_t = np.zeros(N)
+            x_s_t[t_s.astype(int)] = x_s
+            x_r = np.convolve(h, np.tile(x_s_t, self.x_clones))
+            xr = x_r[H + int(self.x_clones / 2) * N:H + int(1 + self.x_clones / 2) * N]
 
         # xr = np.zeros((int(2 * self.n_samples_sinc - 1), x_s.shape[1], x_s.shape[2]))
         # for k in range(int(-self.n_samples_sinc), int(self.n_samples_sinc)):

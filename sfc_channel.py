@@ -79,8 +79,9 @@ class SFCChannel(PositionSensorNodes):
         self.resource = resource
         self.map_class = 'random'
         # self.maps = np.zeros((sensor_nodes, n_sub_symbol, resource))
+        self.sensor_nodes = sensor_nodes
         self.sensor_x_event = options.pop('sensor_x_event', [])  # np.identity(sensor_nodes)
-        # self.tx_signal = np.zeros((sensor_nodes, n_sub_symbol, resource))
+        self.N0 = options.pop('N0', 0)
 
         if self.sn_movement_type == 'gaussian':
             self.sn_mov_std = options.pop('sn_mov_std', 10)
@@ -93,18 +94,18 @@ class SFCChannel(PositionSensorNodes):
 
         self.path_loss = self.get_impulse()
 
-        self.sn_tx_power = options.pop('sn_tx_power', np.ones((sensor_nodes, 1)))
+        self.tx_amplitude = options.pop('tx_amplitude', 10 * np.ones((sensor_nodes, 1)))
 
-        if self.sn_tx_power.shape != (sensor_nodes, 1):
-            self.sn_tx_power = 10 * np.ones((sensor_nodes, 1))
+        if self.tx_amplitude.shape != (sensor_nodes, 1):
+            self.tx_amplitude = 10 * np.ones((sensor_nodes, 1))
             self.dc_threshold = options.pop('dc_threshold', 5)
 
         if options.pop('power_at_receiver', False):
-            self.sn_tx_power = self.sn_tx_power / np.abs(self.path_loss)
-        self.AWGN_std = options.pop('AWGN_std', 0.01)
+            self.tx_amplitude = self.tx_amplitude / np.abs(self.path_loss)
+        # self.AWGN_std = options.pop('AWGN_std', 0.01)
 
         # self.tx_maps()
-        self.dc_threshold = options.pop('dc_threshold', 0.5 * np.min(self.sn_tx_power * np.abs(self.path_loss)))
+        self.dc_threshold = options.pop('dc_threshold', 0.5 * np.min(np.sqrt(self.tx_amplitude * np.abs(self.path_loss))))
 
     def __call__(self, events, **options):
 
@@ -129,10 +130,10 @@ class SFCChannel(PositionSensorNodes):
                 inds_sensor = np.argwhere(self.sensor_x_event[:, ind])[:, 0]
                 for ind_sensor in inds_sensor:
                     received_signal[e:e + self.n_sub_symbol, :] = received_signal[e:e + self.n_sub_symbol, :] + self.maps[ind] * self.path_loss[
-                        ind_sensor] * self.sn_tx_power[ind_sensor]
+                        ind_sensor] * np.sqrt(self.tx_amplitude[ind_sensor])
 
-        received_signal = received_signal + np.random.normal(0, np.sqrt(0.5 * self.AWGN_std ** 2), size=received_signal.shape)
-        received_signal = received_signal + 1j * np.random.normal(0, np.sqrt(0.5 * self.AWGN_std ** 2), size=received_signal.shape)
+        received_signal = received_signal + np.random.normal(0, np.sqrt(0.5 * self.N0), size=received_signal.shape)
+        received_signal = received_signal + 1j * np.random.normal(0, np.sqrt(0.5 * self.N0), size=received_signal.shape)
         received_signal = np.abs(received_signal)
         rx_map = np.zeros(received_signal.shape)
         rx_map[np.argwhere(received_signal > self.dc_threshold)[:, 0], np.argwhere(received_signal > self.dc_threshold)[:, 1]] = 1
@@ -173,20 +174,33 @@ class SFCChannel(PositionSensorNodes):
                         x.append((i, j))
         return x
 
-    def tx_maps(self, max_stop=1000):
-        stop = 0
-        not_unique_maps = self.unique_maps()
-        while stop == 0 or (bool(not_unique_maps) and stop < max_stop):
-            for x in not_unique_maps:
-                self.maps[x[0]] = np.zeros((self.n_sub_symbol, self.resource))
-                for y in range(0, self.n_sub_symbol):
-                    self.maps[x[0], y, rnd.randint(0, self.resource - 1)] = 1
+    def tx_maps(self):
+        assert len(self.sensor_x_event) != 0, 'error in sensor_x_event map: No sensor_x_event map is set'
 
-                # np.array([rnd.randint(0, 1) for _ in range(0, self.n_sub_symbol * self.resource)]).reshape((-1, self.resource))
+        L_aux = np.arange(0, self.resource, np.floor(self.resource / self.n_sub_symbol))
+        groupSize = np.arange(np.floor(self.resource / self.n_sub_symbol)-1, self.resource, np.floor(self.resource / self.n_sub_symbol))
+        groupSize[-1] = self.resource - 1
 
-            not_unique_maps = self.unique_maps()
-            stop = stop + 1
-        assert stop < max_stop, 'error in maps: Not every ID map is unique or valid'
+        if self.maps.shape[0] > (np.floor(self.resource / self.n_sub_symbol)**(self.n_sub_symbol-1)) * (groupSize[-1] - groupSize[-2]):
+            print('Not every ID is unique')
+
+        for index in range(self.maps.shape[0]):
+            for index1 in range(self.maps.shape[1]):
+                self.maps[index, index1, int(L_aux[index1])] = 1
+            aux = 0
+            L_aux[aux] = L_aux[aux] + 1
+            while L_aux[aux] > groupSize[aux]:
+                L_aux[aux] = L_aux[aux] - np.floor(self.resource / self.n_sub_symbol)
+                aux = aux + 1
+                if aux < self.n_sub_symbol:
+                    L_aux[aux] = L_aux[aux] + 1
+                else:
+                    L_aux = np.arange(0, self.resource, np.floor(self.resource / self.n_sub_symbol))
+                    aux = 0
+
+        return self.unique_maps()
+
+        # assert stop < max_stop, 'error in maps: Not every ID map is unique or valid'
 
     def plot_sensor_nodes(self):
         plt.figure(figsize=(7, 7))
