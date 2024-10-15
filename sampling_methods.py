@@ -483,13 +483,14 @@ def filter_periodic(x, W, Tt, tau):
     # f_w = np.array([indx for indx in range(len(f)) if abs(f[indx]) <= W / 2])
 
     FX = 1j * np.zeros(int(2 * np.floor(tau * W / 2) + 1))
+    w0 = 2 * np.pi / tau
     L = int((len(FX) - 1) / 2)
     for w in range(len(FX)):
-        FX[w] = Tt * np.sum(x * np.exp(- 1j * 2 * np.pi * (w - L) * t))
+        FX[w] = Tt * np.sum(x * np.exp(- 1j * w0 * (w - L) * t))
 
     x_f = np.zeros(len(t))
     for w in range(len(FX)):
-        x_f = x_f + FX[w] * np.exp(1j * 2 * np.pi * (w - L) * t)
+        x_f = x_f + FX[w] * np.exp(1j * w0 * (w - L) * t)
 
     return np.real(x_f)
 
