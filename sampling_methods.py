@@ -496,6 +496,7 @@ def filter_periodic(x, W, Tt, tau):
 
 
 def quantize(x, x_min, x_max, bins):
+    bins = np.floor(bins)
     delta_bin = (x_max - x_min) / bins
 
     x_s = np.ceil((x - x_min) / delta_bin)
@@ -551,7 +552,7 @@ class Nyquist:
 
         assert self.bits_codeword * self.sampling_rate <= self.sensor_channel_capacity, 'bits per message exceeds the channel capacity'
 
-        self.header = options.pop('header', True)
+        self.header = options.pop('header', False)
         if self.header:
             self.bits_msg = int(self.bits_codeword - np.ceil(np.log2(sensor_nodes)))
         else:
@@ -562,7 +563,7 @@ class Nyquist:
 
     def __call__(self, x, t, **options):
         quantize = options.pop('quantize', True)
-        peak2peak = options.pop('peak2peak', 'sample')
+        # peak2peak = options.pop('peak2peak', 'sample')
 
         t_s = np.floor(np.arange(self.T * self.sampling_rate) * (1 / self.Tt) / self.sampling_rate)
         assert len(x.shape) < 4, 'input shape'

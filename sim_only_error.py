@@ -97,18 +97,6 @@ for snr_dB in snr_dB_lim:
 
             cont_tr = 0
 
-            # while (np.max(np.imag(ta)) > 0.001 or np.max(np.imag(tb)) > 0.001) and cont_tr < 100:
-            #     cont_tr = cont_tr + 1
-            #     x = p2p * np.random.rand(len(t_1p[0]), n_periods, n_sensors) - 0.5 * p2p
-            #     # x = sinc_filter(x, Tt=Tt, BW=bw_signal)
-            #     x = x * (100 - cont_tr) / 100
-            #     for ind2 in range(x.shape[2]):
-            #         for ind1 in range(x.shape[1]):
-            #             x[:, ind1, ind2] = 2 * (x[:, ind1, ind2] - np.mean(x[:, ind1, ind2])) / x.max(0)[ind1, ind2]
-            #             x[:, ind1, ind2] = filter_periodic(x[:, ind1, ind2], W, Tt, T)
-            #
-            #     ta, tb, x = s.sample(x, Tt, t=t)
-
             mean_p2p[interac] = p2p * (100 - cont_tr) / 100
 
             ta = np.real(ta)

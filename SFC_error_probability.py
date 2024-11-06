@@ -74,18 +74,6 @@ for bw_signal in bw_signal_lim:
         t = np.arange(T / Tt) * Tt - T / 2
         t_1p = np.where(np.logical_and(t >= -T / 2, t < T / 2))
 
-        # generates random signal and filters them
-        x = p2p * np.random.rand(len(t_1p[0]), n_periods, n_sensors) - 0.5 * p2p
-        # x = sinc_filter(x, Tt=Tt, BW=bw_signal)
-        for ind2 in range(x.shape[2]):
-            for ind1 in range(x.shape[1]):
-                x[:, ind1, ind2] = 2 * (x[:, ind1, ind2] - np.mean(x[:, ind1, ind2])) / x.max(0)[ind1, ind2]
-                x[:, ind1, ind2] = filter_periodic(x[:, ind1, ind2], W, Tt, T)
-        # x[:, :, 0] = x_s1
-
-        # Temperature = pd.read_csv("Data/Temperature_oct_22_lapp.csv", dayfirst=True, sep=",",
-        #                           header=0, decimal=b".", index_col=0,
-        #                           parse_dates=[[0, 1, 2, 3]], usecols=[0, 1, 2, 3, 5])
         for interac in range(interactions):
             s = CPSample(T=T, harmonics=NN, n_sub_symbol=n_sub_symbol, resource=n_resource, sensor_nodes=n_sensors, bandwidth=bw_channel,
                          detect_errors=detect_errors)
@@ -98,19 +86,25 @@ for bw_signal in bw_signal_lim:
 
             Mc = max([np.floor(N_sample.bins ** ((np.pi * W) / (np.pi * W - xi * w0))), 1])
             # Mc = max([np.floor((1 + 10 ** (snr_dB / 10)) ** (T * bw_channel / (2 * NN * n_sensors))), 1])
-            ta, tb, x = s.sample(x, Tt, t=t)
-            cont_tr = 0
 
+            x = np.random.rand(len(t_1p[0]), n_periods, n_sensors) - 0.5
+            # x = sinc_filter(x, Tt=Tt, BW=bw_signal)
+            for ind2 in range(x.shape[2]):
+                for ind1 in range(x.shape[1]):
+                    x[:, ind1, ind2] = x[:, ind1, ind2] - np.mean(x[:, ind1, ind2])
+                    x[:, ind1, ind2] = p2p * (filter_periodic(x[:, ind1, ind2], W, Tt, T)) / (x[:, ind1, ind2].max() - x[:, ind1, ind2].min())
+
+            cont_tr = 0
             while (np.max(np.imag(ta)) > 0.001 or np.max(np.imag(tb)) > 0.001) and cont_tr < 100:
                 cont_tr = cont_tr + 1
-                x = p2p * np.random.rand(len(t_1p[0]), n_periods, n_sensors) - 0.5 * p2p
+                x = np.random.rand(len(t_1p[0]), n_periods, n_sensors) - 0.5
                 # x = sinc_filter(x, Tt=Tt, BW=bw_signal)
-                x = x * (100 - cont_tr) / 100
                 for ind2 in range(x.shape[2]):
                     for ind1 in range(x.shape[1]):
-                        x[:, ind1, ind2] = 2 * (x[:, ind1, ind2] - np.mean(x[:, ind1, ind2])) / x.max(0)[ind1, ind2]
-                        x[:, ind1, ind2] = filter_periodic(x[:, ind1, ind2], W, Tt, T)
+                        x[:, ind1, ind2] = x[:, ind1, ind2] - np.mean(x[:, ind1, ind2])
+                        x[:, ind1, ind2] = p2p * (filter_periodic(x[:, ind1, ind2], W, Tt, T)) / (x[:, ind1, ind2].max() - x[:, ind1, ind2].min())
 
+                x = x * (100 - cont_tr) / 100
                 ta, tb, x = s.sample(x, Tt, t=t)
 
             mean_p2p[interac] = p2p * (100 - cont_tr) / 100
