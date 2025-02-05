@@ -37,7 +37,7 @@ for bw_signal in bw_signal_lim:
     # results = np.zeros((len(bw_channel_lim), 17))
     indx_res = 0
     for p2p in p2p_lim:
-    # for bw_channel in bw_channel_lim:
+        # for bw_channel in bw_channel_lim:
         MSE_rbcp = np.zeros(interactions)
         MSE = np.zeros(interactions)
         mean_p2p = np.zeros(interactions)
