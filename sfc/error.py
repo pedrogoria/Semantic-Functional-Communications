@@ -1,8 +1,7 @@
 # import numpy as np
-import numpy as np
 
-import sfc_channel as sfc_c
-from sampling_methods import *
+from sfc import channel as sfc_c
+from sfc.sampling import *
 
 # import math
 

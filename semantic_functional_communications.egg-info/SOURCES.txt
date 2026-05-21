@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+semantic_functional_communications.egg-info/PKG-INFO
+semantic_functional_communications.egg-info/SOURCES.txt
+semantic_functional_communications.egg-info/dependency_links.txt
+semantic_functional_communications.egg-info/requires.txt
+semantic_functional_communications.egg-info/top_level.txt
+sfc/__init__.py
+sfc/channel.py
+sfc/config.py
+sfc/error.py
+sfc/paths.py
+sfc/protocols.py
+sfc/sampling.py

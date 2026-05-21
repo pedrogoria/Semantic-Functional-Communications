@@ -1,0 +1,10 @@
+# ------------------------------------------------------------
+# Experiment outputs (do not commit generated results)
+# ------------------------------------------------------------
+data/results/
+data/results/**
+
+# Ignore all local data (datasets, outputs, results)
+data/*
+!data/.gitkeep
+!data/README.md

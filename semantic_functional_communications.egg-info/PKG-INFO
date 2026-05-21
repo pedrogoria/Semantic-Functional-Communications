@@ -1,0 +1,13 @@
+Metadata-Version: 2.1
+Name: semantic-functional-communications
+Version: 0.1.0
+Summary: Semantic-Functional Communications simulations
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy<2.0
+Requires-Dist: scipy<1.11
+Requires-Dist: matplotlib<3.8
+Requires-Dist: pyyaml
+
+# Semantic-Functional-Communications
+This repository is dedicated to sharing scripts to simulate Semantic-Functional-Communications.
