@@ -1,0 +1,66 @@
+# ============================================================
+# Configuration file for "error-only" simulation
+# This file defines all parameters used in the experiment,
+# including sweep ranges and signal properties.
+# ============================================================
+
+seed: 42
+
+simulation:
+  # Number of signal periods considered in the simulation
+  n_periods: 1
+
+  # Number of sensor nodes (each monitors one signal)
+  n_sensors: 8
+
+
+sfc_channel:
+  # Number of sub-bands allocated to the SF channel
+  n_resource: 12
+
+  # Length (rows) of the SF matrix
+  n_sub_symbol: 4
+
+
+traditional:
+  # SNR range (in dB)
+  # Typically used in loops to test different noise levels
+  snr_dB_lim: [-10, -20]
+
+  # Average transmission power per sensor (in Watts)
+  average_power: 1
+
+
+sweep:
+  bw_channel:
+    # Start value (inclusive)
+    start: 10000
+
+    # Stop value (exclusive, same behavior as np.arange)
+    stop: 110000
+
+    # Step size
+    step: 10000
+
+
+signal:
+  # Signal bandwidth
+  bw_signal: 3
+
+  # Time window (period)
+  T: 1
+
+  # Number of harmonics (DFT terms)
+  NN: 3
+
+  # Time resolution
+  Tt: 0.01
+
+  # Peak-to-peak scaling factor
+  p2p: 4
+
+
+sampling:
+  # Sampling factor (sampling_rate = factor * W)
+  # In original code: sampling_rate = 2 * W
+  factor: 2.0

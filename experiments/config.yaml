@@ -1,0 +1,7 @@
+seed: 42
+
+channel:
+  noise_std: 0.1
+
+simulation:
+  n_samples: 1000

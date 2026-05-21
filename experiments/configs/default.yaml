@@ -1,0 +1,25 @@
+seed: 42
+
+simulation:
+  bw_channel: 2400
+  n_periods: 1
+  n_sensors: 2
+
+sfc_channel:
+  n_resource: 12
+  n_sub_symbol: 4
+  detect_errors: true
+
+traditional:
+  snr_dB: -15
+  average_power: 1
+
+signal:
+  bw_signal: 5
+  T: 1
+  NN: 5
+  Tt: 0.01
+  p2p: 4
+
+sampling:
+  nyquist_factor: 1.1   # sampling_rate = nyquist_factor * W
