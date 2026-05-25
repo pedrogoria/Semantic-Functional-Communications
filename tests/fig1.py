@@ -30,7 +30,14 @@ import sys
 import numpy as np
 
 # ---------------------------------------------------------------------
-# Path handling for PyCharm runfile() behavior
+# Trusted backend imports
+# ---------------------------------------------------------------------
+
+from sfc.core.samplers import RbCPSampler, RbCPConfig
+from sfc.sampling import filter_periodic, quantize_ta_tb
+
+# ---------------------------------------------------------------------
+# Path handling for PyCharm run file() behavior
 # This assumes:
 #   <repo-root>/tests/fig1.py
 #   <repo-root>/sfc/...
@@ -42,13 +49,6 @@ SFC_DIR = os.path.join(ROOT_DIR, "sfc")
 
 sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, SFC_DIR)
-
-# ---------------------------------------------------------------------
-# Trusted backend imports
-# ---------------------------------------------------------------------
-
-from sfc.core.samplers import RbCPSampler, RbCPConfig
-from sfc.sampling import filter_periodic, quantize_ta_tb
 
 # ---------------------------------------------------------------------
 # Output
@@ -67,11 +67,11 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, "fig1.dat")
 # ---------------------------------------------------------------------
 
 def compute_Q(M):
-    return (M / (2.0 * np.pi)) * np.sin(np.pi / M)
+    return (M / 2 / np.pi) * np.sin(np.pi / M)
 
 
 def mse_upper_bound(N, Q):
-    return 4.0 * N * (0.5 - Q) * (1.5 - Q)
+    return 4 * N * (0.5 - Q) * (3 / 2 - Q)
 
 
 def mse_star(N, Q):
@@ -128,7 +128,7 @@ def generate_signal_one_period(t, Tt, tau, W_hz, p2p_target, rng):
     x_max = float(np.max(x))
     p2p = x_max - x_min
 
-    if p2p > p2p_target:
+    if p2p_target > 0:
         x = x * (p2p_target / p2p)
 
     return x
@@ -141,11 +141,11 @@ def generate_signal_one_period(t, Tt, tau, W_hz, p2p_target, rng):
 def main():
     # Figure 1 parameter sweep
     N_LIST = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-    M_LIST = [4, 8, 16]
+    M_LIST = [5, 9, 17]
 
     # Monte Carlo controls
     SEED = 47
-    TRIALS = 2000  # Increase for tighter markers if needed
+    TRIALS = 1000  # Increase for tighter markers if needed
 
     # Signal/window configuration
     tau = 1.0
@@ -153,7 +153,7 @@ def main():
     t = np.arange(-tau / 2.0, tau / 2.0, Tt)
 
     # Manuscript states p2p is 2 V unless otherwise stated
-    p2p_target = 2.0
+    p2p_target = 10.0
 
     rng = np.random.default_rng(SEED)
 
@@ -207,11 +207,11 @@ def main():
                     Tt,
                     t=t,
                     normalize=True,  # enforce "real phase" condition when needed
-                    norm=3.9  # same typical value used in trusted code
+                    norm=3.99  # same typical value used in trusted code
                 )
 
                 # 2) Quantize ta/tb using the trusted quantizer from sampling.py
-                ta_q, tb_q = quantize_ta_tb(ta, tb, sampler.w0, M_rbcp)
+                ta_q, tb_q = quantize_ta_tb(ta, tb, sampler.w0, M_rbcp, 10/21, 11/21)
 
                 # 3) Reconstruct using trusted recover_signal() via the sampler wrapper
                 xr = sampler.recover(ta_q, tb_q, t)

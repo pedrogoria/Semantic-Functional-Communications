@@ -157,16 +157,17 @@ def main():
 
     # Match typical axis limits seen in the manuscript figure
     # You can adjust these if your generated values differ.
-    ax.set_xlim(min(data["N"]) - 0.5, max(data["N"]) + 0.5)
+    ax.set_xlim(2, 20)
+    ax.set_ylim(1e-2, 5)
 
     # If MSE values are available, define sensible y-limits
-    y_all = np.concatenate([data["MSE_Monte_Carlo"], data["MSE_UPPER"], data["MSE_STAR"]])
-    y_all = y_all[np.isfinite(y_all)]
-    y_all = y_all[y_all > 0]
-    if y_all.size > 0:
-        ymin = max(np.min(y_all) * 0.8, 1e-6)
-        ymax = max(np.max(y_all) * 1.2, ymin * 10)
-        ax.set_ylim(ymin, ymax)
+    # y_all = np.concatenate([data["MSE_Monte_Carlo"], data["MSE_UPPER"], data["MSE_STAR"]])
+    # y_all = y_all[np.isfinite(y_all)]
+    # y_all = y_all[y_all > 0]
+    # if y_all.size > 0:
+    #     ymin = max(np.min(y_all) * 0.8, 1e-6)
+    #     ymax = max(np.max(y_all) * 1.2, ymin * 10)
+    #     ax.set_ylim(ymin, ymax)
 
     # Build legend similar to the manuscript:
     # - Colors encode M_RbCP values

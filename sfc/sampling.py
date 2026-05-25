@@ -304,7 +304,7 @@ class CPSample:
                 for ii in range(x.shape[1]):
                     aux = max(an[ii, :, iii] ** 2 + bn[ii, :, iii] ** 2)
                     while aux >= 4:
-                        print('normalizing')
+                        # print('normalizing')
                         x[:, ii, iii] = x[:, ii, iii] * np.sqrt(nor_x / aux)
                         for i in range(0, self.harmonics + 1):
                             FX[ii, i, iii] = Tt * np.sum(np.tile(x[:, ii, iii], self.dft_signal_periods) * np.exp(-1j * i * self.w0 * t)) / self.T
@@ -507,8 +507,8 @@ def quantize(x, x_min, x_max, bins, poss=1/2):
     return x_s
 
 
-def quantize_ta_tb(ta, tb, w0, bins):
-    bins = bins + 1
+def quantize_ta_tb(ta, tb, w0, bins, poss_ta=1/2, poss_tb=1/2):
+    bins = bins
     n = np.arange(ta.shape[1]) + 1
     x_min = - np.pi / (n * w0)
     x_max = np.pi / (n * w0)
@@ -518,15 +518,15 @@ def quantize_ta_tb(ta, tb, w0, bins):
     if len(ta.shape) == 3:
         for indx0 in range(ta.shape[0]):
             for indx2 in range(ta.shape[2]):
-                ta_q[indx0, :, indx2] = quantize(ta[indx0, :, indx2], x_min, x_max, bins, 9/16)
-                tb_q[indx0, :, indx2] = quantize(tb[indx0, :, indx2], x_min, x_max, bins, 7/16)
+                ta_q[indx0, :, indx2] = quantize(ta[indx0, :, indx2], x_min, x_max, bins, poss_ta)
+                tb_q[indx0, :, indx2] = quantize(tb[indx0, :, indx2], x_min, x_max, bins, poss_tb)
     elif len(ta.shape) == 2:
         for indx0 in range(ta.shape[0]):
-            ta_q[indx0, :] = quantize(ta[indx0, :], x_min, x_max, bins, 2/4)
-            tb_q[indx0, :] = quantize(tb[indx0, :], x_min, x_max, bins, 2/4)
+            ta_q[indx0, :] = quantize(ta[indx0, :], x_min, x_max, bins, poss_ta)
+            tb_q[indx0, :] = quantize(tb[indx0, :], x_min, x_max, bins, poss_tb)
     else:
-        ta_q = quantize(ta, x_min, x_max, bins, 2/4)
-        tb_q = quantize(tb, x_min, x_max, bins, 2/4)
+        ta_q = quantize(ta, x_min, x_max, bins, poss_ta)
+        tb_q = quantize(tb, x_min, x_max, bins, poss_tb)
 
     ta_q[np.where(ta == 9999)] = 9999
     tb_q[np.where(tb == 9999)] = 9999
