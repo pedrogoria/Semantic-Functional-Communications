@@ -1,40 +1,71 @@
 # sfc/io.py
 
-from pathlib import Path
-import numpy as np
+"""
+I/O utilities for saving results in a reproducible and organized way.
+"""
+
+from __future__ import annotations
+
 import datetime
+from pathlib import Path
+from typing import Optional, Union, Dict, Any
+
+import numpy as np
 
 from sfc.paths import RESULTS_DIR
 
 
-def save_results(results, prefix="results"):
+def save_dat_with_metadata(
+        data: np.ndarray,
+        *,
+        experiment: str,
+        config: Optional[Dict[str, Any]] = None,
+        header: str = "",
+        fmt: str = "%.8f",
+) -> Path:
     """
-    Save results matrix to the results directory with a timestamp.
+    Save a .dat file and a metadata text file in:
+        data/results/<experiment>/
 
     Parameters
     ----------
-    results : np.ndarray
-        Data to be saved
-    prefix : str
-        Prefix for the filename
+    data : np.ndarray
+        Array to save.
+    experiment : str
+        Experiment folder name.
+    config : dict, optional
+        Configuration dictionary to be saved as metadata (string dump).
+    header : str
+        Header string for the .dat file.
+    fmt : str
+        Numeric format for np.savetxt.
 
     Returns
     -------
-    file_path : Path
-        Full path to saved file
+    Path
+        Path to the saved .dat file.
     """
+    exp_dir = RESULTS_DIR / experiment
+    exp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create timestamp
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    data_file = exp_dir / f"{experiment}_{timestamp}.dat"
+    meta_file = exp_dir / f"{experiment}_{timestamp}_meta.txt"
 
-    # Build filename
-    file_name = f"{prefix}_{timestamp}.dat"
+    np.savetxt(
+        data_file,
+        data,
+        fmt=fmt,
+        delimiter="\t",
+        header=header,
+        comments=""
+    )
 
-    file_path = RESULTS_DIR / file_name
+    if config is not None:
+        meta_file.write_text(str(config), encoding="utf-8")
 
-    # Save file
-    np.savetxt(file_path, results, delimiter="\t")
+    print(f"[INFO] Results saved to: {data_file}")
+    if config is not None:
+        print(f"[INFO] Metadata saved to: {meta_file}")
 
-    print(f"[INFO] Results saved to: {file_path}")
-
-    return file_path
+    return data_file

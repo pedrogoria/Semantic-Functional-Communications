@@ -1,21 +1,26 @@
 """
 fig1.py
 
-Figure 1 Monte Carlo reproduction using the manuscript signal-generation procedure.
+Figure 1 reproduction using the trusted sampling backend (sfc/sampling.py)
+via the PHY-facing wrapper class RbCPSampler (sfc/core/samplers.py).
 
-Monte Carlo signal generation (as described in the manuscript):
-- X' ~ Uniform(-1, 1)
-- X is a vector of i.i.d. realizations of X'
-- x(t) is obtained by low-pass, flat-band FIR filtering with cutoff W/2
-- The peak-to-peak value is set to 4 V unless additional scaling is required
-  to satisfy the real-phase condition (Lemma 1)
-- Channel is assumed error-free (RbCP baseline), i.e., only quantization distortion
+What this script does (consistent with the manuscript Monte Carlo description):
+1) Generate i.i.d. samples X' ~ Uniform(-1, 1)
+2) Build a discrete-time vector X with those samples
+3) Create a band-limited periodic signal by filtering X with a low-pass method
+   with cutoff W/2 (we use the trusted filter_periodic() provided by sfc/sampling.py)
+4) (If needed) normalize the signal to satisfy the "real phase" condition
+   required by the RbCP mapping (handled by CPSample.calc_an_bn_dft(normalize=True))
+5) Compute (ta, tb) using CPSample (RbCP mapping)
+6) Quantize (ta, tb) using the trusted quantize_ta_tb() function
+7) Reconstruct x_hat(t) from quantized (ta, tb) and compute MSE
+8) Save data/results/fig1.dat for plotting
 
-This script writes:
-    data/results/fig1.dat
+Theoretical references computed in this script:
+- Upper bound from Lemma 4
+- MSE* from Proposition 2
 
-Columns:
-    N, M_RbCP, MSE_MC, MSE_UPPER, MSE_STAR
+Both formulas appear in the manuscript. [1](https://github.com/pedrogoria/Semantic-Functional-Communications)
 
 Author: SFC Project
 """
@@ -24,104 +29,215 @@ import os
 import sys
 import numpy as np
 
+# ---------------------------------------------------------------------
+# Path handling for PyCharm runfile() behavior
+# This assumes:
+#   <repo-root>/tests/fig1.py
+#   <repo-root>/sfc/...
+# ---------------------------------------------------------------------
+
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
-SRC_DIR = os.path.join(ROOT_DIR, "sfc")
+SFC_DIR = os.path.join(ROOT_DIR, "sfc")
 
 sys.path.insert(0, ROOT_DIR)
-sys.path.insert(0, SRC_DIR)
+sys.path.insert(0, SFC_DIR)
 
-from sfc.core.rbcp import compute_Q, mse_upper_bound, mse_star
-from sfc.core.rbcp_sim import (
-    generate_random_bandlimited_signal,
-    enforce_lemma1_scaling,
-    rbcp_encode_decode_mse_from_signal
-)
+# ---------------------------------------------------------------------
+# Trusted backend imports
+# ---------------------------------------------------------------------
 
+from sfc.core.samplers import RbCPSampler, RbCPConfig
+from sfc.sampling import filter_periodic, quantize_ta_tb
+
+# ---------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------
+
+OUTPUT_DIR = os.path.join(ROOT_DIR, "data", "results")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "fig1.dat")
+
+
+# ---------------------------------------------------------------------
+# Theory helpers (from manuscript equations)
+# Q = (M/(2*pi))*sin(pi/M)
+# Upper bound: MSE/N <= 4*(1/2 - Q)*(3/2 - Q)  ->  MSE_upper = N * that
+# MSE* = 2N*(1 - 2Q)
+# ---------------------------------------------------------------------
+
+def compute_Q(M):
+    return (M / (2.0 * np.pi)) * np.sin(np.pi / M)
+
+
+def mse_upper_bound(N, Q):
+    return 4.0 * N * (0.5 - Q) * (1.5 - Q)
+
+
+def mse_star(N, Q):
+    return 2.0 * N * (1.0 - 2.0 * Q)
+
+
+# ---------------------------------------------------------------------
+# Monte Carlo signal generation (trusted style)
+# ---------------------------------------------------------------------
+
+def generate_signal_one_period(t, Tt, tau, W_hz, p2p_target, rng):
+    """
+    Generate one-period signal using the manuscript approach:
+    - X' ~ Uniform(-1,1)
+    - filter with low-pass and flat-band behavior (trusted filter_periodic)
+    - enforce mean-zero
+    - scale to a target peak-to-peak amplitude
+
+    Parameters
+    ----------
+    t : np.ndarray
+        Time vector over one period.
+    Tt : float
+        Time step.
+    tau : float
+        Period length.
+    W_hz : float
+        Bandwidth (Hz).
+    p2p_target : float
+        Target peak-to-peak amplitude.
+    rng : np.random.Generator
+        Random generator.
+
+    Returns
+    -------
+    x : np.ndarray
+        Generated signal (len(t),).
+    """
+    # Start with i.i.d. Uniform(-1, 1)
+    x = rng.normal(0.0, 20.0, size=len(t))
+
+    # Enforce mean-zero (paper assumes zero mean in derivations)
+    x = x - np.mean(x)
+
+    # Band-limit it using the trusted periodic filtering routine.
+    # This routine expects W as a bandwidth parameter and returns a real periodic signal.
+    x = filter_periodic(x, W_hz, Tt, tau)
+
+    # Enforce mean-zero again after filtering
+    x = x - np.mean(x)
+
+    # Scale to the desired peak-to-peak when possible
+    x_min = float(np.min(x))
+    x_max = float(np.max(x))
+    p2p = x_max - x_min
+
+    if p2p > p2p_target:
+        x = x * (p2p_target / p2p)
+
+    return x
+
+
+# ---------------------------------------------------------------------
+# Main execution
+# ---------------------------------------------------------------------
 
 def main():
-    out_dir = os.path.join(ROOT_DIR, "data", "results")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "fig1.dat")
-
-    # Figure 1 axes and parameters (as in the manuscript)
-    N_list = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-    M_list = [4, 8, 16]
+    # Figure 1 parameter sweep
+    N_LIST = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+    M_LIST = [4, 8, 16]
 
     # Monte Carlo controls
-    seed = 12345
-    trials = 2000
+    SEED = 47
+    TRIALS = 2000  # Increase for tighter markers if needed
 
-    # Window and sampling
+    # Signal/window configuration
     tau = 1.0
-    dt = 0.001
-    t = np.arange(-tau / 2.0, tau / 2.0, dt)
-    w0 = 2.0 * np.pi / tau
+    Tt = 0.001
+    t = np.arange(-tau / 2.0, tau / 2.0, Tt)
 
-    # Signal generation settings
-    p2p_target = 4.0
-    fir_taps = 201
-    fir_window = "hann"
+    # Manuscript states p2p is 2 V unless otherwise stated
+    p2p_target = 2.0
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(SEED)
 
     results = []
 
-    print("[INFO] Running Figure 1 Monte Carlo with FIR low-pass signal generation.")
-    print("[INFO] Output:", out_path)
+    print("[INFO] Figure 1 simulation using RbCPSampler + trusted sampling.py")
+    print("[INFO] Output file:", OUTPUT_FILE)
+    print("[INFO] Trials:", TRIALS)
 
-    for M in M_list:
-        Q = compute_Q(M)
-        print(f"[INFO] Processing M_RbCP = {M}")
+    for M_rbcp in M_LIST:
+        Q = compute_Q(M_rbcp)
+        print("[INFO] Processing M_RbCP =", M_rbcp)
 
-        for N in N_list:
-            mse_acc = []
-
-            # Bandwidth selection consistent with N = floor(pi W / w0)
-            # Here we choose W so that floor(pi W / w0) == N.
-            # With w0 = 2*pi/tau -> pi W / w0 = (W*tau)/2
-            # A robust choice is W = (2N)/tau (so that (W*tau)/2 = N exactly).
+        for N in N_LIST:
+            # Choose W so that N = floor(pi W / w0) holds exactly.
+            # With w0 = 2*pi/tau -> pi W / w0 = (W*tau)/2.
+            # Setting W = 2N/tau makes (W*tau)/2 = N exactly.
             W_hz = (2.0 * N) / tau
 
-            for _ in range(trials):
-                # Generate random band-limited signal x(t)
-                x = generate_random_bandlimited_signal(
-                    t=t,
-                    W_hz=W_hz,
-                    p2p_target=p2p_target,
-                    fir_taps=fir_taps,
-                    window=fir_window,
-                    rng=rng
+            # Instantiate sampler for this N (harmonics) configuration.
+            # We do not need SFC parameters here; only the sampling/representation.
+            cfg = RbCPConfig(
+                T=tau,
+                harmonics=N,
+                sensor_nodes=1,
+                # The event-mapping parameters are still part of CPSample,
+                # but they do not affect ta/tb computation if we only call sample().
+                n_sub_symbol=6,
+                resource=7,
+                bandwidth=100.0,
+                detect_errors=False,
+                threshold_harmonics=0.001,
+                dft_signal_periods=1
+            )
+            sampler = RbCPSampler(cfg)
+
+            mse_acc = []
+
+            for _ in range(TRIALS):
+                # 1) Generate one signal period
+                x = generate_signal_one_period(
+                    t=t, Tt=Tt, tau=tau, W_hz=W_hz,
+                    p2p_target=p2p_target, rng=rng
                 )
 
-                # Enforce Lemma 1 condition if needed by scaling down
-                x_scaled, _scale = enforce_lemma1_scaling(x, t, w0, N)
-
-                # Full encode/decode MSE (channel error-free)
-                mse_val = rbcp_encode_decode_mse_from_signal(
-                    x=x_scaled,
+                # CPSample expects shape (time,) or (time, periods) etc.
+                # We keep one period and one sensor.
+                # sample() will return ta,tb as (periods, harmonics, sensors).
+                ta, tb, x_used = sampler.sample(
+                    x,
+                    Tt,
                     t=t,
-                    w0=w0,
-                    N_harmonics=N,
-                    M_rbcp=M
+                    normalize=True,  # enforce "real phase" condition when needed
+                    norm=3.9  # same typical value used in trusted code
                 )
 
+                # 2) Quantize ta/tb using the trusted quantizer from sampling.py
+                ta_q, tb_q = quantize_ta_tb(ta, tb, sampler.w0, M_rbcp)
+
+                # 3) Reconstruct using trusted recover_signal() via the sampler wrapper
+                xr = sampler.recover(ta_q, tb_q, t)
+
+                # xr shape: (len(t), periods, sensors) -> pick first period, first sensor
+                x_hat = xr[:, 0, 0]
+
+                # 4) Compute MSE over the period (same units as signal)
+                mse_val = float(np.mean((x_used[:, 0, 0] - x_hat) ** 2))
                 mse_acc.append(mse_val)
 
             mse_mc = float(np.mean(mse_acc))
 
-            # Theoretical references for Figure 1
+            # Theoretical curves from manuscript
             mse_up = mse_upper_bound(N, Q)
             mse_st = mse_star(N, Q)
 
-            results.append([N, M, mse_mc, mse_up, mse_st])
+            results.append([N, M_rbcp, mse_mc, mse_up, mse_st])
 
-    data = np.array(results, dtype=float)
+            print(f"[INFO] N={N:2d}  M={M_rbcp:2d}  MSE_Monte_Carlo={mse_mc:.6e}  MSE*={mse_st:.6e}  UB={mse_up:.6e}")
 
-    header = "N\tM_RbCP\tMSE_MC\tMSE_UPPER\tMSE_STAR"
+    data = np.asarray(results, dtype=float)
+    header = "N\tM_RbCP\tMSE_Monte_Carlo\tMSE_UPPER\tMSE_STAR"
 
     np.savetxt(
-        out_path,
+        OUTPUT_FILE,
         data,
         delimiter="\t",
         header=header,
@@ -129,9 +245,8 @@ def main():
         fmt="%.10e"
     )
 
-    print("[INFO] Done.")
-    print("[INFO] Preview (first 5 rows):")
-    print(data[:5])
+    print("[INFO] Done. Saved:", OUTPUT_FILE)
+    print("[INFO] Preview:\n", data[:5])
 
 
 if __name__ == "__main__":

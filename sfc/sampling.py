@@ -495,19 +495,20 @@ def filter_periodic(x, W, Tt, tau):
     return np.real(x_f)
 
 
-def quantize(x, x_min, x_max, bins):
+def quantize(x, x_min, x_max, bins, poss=1/2):
     bins = np.floor(bins)
     delta_bin = (x_max - x_min) / bins
 
     x_s = np.ceil((x - x_min) / delta_bin)
     x_s[np.where(x_s > bins)] = bins
     x_s[np.where(x_s <= 0)] = 1
-    x_s = x_s * delta_bin - delta_bin / 2 + x_min
+    x_s = x_s * delta_bin - delta_bin * poss + x_min
 
     return x_s
 
 
 def quantize_ta_tb(ta, tb, w0, bins):
+    bins = bins + 1
     n = np.arange(ta.shape[1]) + 1
     x_min = - np.pi / (n * w0)
     x_max = np.pi / (n * w0)
@@ -517,15 +518,15 @@ def quantize_ta_tb(ta, tb, w0, bins):
     if len(ta.shape) == 3:
         for indx0 in range(ta.shape[0]):
             for indx2 in range(ta.shape[2]):
-                ta_q[indx0, :, indx2] = quantize(ta[indx0, :, indx2], x_min, x_max, bins)
-                tb_q[indx0, :, indx2] = quantize(tb[indx0, :, indx2], x_min, x_max, bins)
+                ta_q[indx0, :, indx2] = quantize(ta[indx0, :, indx2], x_min, x_max, bins, 9/16)
+                tb_q[indx0, :, indx2] = quantize(tb[indx0, :, indx2], x_min, x_max, bins, 7/16)
     elif len(ta.shape) == 2:
         for indx0 in range(ta.shape[0]):
-            ta_q[indx0, :] = quantize(ta[indx0, :], x_min, x_max, bins)
-            tb_q[indx0, :] = quantize(tb[indx0, :], x_min, x_max, bins)
+            ta_q[indx0, :] = quantize(ta[indx0, :], x_min, x_max, bins, 2/4)
+            tb_q[indx0, :] = quantize(tb[indx0, :], x_min, x_max, bins, 2/4)
     else:
-        ta_q = quantize(ta, x_min, x_max, bins)
-        tb_q = quantize(tb, x_min, x_max, bins)
+        ta_q = quantize(ta, x_min, x_max, bins, 2/4)
+        tb_q = quantize(tb, x_min, x_max, bins, 2/4)
 
     ta_q[np.where(ta == 9999)] = 9999
     tb_q[np.where(tb == 9999)] = 9999

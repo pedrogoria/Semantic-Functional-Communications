@@ -1,0 +1,17 @@
+# ==========================================================
+# Figure 1 Configuration File
+# ==========================================================
+
+experiment: fig1
+
+output:
+  results_dir: data/results
+  filename: fig1.dat
+
+reproducibility:
+  seed: 123456
+  trials: 2000
+
+parameters:
+  N_list: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+  M_RbCP_list: [4, 8, 16]
