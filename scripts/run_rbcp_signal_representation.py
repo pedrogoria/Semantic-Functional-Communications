@@ -1,13 +1,18 @@
 """
 scripts/run_rbcp_signal_representation.py
 
-Runner for RbCP signal representation vs Nyquist benchmark.
+Runner for RbCP signal representation vs Nyquist benchmark vs SFC.
 
-This experiment:
-- uses physical system parameters (S, B, R, SNR_dB, W, tau)
+This figure:
+- uses physical system parameters (S, P, B, R, L, SNR_dB, W, tau)
 - derives RbCP bins via channel capacity
 - computes Nyquist benchmark via Shannon limit
-- produces visual comparison plots
+- propagates the representative signal through the SFC stack
+- plots:
+    - band-limited signal
+    - RbCP reconstruction
+    - SFC reconstruction
+    - Nyquist benchmark reconstruction
 
 Usage (Python Console - PyCharm):
 --------------------------------
@@ -47,7 +52,6 @@ def load_config(path):
 # =============================================================================
 
 def prepare_output_dir(cfg):
-
     output_cfg = cfg["output"]
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -81,18 +85,29 @@ def get_git_commit():
 # =============================================================================
 
 def generate_plot(data, cfg, output_dir, timestamp):
+    """
+    Plot:
+    - filtered signal
+    - zero-mean signal
+    - RbCP reconstruction
+    - SFC reconstruction
+    - Nyquist benchmark reconstruction
+
+    and a second error plot.
+    """
 
     t = data["t"]
     x_filtered = data["x_filtered"]
     x_zero_mean = data["x_zero_mean"]
     x_rbcp = data["x_rbcp"]
+    x_sfc = data["x_sfc"]
     x_benchmark = data["x_benchmark"]
 
     plot_cfg = cfg["plot"]
 
-    # ------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # MAIN PLOT
-    # ------------------------------------------------------------
+    # -------------------------------------------------------------------------
     plt.figure(figsize=(10, 5))
 
     plt.plot(
@@ -117,6 +132,13 @@ def generate_plot(data, cfg, output_dir, timestamp):
     )
 
     plt.plot(
+        t, x_sfc,
+        plot_cfg["styles"].get("sfc", "-."),
+        label=plot_cfg["labels"].get("sfc", "SFC reconstruction"),
+        linewidth=2
+    )
+
+    plt.plot(
         t, x_benchmark,
         plot_cfg["styles"]["benchmark"],
         label=plot_cfg["labels"]["benchmark"],
@@ -132,9 +154,8 @@ def generate_plot(data, cfg, output_dir, timestamp):
     if plot_cfg.get("legend", False):
         plt.legend()
 
-    plt.title("RbCP vs Nyquist Benchmark")
+    plt.title("RbCP vs SFC vs Nyquist Benchmark")
 
-    # Save
     for fmt in cfg["output"]["formats"]["plot"]:
         plt.savefig(
             os.path.join(output_dir, f"rbcp_representation_{timestamp}.{fmt}"),
@@ -144,15 +165,17 @@ def generate_plot(data, cfg, output_dir, timestamp):
     plt.show(block=True)
     plt.close()
 
-    # ------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # ERROR PLOT
-    # ------------------------------------------------------------
+    # -------------------------------------------------------------------------
     plt.figure(figsize=(10, 4))
 
     err_rbcp = x_zero_mean - x_rbcp
+    err_sfc = x_zero_mean - x_sfc
     err_bench = x_zero_mean - x_benchmark
 
     plt.plot(t, err_rbcp, label="RbCP error", linewidth=2)
+    plt.plot(t, err_sfc, label="SFC error", linewidth=2)
     plt.plot(t, err_bench, label="Benchmark error", linewidth=2)
 
     plt.xlabel(r"$t$")
@@ -173,14 +196,16 @@ def generate_plot(data, cfg, output_dir, timestamp):
     plt.show(block=True)
     plt.close()
 
-    # ------------------------------------------------------------
-    # MSE PRINT (important diagnostic)
-    # ------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # MSE PRINT
+    # -------------------------------------------------------------------------
     mse_rbcp = np.mean(err_rbcp**2)
+    mse_sfc = np.mean(err_sfc**2)
     mse_bench = np.mean(err_bench**2)
 
     print("\n[RESULTS]")
     print(f"MSE RbCP       = {mse_rbcp:.6e}")
+    print(f"MSE SFC        = {mse_sfc:.6e}")
     print(f"MSE Benchmark  = {mse_bench:.6e}")
 
 
@@ -189,7 +214,6 @@ def generate_plot(data, cfg, output_dir, timestamp):
 # =============================================================================
 
 def save_metadata(cfg, output_dir, timestamp, config_path):
-
     meta_path = os.path.join(output_dir, f"metadata_{timestamp}.txt")
 
     with open(meta_path, "w") as f:
@@ -210,7 +234,6 @@ def copy_config_file(config_path, output_dir):
 # =============================================================================
 
 def run_rbcp_signal_representation(config_path):
-
     cfg = load_config(config_path)
 
     output_dir, timestamp = prepare_output_dir(cfg)
@@ -218,19 +241,10 @@ def run_rbcp_signal_representation(config_path):
     print("[INFO] Output directory:", output_dir)
     print("[INFO] Starting simulation...\n")
 
-    # ------------------------------------------------------------
-    # RUN CORE EXPERIMENT
-    # ------------------------------------------------------------
     data = generate_rbcp_signal_representation(cfg)
 
-    # ------------------------------------------------------------
-    # PLOT RESULTS
-    # ------------------------------------------------------------
     generate_plot(data, cfg, output_dir, timestamp)
 
-    # ------------------------------------------------------------
-    # SAVE METADATA
-    # ------------------------------------------------------------
     if cfg["output"].get("save_metadata", True):
         save_metadata(cfg, output_dir, timestamp, config_path)
 

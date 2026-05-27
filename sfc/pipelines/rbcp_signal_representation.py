@@ -1,21 +1,65 @@
 """
-RbCP signal representation vs Benchmark using physical system parameters.
+RbCP signal representation vs Benchmark + SFC using physical system parameters.
 
-Now fully based on:
+This module now produces:
 
-- system-level parameters (S, B, R, SNR_dB)
-- derived parameters via system_parameters.py
-- Nyquist benchmark from core class
+- x_filtered
+- x_zero_mean
+- x_rbcp
+- x_sfc
+- x_benchmark
+
+System parameters are physical:
+- S
+- P
+- B
+- R
+- L
+- SNR_dB
+- W
+- tau
+
+Derived parameters:
+- N
+- M_RbCP
+
+IMPORTANT
+---------
+✅ NEW / INTERPRETATIVE LOGIC
+For this figure, we propagate one representative signal through the SFC stack.
+
+That means:
+- the figure still plots one signal
+- but M_RbCP is derived using the full system-level S
+- all event IDs of this representative signal are assigned locally to sensor 0
+  in a figure-specific sensor_x_event used only inside this pipeline
+
+IMPORTANT CHANGE REQUESTED
+--------------------------
+The SFC branch is now fed with:
+    ta, tb
+
+and NOT with:
+    ta_q, tb_q
+
+That is:
+- x_rbcp uses quantized ta/tb
+- x_sfc uses non-quantized ta/tb and relies on the SFC event/channel stack
 """
 
+import copy
 import numpy as np
 
 from sfc.core.filters import filter_periodic
 from sfc.core.fourier import FourierCoefficientCore
-from sfc.core.phase_cof import calc_ta_tb
+from sfc.core.phase_cof import (
+    calc_ta_tb,
+    PhaseCoefficientCore,
+)
 from sfc.core.quantization import quantize_ta_tb
 from sfc.core.reconstruction import recover_signal
 from sfc.core.nyquist import Nyquist
+from sfc.core.channel.SFCChannel import SFCChannel
 
 from sfc.core.system_parameters import (
     compute_N,
@@ -28,6 +72,12 @@ from sfc.core.system_parameters import (
 # =============================================================================
 
 def generate_rbcp_signal_representation(cfg):
+    """
+    Generate the full deterministic experiment for:
+    - RbCP
+    - SFC
+    - Nyquist Benchmark
+    """
 
     rng = np.random.default_rng(cfg["reproducibility"]["seed"])
 
@@ -37,8 +87,8 @@ def generate_rbcp_signal_representation(cfg):
     S = cfg["system"]["S"]
     B = cfg["system"]["B"]
     R = cfg["system"]["R"]
+    L = cfg["system"]["L"]
 
-    # ✅ NEW: SNR in dB → convert to linear
     SNR_dB = cfg["system"]["SNR_dB"]
     SNR = 10 ** (SNR_dB / 10.0)
 
@@ -89,12 +139,17 @@ def generate_rbcp_signal_representation(cfg):
     # -------------------------------------------------------------------------
     # DC REMOVAL
     # -------------------------------------------------------------------------
-    dc = Tt * np.sum(x_filtered) / tau
-    x_zero_mean = x_filtered - dc
+    dc_enabled = cfg.get("dc", {}).get("enabled", False)
+
+    if not dc_enabled:
+        dc = Tt * np.sum(x_filtered) / tau
+        x_zero_mean = x_filtered - dc
+    else:
+        x_zero_mean = x_filtered
 
     # -------------------------------------------------------------------------
     # =========================
-    # RbCP
+    # RbCP BRANCH
     # =========================
     # -------------------------------------------------------------------------
     fourier_core = FourierCoefficientCore(
@@ -116,13 +171,34 @@ def generate_rbcp_signal_representation(cfg):
     ta = np.real(ta)
     tb = np.real(tb)
 
+    # -------------------------------------------------------------------------
+    # Quantized version only for direct RbCP reconstruction
+    # -------------------------------------------------------------------------
     ta_q, tb_q = quantize_ta_tb(ta, tb, w0, M_rbcp)
 
     x_rbcp = recover_signal(ta_q, tb_q, t, w0)
 
     # -------------------------------------------------------------------------
     # =========================
-    # BENCHMARK (NYQUIST + SHANNON)
+    # SFC BRANCH
+    # =========================
+    #
+    # IMPORTANT CHANGE:
+    # SFC is fed with ta and tb (NOT ta_q / tb_q)
+    # -------------------------------------------------------------------------
+    x_sfc = _sfc_reconstruction(
+        ta=ta,
+        tb=tb,
+        t=t,
+        tau=tau,
+        w0=w0,
+        N=N,
+        cfg=cfg
+    )
+
+    # -------------------------------------------------------------------------
+    # =========================
+    # BENCHMARK BRANCH
     # =========================
     # -------------------------------------------------------------------------
     x_benchmark = _benchmark_nyquist(
@@ -131,16 +207,21 @@ def generate_rbcp_signal_representation(cfg):
         Tt,
         W,
         B,
-        SNR
+        SNR,
+        cfg
     )
 
-    # -------------------------------------------------------------------------
     return {
         "t": t,
         "x_filtered": x_filtered,
         "x_zero_mean": x_zero_mean,
         "x_rbcp": x_rbcp,
+        "x_sfc": x_sfc,
         "x_benchmark": x_benchmark,
+        "ta": ta,
+        "tb": tb,
+        "ta_q": ta_q,
+        "tb_q": tb_q,
     }
 
 
@@ -149,6 +230,9 @@ def generate_rbcp_signal_representation(cfg):
 # =============================================================================
 
 def _generate_signal(cfg, rng, n):
+    """
+    Generate one representative signal for the figure.
+    """
 
     dist = cfg["signal"]["distribution"]
 
@@ -161,35 +245,138 @@ def _generate_signal(cfg, rng, n):
 
 
 # =============================================================================
+# SFC RECONSTRUCTION
+# =============================================================================
+
+def _sfc_reconstruction(ta, tb, t, tau, w0, N, cfg):
+    """
+    Reconstruct the signal after the SFC stack.
+
+    Flow
+    ----
+    ta/tb -> events -> SFCChannel(events) -> events_est -> ta/tb_est -> x_sfc
+
+    IMPORTANT
+    ---------
+    This branch is intentionally fed with:
+        ta, tb
+
+    and NOT with:
+        ta_q, tb_q
+
+    ✅ NEW / INTERPRETATIVE LOGIC
+    ----------------------------
+    For this figure, all event IDs of the representative signal are assigned
+    to sensor 0 in a local sensor_x_event.
+    """
+
+    # -------------------------------------------------------------------------
+    # Phase core for:
+    # - ta/tb -> events
+    # - events -> ta/tb
+    # -------------------------------------------------------------------------
+    phase_core = PhaseCoefficientCore(
+        T=tau,
+        harmonics=N,
+        n_sub_symbol=cfg["system"]["L"],
+        resource=cfg["system"]["R"],
+        sensor_nodes=1,
+        bandwidth=cfg["system"]["B"],
+        detect_errors=False,
+        periods=1,
+        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
+    )
+
+    # -------------------------------------------------------------------------
+    # Reshape ta/tb to the trusted phase-core format:
+    #   (num_periods, harmonics, sensors)
+    # -------------------------------------------------------------------------
+    ta_3d = ta.reshape(1, N, 1)
+    tb_3d = tb.reshape(1, N, 1)
+
+    events = phase_core.ta_tb_to_events(ta_3d, tb_3d)
+
+    # -------------------------------------------------------------------------
+    # Build a local cfg for SFCChannel with explicit sensor_x_event
+    #
+    # Representative-signal figure:
+    # all current event IDs are assigned to sensor 0
+    # -------------------------------------------------------------------------
+    cfg_sfc = copy.deepcopy(cfg)
+
+    num_event_ids = events.shape[1]
+    S = cfg_sfc["system"]["S"]
+
+    sensor_x_event = np.zeros((S, num_event_ids))
+    sensor_x_event[0, :] = 1.0
+
+    if "channel" not in cfg_sfc:
+        cfg_sfc["channel"] = {}
+
+    cfg_sfc["channel"]["sensor_x_event"] = sensor_x_event
+
+    # defaults if not provided in YAML
+    cfg_sfc["channel"].setdefault("collision_mode", "sum")
+    cfg_sfc["channel"].setdefault("type", "awgn")
+    cfg_sfc["channel"].setdefault("threshold", 0.5)
+    cfg_sfc["channel"].setdefault("detection_mode", "threshold")
+    cfg_sfc["channel"].setdefault("score_threshold", cfg_sfc["system"]["L"])
+
+    sfc_channel = SFCChannel(cfg_sfc)
+
+    events_est = sfc_channel(events)
+
+    ta_rec, tb_rec = phase_core.event_to_ta_tb(events_est)
+
+    ta_rec = np.real(ta_rec[0, :, 0])
+    tb_rec = np.real(tb_rec[0, :, 0])
+
+    x_sfc = recover_signal(ta_rec, tb_rec, t, w0)
+
+    return x_sfc
+
+
+# =============================================================================
 # BENCHMARK (NYQUIST CAPACITY-BASED)
 # =============================================================================
 
-def _benchmark_nyquist(x, tau, Tt, W, B, SNR):
+def _benchmark_nyquist(x, tau, Tt, W, B, SNR, cfg):
+    """
+    Benchmark using the Nyquist core.
 
-    # ------------------------------------------------------------
-    # Sampling at 1/W (as defined in manuscript)
-    # ------------------------------------------------------------
-    sampling_rate = W
+    Rules
+    -----
+    - sampling_rate is configurable from YAML:
+          benchmark.sampling_rate
+    - if omitted, defaults to W
 
-    # ------------------------------------------------------------
-    # Channel capacity (linear SNR)
-    # ------------------------------------------------------------
+    Capacity
+    --------
+    C = B log2(1 + SNR)
+
+    The number of bits per sample is derived from:
+        bits_total = tau * C
+        bits_per_sample = bits_total / num_samples
+    """
+
+    benchmark_cfg = cfg.get("benchmark", {})
+
+    # sampling_rate configurable from YAML, default = W
+    sampling_rate = benchmark_cfg.get("sampling_rate", W)
+
+    # Shannon capacity
     C = B * np.log2(1 + SNR)
-
     bits_total = tau * C
 
     num_samples = int(np.floor(tau * sampling_rate))
-
     bits_per_sample = bits_total / num_samples
 
     bits_int = int(np.floor(bits_per_sample))
     bits_int = max(bits_int, 1)
 
+    print(f"[INFO] Benchmark sampling_rate = {sampling_rate}")
     print(f"[INFO] Benchmark bits/sample = {bits_int}")
 
-    # ------------------------------------------------------------
-    # Nyquist core
-    # ------------------------------------------------------------
     nyq = Nyquist(
         T=tau,
         Tt=Tt,

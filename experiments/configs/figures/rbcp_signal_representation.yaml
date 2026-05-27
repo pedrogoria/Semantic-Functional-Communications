@@ -9,11 +9,11 @@ experiment:
 # ----------------------------------------------------------------------
 system:
   S: 8        # number of signals
-  P: 1.0      # transmit power (currently not used explicitly)
+  P: 1.0      # transmit power
   B: 14000    # channel bandwidth
   R: 12       # number of resources (subcarriers)
-  L: 4       # temporal resources (future SFC use)
-  SNR_dB: -16.0   # SNR in dB
+  L: 4       # temporal resources
+  SNR_dB: 16.0   # SNR in dB
 
 # ----------------------------------------------------------------------
 # SIGNAL PARAMETERS
@@ -45,6 +45,7 @@ dc:
 # ----------------------------------------------------------------------
 benchmark:
   enabled: true
+  sampling_rate: 12.0   # if omitted, defaults to W
 
 # ----------------------------------------------------------------------
 # PLOT
