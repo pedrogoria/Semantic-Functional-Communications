@@ -1,5 +1,5 @@
 """
-sfc/core/channel.py
+sfc/core/channel_legacy.py
 
 Trusted core implementation of the Semantic-Functional Communication (SFC) channel.
 

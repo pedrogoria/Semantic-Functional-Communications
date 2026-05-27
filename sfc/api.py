@@ -52,7 +52,7 @@ from sfc.core.fading import (
 )
 from sfc.core.propagation import PropagationModel
 from sfc.core.mapping import SFCMapping
-from sfc.core.channel import SFCChannel
+from sfc.core.channel_legacy import SFCChannel
 
 # ==========================================================================
 # Core sampling / representation components

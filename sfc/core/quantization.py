@@ -25,6 +25,20 @@ Forbidden changes:
 - changing branching behavior based on array dimensionality
 
 The goal is to preserve the original numerical and logical behavior exactly.
+
+NOTE ABOUT THE CURRENT FIX
+--------------------------
+The trusted workflow for Figure 1 uses the global helper `cpm_sample(...)`,
+which returns 1D arrays for `ta` and `tb`.
+
+Therefore, `quantize_ta_tb(...)` must correctly support:
+- 3D input  -> (periods, harmonics, sensors)
+- 2D input  -> (periods, harmonics)
+- 1D input  -> (harmonics,)
+
+The original extracted version incorrectly assumed `ta.shape[1]` existed
+for all cases. This file fixes only that shape-handling bug while preserving
+the trusted quantization formulas and sentinel behavior.
 """
 
 import numpy as np
@@ -75,23 +89,10 @@ class QuantizationCore:
             package design. They are not used here.
         """
 
-        # ------------------------------------------------------------------
-        # Preserve the same naming style used by other extracted core modules.
-        # ------------------------------------------------------------------
         self.name = options.pop('name', 'CPM')
-
-        # ------------------------------------------------------------------
-        # Store basic metadata for compatibility, even though quantization
-        # formulas below do not depend directly on all of them.
-        # ------------------------------------------------------------------
         self.T = T
         self.harmonics = harmonics
         self.sensors = sensor_nodes
-
-        # ------------------------------------------------------------------
-        # Preserve the same definition of the fundamental angular frequency
-        # used throughout the trusted sampling module.
-        # ------------------------------------------------------------------
         self.w0 = 2 * np.pi / T
 
     # ======================================================================
@@ -101,80 +102,14 @@ class QuantizationCore:
     def quantize(self, x, x_min, x_max, bins, poss=1 / 2):
         """
         Quantize values exactly as in the trusted standalone `quantize(...)`.
-
-        Parameters
-        ----------
-        x : np.ndarray or scalar
-            Input value(s) to be quantized.
-
-        x_min : np.ndarray or scalar
-            Minimum quantization bound(s).
-
-        x_max : np.ndarray or scalar
-            Maximum quantization bound(s).
-
-        bins : np.ndarray or scalar
-            Number of bins.
-
-        poss : float, optional
-            Positioning factor inside the quantization bin.
-            The trusted default is 1/2.
-
-        Returns
-        -------
-        np.ndarray or scalar
-            Quantized output with the same broadcasting behavior as the trusted
-            implementation.
-
-        Notes
-        -----
-        This method preserves exactly:
-        - bins = floor(bins)
-        - delta_bin = (x_max - x_min) / bins
-        - x_s = ceil((x - x_min) / delta_bin)
-        - clipping of x_s to [1, bins]
-        - reconstruction:
-              x_s * delta_bin - delta_bin * poss + x_min
         """
-
         return quantize(x, x_min, x_max, bins, poss=poss)
 
     def quantize_ta_tb(self, ta, tb, bins, poss_ta=1 / 2, poss_tb=1 / 2):
         """
-        Quantize ta and tb exactly as in the trusted standalone `quantize_ta_tb(...)`.
-
-        Parameters
-        ----------
-        ta : np.ndarray
-            ta phase-parameter array.
-
-        tb : np.ndarray
-            tb phase-parameter array.
-
-        bins : np.ndarray or scalar
-            Number of quantization bins.
-
-        poss_ta : float, optional
-            Positioning factor for ta quantization bins.
-
-        poss_tb : float, optional
-            Positioning factor for tb quantization bins.
-
-        Returns
-        -------
-        tuple
-            (ta_q, tb_q)
-
-        Notes
-        -----
-        This method preserves exactly:
-        - harmonic-dependent bounds:
-              x_min = -pi / (n * w0)
-              x_max =  pi / (n * w0)
-        - branching based on len(ta.shape)
-        - propagation of 9999 sentinels
+        Quantize ta and tb exactly as in the trusted standalone
+        `quantize_ta_tb(...)`.
         """
-
         return quantize_ta_tb(
             ta,
             tb,
@@ -223,9 +158,6 @@ def quantize(x, x_min, x_max, bins, poss=1 / 2):
         x_s[np.where(x_s > bins)] = bins
         x_s[np.where(x_s <= 0)] = 1
         x_s = x_s * delta_bin - delta_bin * poss + x_min
-
-    No numerical safeguards, reinterpretations, or alternative rounding
-    strategies are introduced.
     """
 
     bins = np.floor(bins)
@@ -276,30 +208,27 @@ def quantize_ta_tb(ta, tb, w0, bins, poss_ta=1 / 2, poss_tb=1 / 2):
 
     Notes
     -----
-    This function preserves exactly the trusted logic:
-
-        n = np.arange(ta.shape[1]) + 1
-        x_min = -pi / (n * w0)
-        x_max =  pi / (n * w0)
-
-        ta_q = zeros(ta.shape)
-        tb_q = zeros(tb.shape)
-
-        if len(ta.shape) == 3:
-            ...
-        elif len(ta.shape) == 2:
-            ...
-        else:
-            ...
-
-        ta_q[np.where(ta == 9999)] = 9999
-        tb_q[np.where(tb == 9999)] = 9999
-
-    The 9999 sentinel handling is preserved exactly.
+    This function preserves exactly the trusted logic and sentinel handling.
+    The only structural correction here is proper support for 1D arrays.
     """
 
     bins = bins
-    n = np.arange(ta.shape[1]) + 1
+
+    # ------------------------------------------------------------------
+    # Build the harmonic index vector according to the dimensionality of ta.
+    #
+    # Trusted intent:
+    # - 3D: harmonics is axis 1
+    # - 2D: harmonics is axis 1
+    # - 1D: harmonics is axis 0
+    # ------------------------------------------------------------------
+    if len(ta.shape) == 3:
+        n = np.arange(ta.shape[1]) + 1
+    elif len(ta.shape) == 2:
+        n = np.arange(ta.shape[1]) + 1
+    else:
+        n = np.arange(ta.shape[0]) + 1
+
     x_min = - np.pi / (n * w0)
     x_max = np.pi / (n * w0)
 

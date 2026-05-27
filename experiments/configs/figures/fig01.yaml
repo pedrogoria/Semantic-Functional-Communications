@@ -1,0 +1,148 @@
+figure:
+  id: fig01
+  manuscript_figure: 1
+  title: "Upper bound of MSE_RbCP and MSE*_RbCP versus N"
+  description: >
+    Reproduction of Figure 1 using analytical expressions (Lemma 4 and Proposition 2)
+    and Monte Carlo simulation of the RbCP pipeline.
+
+# ----------------------------------------------------------------------
+# EXECUTION MODES
+# ----------------------------------------------------------------------
+mode:
+  theory: true
+  monte_carlo: true
+
+# ----------------------------------------------------------------------
+# SWEEP PARAMETERS
+# ----------------------------------------------------------------------
+sweep:
+  m_rbcp_values: [4, 8, 16]
+
+  n:
+    start: 2
+    stop: 21
+    step: 1
+
+# ----------------------------------------------------------------------
+# THEORY SETTINGS
+# ----------------------------------------------------------------------
+theory:
+  compute_q: true
+  upper_bound: true
+  mse_star: true
+
+# ----------------------------------------------------------------------
+# SIGNAL GENERATION
+# ----------------------------------------------------------------------
+signal:
+  distribution: "gaussian"   # options: uniform, gaussian
+
+  # Time support
+  T: 1.0
+  Tt: 0.001
+
+  # Signal amplitude adjustment
+  peak_to_peak: 8.0
+
+  # DFT normalization
+  normalize_dft: true
+  normalization_target: 3.9
+
+
+# ----------------------------------------------------------------------
+# DC COMPONENT HANDLING
+# ----------------------------------------------------------------------
+dc:
+  enabled: false
+
+
+# ----------------------------------------------------------------------
+# RBCP PIPELINE CONFIGURATION
+# ----------------------------------------------------------------------
+rbcp:
+  quantization: true
+  reconstruction: true
+
+# ----------------------------------------------------------------------
+# MONTE CARLO
+# ----------------------------------------------------------------------
+monte_carlo:
+  interactions: 10000
+  seed: 47
+
+# ----------------------------------------------------------------------
+# METRICS
+# ----------------------------------------------------------------------
+metrics:
+  mse: true
+
+  aggregation:
+    mean: true
+    std: true
+
+# ----------------------------------------------------------------------
+# OUTPUT
+# ----------------------------------------------------------------------
+output:
+  base_dir: "data/results"
+  figure_dir: "fig01"
+
+  save_dat: true
+  save_plot: true
+  save_metadata: true
+  save_config_copy: true
+
+  formats:
+    plot: ["png", "pdf"]
+    data: ["dat"]
+
+# ----------------------------------------------------------------------
+# DATA FORMAT
+# ----------------------------------------------------------------------
+data_format:
+  columns:
+    - N
+    - M_RbCP
+    - Q
+    - upper_bound
+    - mse_star
+    - mse_mc_mean
+    - mse_mc_std
+    - num_trials
+
+  delimiter: "\t"
+
+# ----------------------------------------------------------------------
+# PLOT SETTINGS
+# ----------------------------------------------------------------------
+plot:
+  x_axis: "N"
+  y_axis: "MSE"
+
+  x_min: 2
+  x_max: 20
+  x_ticks: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+
+  y_scale: "log"
+  y_min: 1.0e-2
+  y_max: 5
+
+  show_grid: true
+  legend: true
+
+  styles:
+    theory: "lines"
+    monte_carlo: "markers"
+
+  label_map:
+    upper_bound: "Upper bound (Lemma 4)"
+    mse_star: "MSE* (Proposition 2)"
+    monte_carlo: "Monte Carlo"
+
+# ----------------------------------------------------------------------
+# REPRODUCIBILITY
+# ----------------------------------------------------------------------
+reproducibility:
+  save_git_commit: true
+  save_timestamp: true

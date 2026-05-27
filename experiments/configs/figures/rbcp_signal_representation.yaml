@@ -1,0 +1,87 @@
+experiment:
+  id: rbcp_signal_representation
+  description: >
+    Signal representation using RbCP vs Benchmark under ideal channel.
+    System parameters follow physical model with capacity constraints.
+
+# ----------------------------------------------------------------------
+# SYSTEM PARAMETERS (PRIMARY)
+# ----------------------------------------------------------------------
+system:
+  S: 8        # number of signals
+  P: 1.0      # transmit power (currently not used explicitly)
+  B: 14000    # channel bandwidth
+  R: 12       # number of resources (subcarriers)
+  L: 4       # temporal resources (future SFC use)
+  SNR_dB: -16.0   # SNR in dB
+
+# ----------------------------------------------------------------------
+# SIGNAL PARAMETERS
+# ----------------------------------------------------------------------
+signal:
+  W: 10.0     # signal bandwidth
+  tau: 1.0    # frame duration
+
+  distribution: "uniform"
+
+  # sampling resolution
+  Tt: 0.01
+
+  # amplitude control (after filtering)
+  peak_to_peak: 8.0
+
+  # DFT normalization
+  normalize_dft: true
+  normalization_target: 3.9
+
+# ----------------------------------------------------------------------
+# DC HANDLING
+# ----------------------------------------------------------------------
+dc:
+  enabled: false
+
+# ----------------------------------------------------------------------
+# BENCHMARK
+# ----------------------------------------------------------------------
+benchmark:
+  enabled: true
+
+# ----------------------------------------------------------------------
+# PLOT
+# ----------------------------------------------------------------------
+plot:
+  show_grid: true
+  legend: true
+
+  styles:
+    filtered: "-"
+    rbcp: "--"
+    sfc: "-."
+    benchmark: ":"
+
+  labels:
+    filtered: "Band-limited signal"
+    zero_mean: "Band-limited zero-mean signal"
+    rbcp: "RbCP reconstruction"
+    sfc: "SFC reconstruction"
+    benchmark: "Nyquist Benchmark"
+
+# ----------------------------------------------------------------------
+# OUTPUT
+# ----------------------------------------------------------------------
+output:
+  base_dir: "data/results"
+  figure_dir: "rbcp_signal_representation"
+
+  save_plot: true
+  save_metadata: true
+  save_config_copy: true
+
+  formats:
+    plot: ["png", "pdf"]
+
+# ----------------------------------------------------------------------
+# REPRODUCIBILITY
+# ----------------------------------------------------------------------
+reproducibility:
+  seed: 47

@@ -1,0 +1,160 @@
+figure:
+  id: fig02
+  manuscript_figure: 2
+  title: "Upper bound of MSE_RbCP and MSE*_RbCP versus M_RbCP"
+  description: >
+    Reproduction of Figure 2 using analytical expressions and Monte Carlo
+    corroboration for the RbCP curves, together with the Benchmark curve.
+
+# ----------------------------------------------------------------------
+# EXECUTION MODES
+# ----------------------------------------------------------------------
+mode:
+  theory: true
+  monte_carlo: true
+  benchmark: true
+
+# ----------------------------------------------------------------------
+# SWEEP PARAMETERS
+# ----------------------------------------------------------------------
+sweep:
+  n_values: [5, 10, 15, 20]
+
+  m_rbcp:
+    start: 4
+    stop: 41
+    step: 1
+
+# ----------------------------------------------------------------------
+# THEORY SETTINGS
+# ----------------------------------------------------------------------
+theory:
+  compute_q: true
+  upper_bound: true
+  mse_star: true
+  benchmark_mse: true
+
+# ----------------------------------------------------------------------
+# SIGNAL GENERATION
+# ----------------------------------------------------------------------
+signal:
+  distribution: "uniform"   # options: uniform, gaussian
+
+  # Time support
+  T: 1.0
+  Tt: 0.01
+
+  # Signal amplitude adjustment AFTER filtering
+  peak_to_peak: 8.0
+
+  # DFT normalization logic
+  normalize_dft: true
+  normalization_target: 3.9
+
+# ----------------------------------------------------------------------
+# DC COMPONENT HANDLING
+# ----------------------------------------------------------------------
+dc:
+  enabled: false
+
+# ----------------------------------------------------------------------
+# RBCP PIPELINE CONFIGURATION
+# ----------------------------------------------------------------------
+rbcp:
+  quantization: true
+  reconstruction: true
+
+# ----------------------------------------------------------------------
+# MONTE CARLO
+# ----------------------------------------------------------------------
+monte_carlo:
+  interactions: 200
+  seed: 47
+
+# ----------------------------------------------------------------------
+# BENCHMARK CURVE SETTINGS
+# ----------------------------------------------------------------------
+benchmark:
+  enabled: true
+  peak_to_peak: 17.0
+  W: 10.75
+  compare_with_n: 10
+
+# ----------------------------------------------------------------------
+# METRICS
+# ----------------------------------------------------------------------
+metrics:
+  mse: true
+
+  aggregation:
+    mean: true
+    std: true
+
+# ----------------------------------------------------------------------
+# OUTPUT
+# ----------------------------------------------------------------------
+output:
+  base_dir: "data/results"
+  figure_dir: "fig02"
+
+  save_dat: true
+  save_plot: true
+  save_metadata: true
+  save_config_copy: true
+
+  formats:
+    plot: ["png", "pdf"]
+    data: ["dat"]
+
+# ----------------------------------------------------------------------
+# DATA FORMAT
+# ----------------------------------------------------------------------
+data_format:
+  columns:
+    - M_RbCP
+    - N
+    - Q
+    - upper_bound
+    - mse_star
+    - mse_mc_mean
+    - mse_mc_std
+    - num_trials
+    - benchmark_M
+    - benchmark_mse
+
+  delimiter: "\t"
+
+# ----------------------------------------------------------------------
+# PLOT SETTINGS
+# ----------------------------------------------------------------------
+plot:
+  x_axis: "M_RbCP"
+  y_axis: "MSE"
+
+  x_min: 5
+  x_max: 40
+
+  y_scale: "log"
+  y_min: 1.0e-2
+  y_max: 10
+
+  show_grid: true
+  legend: true
+
+  styles:
+    theory: "lines"
+    monte_carlo: "markers"
+    benchmark: "solid"
+
+  label_map:
+    upper_bound: "Upper bound (Lemma 4)"
+    mse_star: "MSE* (Proposition 2)"
+    monte_carlo: "Monte Carlo"
+    benchmark: "Benchmark"
+
+# ----------------------------------------------------------------------
+# REPRODUCIBILITY
+# ----------------------------------------------------------------------
+reproducibility:
+  save_git_commit: true
+  save_timestamp: true

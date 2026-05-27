@@ -1,4 +1,7 @@
-numpy
-scipy
-matplotlib
-pyyaml
+numpy~=1.18.5
+scipy~=1.6.2
+matplotlib~=3.4.3
+pyyaml~=6.0.1
+
+pandas~=1.1.5
+yaml~=0.2.5

@@ -28,7 +28,14 @@ Forbidden changes:
 - changing random conflict-resolution behavior
 - changing output shapes
 
-The goal here is to preserve the original numerical and logical behavior.
+Design decision
+---------------
+From this point on, BOTH the class method and the global helper must use
+the complex-logarithm formulation for ta/tb.
+
+The arctangent-based helper is intentionally removed as an operational path.
+The manuscript defines ta and tb through the complex-logarithm formulation,
+so this module keeps only that formulation as the unique trusted path. [1](https://github.com/pedrogoria/Semantic-Functional-Communications/blob/main/sampling_methods.py)
 """
 
 import numpy as np
@@ -75,35 +82,20 @@ class PhaseCoefficientCore:
     threshold_harmonics : float, optional
         Threshold below which Fourier coefficients are treated as zero in the
         trusted complex-logarithm phase computation.
-
-    Notes
-    -----
-    This class deliberately stores several parameters that were originally
-    stored inside `CPSample`, because the phase logic depends on them.
     """
 
     def __init__(
-            self,
-            T=1,
-            harmonics=3,
-            n_sub_symbol=6,
-            resource=7,
-            sensor_nodes=5,
-            bandwidth=100,
-            **options
+        self,
+        T=1,
+        harmonics=3,
+        n_sub_symbol=6,
+        resource=7,
+        sensor_nodes=5,
+        bandwidth=100,
+        **options
     ):
-        """
-        Initialize the phase-coefficient core.
-        """
-
-        # ------------------------------------------------------------------
-        # Preserve the same public naming defaults used in CPSample.
-        # ------------------------------------------------------------------
         self.name = options.pop('name', 'CPM')
 
-        # ------------------------------------------------------------------
-        # Store fundamental configuration exactly as in the trusted class.
-        # ------------------------------------------------------------------
         self.T = T
         self.harmonics = harmonics
         self.sensors = sensor_nodes
@@ -111,39 +103,17 @@ class PhaseCoefficientCore:
         self.resources = resource
         self.bandwidth = bandwidth
 
-        # ------------------------------------------------------------------
-        # Preserve the trusted sub-symbol timing definition:
-        #     sub_symbol_time = 1 / (bandwidth / resources)
-        # ------------------------------------------------------------------
         self.sub_symbol_time = 1 / (self.bandwidth / self.resources)
 
-        # ------------------------------------------------------------------
-        # Preserve the fundamental angular frequency:
-        #     w0 = 2*pi/T
-        # ------------------------------------------------------------------
         self.w0 = 2 * np.pi / T
-
-        # ------------------------------------------------------------------
-        # Harmonic index vector:
-        #     [1, 2, ..., harmonics]
-        # ------------------------------------------------------------------
         self.n = np.arange(harmonics) + 1
 
-        # ------------------------------------------------------------------
-        # Preserve trusted error-detection and period bookkeeping settings.
-        # ------------------------------------------------------------------
         self.detect_errors = options.pop('detect_errors', False)
         self.rs_per_period = np.floor(T / self.sub_symbol_time)
         self.n_periods = options.pop('periods', 'empty')
 
-        # ------------------------------------------------------------------
-        # Preserve the trusted harmonic-threshold default and meaning.
-        # ------------------------------------------------------------------
         self.threshold_harmonics = options.pop('threshold_harmonics', 0.001)
 
-        # ------------------------------------------------------------------
-        # Same assertion present in the trusted CPSample constructor.
-        # ------------------------------------------------------------------
         assert self.rs_per_period > 1, 'error in parameter rs_per_period '
 
     # ======================================================================
@@ -153,9 +123,6 @@ class PhaseCoefficientCore:
     def ta_tb_to_events(self, ta, tb):
         """
         Convert phase parameters ta/tb into the event matrix.
-
-        This method is a direct structural extraction of the event-generation
-        block from the trusted `CPSample.__call__` implementation.
 
         Parameters
         ----------
@@ -170,14 +137,6 @@ class PhaseCoefficientCore:
         np.ndarray
             Event matrix with shape:
                 (rs_per_period * n_periods, 2 * harmonics * sensors)
-
-        Notes
-        -----
-        This method preserves:
-        - the 9999 sentinel logic;
-        - the exact ceiling-based time-bin mapping;
-        - clipping of positions to [1, rs_per_period];
-        - exact event indexing scheme.
         """
 
         events = np.zeros(
@@ -235,10 +194,8 @@ class PhaseCoefficientCore:
 
     def calc_ta_tb(self, an, bn, **options):
         """
-        Compute ta and tb from Fourier coefficients an and bn.
-
-        This method preserves exactly the trusted implementation based on the
-        complex logarithm.
+        Compute ta and tb from Fourier coefficients an and bn using ONLY
+        the trusted complex-logarithm formulation.
 
         Parameters
         ----------
@@ -252,23 +209,17 @@ class PhaseCoefficientCore:
 
         Returns
         -------
-        ta : np.ndarray
-            Phase parameter ta, complex array during computation but usually
-            interpreted via its real part downstream.
-
-        tb : np.ndarray
-            Phase parameter tb, complex array during computation but usually
-            interpreted via its real part downstream.
+        tuple
+            (ta, tb), both returned as REAL arrays.
 
         Notes
         -----
-        Preserved exactly:
-        - shape assertions;
-        - thresholding via threshold_harmonics;
-        - zero-harmonic detection;
-        - complex-logarithm formula;
-        - division by (n * w0);
-        - setting 9999 in zero-indices.
+        The manuscript defines ta and tb using the complex-logarithm equations
+        corresponding to Eqs. (7) and (8). This method keeps only that path. [1](https://github.com/pedrogoria/Semantic-Functional-Communications/blob/main/sampling_methods.py)
+
+        The imaginary residual introduced by finite numerical precision is
+        discarded here using np.real(...), so all downstream code receives
+        real-valued phase parameters.
         """
 
         assert an.shape[1] == self.harmonics, 'error in parameter shape: an '
@@ -290,14 +241,28 @@ class PhaseCoefficientCore:
         for iii in range(self.sensors):
             for i in range(an.shape[0]):
                 ta[i, :, iii] = - 1j * np.log(
-                    (1j * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2) - np.sign(bn[i, :, iii]) *
-                     np.sqrt(0j + (4 - an[i, :, iii] ** 2 - bn[i, :, iii] ** 2) * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2)))
-                    / (2 * (1j * an[i, :, iii] + bn[i, :, iii])))
+                    (
+                        1j * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2)
+                        - np.sign(bn[i, :, iii]) * np.sqrt(
+                            0j
+                            + (4 - an[i, :, iii] ** 2 - bn[i, :, iii] ** 2)
+                            * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2)
+                        )
+                    )
+                    / (2 * (1j * an[i, :, iii] + bn[i, :, iii]))
+                )
 
-                tb[i, :, iii] = - 1j * np.log((1j * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2) + np.sign(bn[i, :, iii]) *
-                                               np.sqrt(0j + (4 - an[i, :, iii] ** 2 - bn[i, :, iii] ** 2)
-                                                       * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2)))
-                                              / (2 * (1j * an[i, :, iii] + bn[i, :, iii])))
+                tb[i, :, iii] = - 1j * np.log(
+                    (
+                        1j * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2)
+                        + np.sign(bn[i, :, iii]) * np.sqrt(
+                            0j
+                            + (4 - an[i, :, iii] ** 2 - bn[i, :, iii] ** 2)
+                            * (an[i, :, iii] ** 2 + bn[i, :, iii] ** 2)
+                        )
+                    )
+                    / (2 * (1j * an[i, :, iii] + bn[i, :, iii]))
+                )
 
                 ta[i, :, iii] = ta[i, :, iii] / (self.n * self.w0)
                 tb[i, :, iii] = tb[i, :, iii] / (self.n * self.w0)
@@ -305,7 +270,7 @@ class PhaseCoefficientCore:
         ta[zero_ind] = 9999
         tb[zero_ind] = 9999
 
-        return ta, tb
+        return np.real(ta), np.real(tb)
 
     # ======================================================================
     # events -> ta/tb
@@ -314,9 +279,6 @@ class PhaseCoefficientCore:
     def event_to_ta_tb(self, events, **options):
         """
         Recover ta and tb from an event matrix.
-
-        This method is a structural extraction of the trusted
-        `CPSample.event_to_ta_tb` implementation.
 
         Parameters
         ----------
@@ -332,17 +294,6 @@ class PhaseCoefficientCore:
 
             If detect_errors is True:
                 (r_ta, r_tb, signal_error)
-
-        Notes
-        -----
-        This method preserves exactly:
-        - period-inference logic;
-        - duplicate-event correction logic;
-        - random conflict resolution using python.random;
-        - c_empty handling;
-        - phase reconstruction formula from event positions;
-        - 9999 handling for empty positions;
-        - optional signal_error output.
         """
 
         e = events.copy()
@@ -359,8 +310,8 @@ class PhaseCoefficientCore:
 
         for ind0 in range(self.n_periods):
             events = e[
-                     int(ind0 * self.rs_per_period):int((ind0 + 1) * self.rs_per_period), :
-                     ]
+                int(ind0 * self.rs_per_period):int((ind0 + 1) * self.rs_per_period), :
+            ]
 
             if self.detect_errors:
                 for sensor in range(self.sensors):
@@ -369,9 +320,9 @@ class PhaseCoefficientCore:
                     elif any(np.sum(events[:, 2 * self.harmonics * sensor + self.harmonics:2 * self.harmonics * sensor + 2 * self.harmonics], 0) > 1):
                         signal_error[ind0, sensor] = 1
                     elif any(
-                            np.sum(events[:, 2 * self.harmonics * sensor:2 * self.harmonics * sensor + self.harmonics], 0)
-                            + np.sum(events[:, 2 * self.harmonics * sensor + self.harmonics:2 * self.harmonics * sensor + 2 * self.harmonics], 0)
-                            == 1
+                        np.sum(events[:, 2 * self.harmonics * sensor:2 * self.harmonics * sensor + self.harmonics], 0)
+                        + np.sum(events[:, 2 * self.harmonics * sensor + self.harmonics:2 * self.harmonics * sensor + 2 * self.harmonics], 0)
+                        == 1
                     ):
                         signal_error[ind0, sensor] = 1
 
@@ -399,11 +350,11 @@ class PhaseCoefficientCore:
 
             for ind in range(self.sensors):
                 r_ta[ind0, :, ind] = r_ta_tb[
-                                     :, 2 * self.harmonics * ind:2 * self.harmonics * ind + self.harmonics
-                                     ]
+                    :, 2 * self.harmonics * ind:2 * self.harmonics * ind + self.harmonics
+                ]
                 r_tb[ind0, :, ind] = r_ta_tb[
-                                     :, 2 * self.harmonics * ind + self.harmonics:2 * self.harmonics * ind + 2 * self.harmonics
-                                     ]
+                    :, 2 * self.harmonics * ind + self.harmonics:2 * self.harmonics * ind + 2 * self.harmonics
+                ]
 
         if self.detect_errors:
             return r_ta, r_tb, signal_error
@@ -411,50 +362,50 @@ class PhaseCoefficientCore:
             return r_ta, r_tb
 
 
-def calc_ta_tb(an, bn, n, w0):
+def calc_ta_tb(an, bn, n, w0, threshold_harmonics=0.001):
     """
-    Legacy global helper for ta/tb computation.
-
-    This function preserves exactly the standalone trusted implementation from
-    the original `sfc/sampling.py`.
+    Global helper for ta/tb computation using ONLY the trusted complex-logarithm path.
 
     Parameters
     ----------
     an : np.ndarray
-        Cosine Fourier coefficients.
+        Fourier cosine coefficients. Expected as a 1D array for the common
+        helper use case.
 
     bn : np.ndarray
-        Sine Fourier coefficients.
+        Fourier sine coefficients. Expected as a 1D array for the common
+        helper use case.
 
-    n : np.ndarray or scalar
-        Harmonic indices.
+    n : np.ndarray
+        Harmonic index vector, usually [1, 2, ..., N].
 
     w0 : float
         Fundamental angular frequency.
 
+    threshold_harmonics : float, optional
+        Threshold used to mark very small coefficients as zero.
+
     Returns
     -------
     tuple
-        (ta, tb)
+        (ta, tb) as REAL 1D arrays.
 
     Notes
     -----
-    Unlike the class method `PhaseCoefficientCore.calc_ta_tb`, this global
-    helper uses the arctangent-based trusted formula that was also present
-    in the original file and must therefore be preserved.
+    This helper intentionally delegates to the class implementation so that
+    there is a single trusted source of truth for ta/tb computation.
     """
 
-    ta = -2 * np.arctan(
-        (2 * bn - (-(an ** 2 + bn ** 2) * (an ** 2 + bn ** 2 - 4)) ** (1 / 2))
-        / (an ** 2 + 2 * an + bn ** 2)
-        - (4 * bn) / (an ** 2 + 2 * an + bn ** 2)
-    )
-    ta = ta / (n * w0)
+    an_arr = np.asarray(an).reshape(1, -1, 1)
+    bn_arr = np.asarray(bn).reshape(1, -1, 1)
 
-    tb = 2 * np.arctan(
-        (2 * bn - (-(an ** 2 + bn ** 2) * (an ** 2 + bn ** 2 - 4)) ** (1 / 2))
-        / (an ** 2 + 2 * an + bn ** 2)
+    core = PhaseCoefficientCore(
+        T=2 * np.pi / w0,
+        harmonics=len(n),
+        sensor_nodes=1,
+        threshold_harmonics=threshold_harmonics
     )
-    tb = tb / (n * w0)
 
-    return ta, tb
+    ta, tb = core.calc_ta_tb(an_arr, bn_arr)
+
+    return np.real(ta[0, :, 0]), np.real(tb[0, :, 0])
