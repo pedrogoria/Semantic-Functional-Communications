@@ -11,43 +11,45 @@ IMPORTANT
 ---------
 The physical channel returns the complex matched-filter output.
 
-Therefore detection must be based on the magnitude of the received signal:
+Therefore detection is based on the magnitude of the received signal:
 
     abs(y) > threshold
 
 PHYSICAL PRINCIPLE
 ------------------
-The physical channel uses:
+The physical channel uses the manuscript-consistent relation:
 
     SNR = P / (B * N0)
 
-and the matched-filter-output approximation:
-
-    y = sqrt(E_s) * signal + n
-
 with:
+- P  : average transmit power per sensor
+- B  : channel bandwidth
+- N0 : noise parameter
 
-    E_s = P / B
+The same system-level parameters are also used by the Benchmark model, but
+for the SFC channel they determine the received symbol level and the noise.
 
-Therefore the received pulse amplitude is not 1 in general.
-The threshold must be consistent with:
+CENTRALIZATION RULE
+-------------------
+This module does NOT recompute local physical quantities such as:
+- SNR_linear
+- N0
+- E_tot
+- E_s
+- signal_level
+- default_threshold
 
-    sqrt(E_s)
+Instead, all these quantities are derived centrally through:
 
-CURRENT THRESHOLD RULE
-----------------------
-If cfg["channel"]["threshold"] is explicitly provided, use it.
+    build_derived_system_parameters(cfg, threshold_factor=...)
 
-Otherwise derive:
+so that the physical model remains consistent across:
+- physical_channel.py
+- detection.py
+- pipelines
+- future channel modules
 
-    threshold = threshold_factor * sqrt(E_s)
-
-with:
-    threshold_factor = cfg["channel"].get("threshold_factor", 0.5)
-
-This ensures that clean-channel pulses are detectable even when P/B < 1.
-
-Detection modes
+DETECTION MODES
 ---------------
 1. strict:
        score == L
@@ -62,14 +64,28 @@ Default behavior
 ----------------
 If score_threshold is not provided, then:
     score_threshold = L
+
+Threshold rule
+--------------
+If cfg["channel"]["threshold"] is explicitly provided, use it.
+
+Otherwise derive:
+
+    threshold = default_threshold
+
+where default_threshold is built centrally from:
+
+    threshold_factor * signal_level
 """
 
 import numpy as np
 
+from sfc.core.system_parameters import build_derived_system_parameters
+
 
 class MapDetector:
     """
-    Recover maps from received aggregate signal.
+    Recover maps from the received aggregate signal.
     """
 
     def __init__(self, cfg):
@@ -80,32 +96,21 @@ class MapDetector:
         ----------
         cfg : dict
             Configuration dictionary.
+
+        Notes
+        -----
+        The detector threshold is determined as follows:
+
+        1. If cfg["channel"]["threshold"] is explicitly provided,
+           use that value directly.
+
+        2. Otherwise, derive the threshold centrally from:
+               threshold_factor * signal_level
+           where signal_level is built from the shared physical model.
         """
 
+        self.cfg = cfg
         det_cfg = cfg.get("channel", {})
-        sys_cfg = cfg["system"]
-
-        # ------------------------------------------------------------------
-        # Physical parameters needed to derive the default threshold
-        # ------------------------------------------------------------------
-        self.P = sys_cfg["P"]
-        self.B = sys_cfg["B"]
-
-        # matched-filter symbol energy
-        self.E_s = self.P / self.B
-        self.signal_level = np.sqrt(self.E_s)
-
-        # ------------------------------------------------------------------
-        # Threshold configuration
-        #
-        # If explicit threshold is not given, derive it from sqrt(E_s)
-        # ------------------------------------------------------------------
-        self.threshold_factor = det_cfg.get("threshold_factor", 0.5)
-
-        if "threshold" in det_cfg:
-            self.threshold = det_cfg["threshold"]
-        else:
-            self.threshold = self.threshold_factor * self.signal_level
 
         # ------------------------------------------------------------------
         # Detection mode:
@@ -115,12 +120,34 @@ class MapDetector:
         # ------------------------------------------------------------------
         self.mode = det_cfg.get("detection_mode", "threshold")
 
-        # optional score threshold; if absent, use L at runtime
+        # Optional score threshold in map-score domain.
+        # If absent, use L at runtime.
         self.score_threshold = det_cfg.get("score_threshold", None)
+
+        # ------------------------------------------------------------------
+        # Centralized physical/system-derived parameters
+        # ------------------------------------------------------------------
+        self.threshold_factor = det_cfg.get("threshold_factor", 0.5)
+
+        self.params = build_derived_system_parameters(
+            cfg,
+            threshold_factor=self.threshold_factor
+        )
+
+        # ------------------------------------------------------------------
+        # Threshold configuration
+        #
+        # If explicit threshold is not given, derive it centrally from:
+        #     threshold_factor * signal_level
+        # ------------------------------------------------------------------
+        if "threshold" in det_cfg:
+            self.threshold = det_cfg["threshold"]
+        else:
+            self.threshold = self.params.default_threshold
 
     def detect(self, y, reference_maps=None):
         """
-        Detect maps from received aggregate signal.
+        Detect maps from the received aggregate signal.
 
         Parameters
         ----------
@@ -141,14 +168,15 @@ class MapDetector:
                 binary aggregate maps, shape (num_time_slots, L, R)
 
             If reference_maps is provided:
-                estimated per-event maps, shape (num_time_slots, num_event_ids, L, R)
+                estimated per-event maps, shape:
+                    (num_time_slots, num_event_ids, L, R)
         """
 
         assert len(y.shape) == 3, \
             "y must have shape (num_time_slots, L, R)"
 
         # ------------------------------------------------------------------
-        # Detect active resource cells based on the magnitude of the received
+        # Detect active resource cells based on magnitude of the complex
         # matched-filter output.
         # ------------------------------------------------------------------
         y_bin = (np.abs(y) > self.threshold).astype(float)
@@ -162,7 +190,9 @@ class MapDetector:
 
         score_threshold = self.score_threshold if self.score_threshold is not None else L
 
-        maps_est = np.zeros((num_time_slots, num_event_ids, y_bin.shape[1], y_bin.shape[2]))
+        maps_est = np.zeros(
+            (num_time_slots, num_event_ids, y_bin.shape[1], y_bin.shape[2])
+        )
 
         for t in range(num_time_slots):
             rec = y_bin[t]

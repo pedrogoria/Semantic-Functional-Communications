@@ -13,7 +13,16 @@ system:
   B: 14000    # channel bandwidth
   R: 12       # number of resources (subcarriers)
   L: 4       # temporal resources
-  SNR_dB: 16.0   # SNR in dB
+  SNR_dB: -19.0   # SNR in dB
+
+# ----------------------------------------------------------------------
+# SFC Channel
+# ----------------------------------------------------------------------
+channel:
+  type: "awgn"              # ou "clean"
+  collision_mode: "sum"
+  detection_mode: "threshold"
+  threshold_factor: 0.5      # standard
 
 # ----------------------------------------------------------------------
 # SIGNAL PARAMETERS

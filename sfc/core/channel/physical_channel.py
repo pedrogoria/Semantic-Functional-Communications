@@ -10,7 +10,7 @@ We denote the signal-to-noise ratio by:
     SNR = P / (B * N0)
 
 where:
-- P  : average transmit power
+- P  : average transmit power per sensor
 - B  : channel bandwidth
 - N0 : noise parameter used by the SFC physical channel
 
@@ -19,15 +19,35 @@ In the software:
 - the same P, B, and N0 are used consistently across models
 - P is also the same parameter used in the Benchmark capacity calculation
 
-CURRENT INTERPRETATION  ✅ NEW
------------------------------
+CENTRALIZATION RULE
+-------------------
+This module does NOT recompute local physical quantities such as:
+- SNR_linear
+- N0
+- E_tot
+- E_s
+- signal_level
+- default_threshold
+
+Instead, all these quantities are derived centrally through:
+
+    build_derived_system_parameters(cfg)
+
+so that the physical model remains consistent across:
+- physical_channel.py
+- detection.py
+- pipelines
+- future channel modules
+
+CURRENT INTERPRETATION
+----------------------
 At this stage of the implementation:
 
-1. The duration of one resource block is approximated as:
-       T_res = 1 / B
+1. The total available energy per cycle is:
+       E_tot = P * tau
 
-2. Therefore, the energy per transmitted symbol/resource is:
-       E_s = P * T_res = P / B
+2. The energy per transmitted symbol/resource is:
+       E_s = E_tot / L = (P * tau) / L
 
 3. The output is interpreted as the matched-filter output per resource:
        y = sqrt(E_s) * signal + n
@@ -56,6 +76,8 @@ Future work may refine:
 """
 
 import numpy as np
+
+from sfc.core.system_parameters import build_derived_system_parameters
 
 
 class PhysicalChannel:
@@ -87,52 +109,32 @@ class PhysicalChannel:
 
         Notes
         -----
-        Uses:
-        - P
-        - B
-        - SNR_dB
+        The following quantities are obtained centrally from
+        `build_derived_system_parameters(cfg)`:
 
-        Derives:
         - SNR_linear
-        - N0 = P / (B * SNR_linear)
-        - T_res = 1 / B
-        - E_s = P / B
+        - N0
+        - E_tot = P * tau
+        - E_s   = (P * tau) / L
+        - signal_level = sqrt(E_s)
         """
 
         self.cfg = cfg
 
         # ------------------------------------------------------------------
-        # System-level physical parameters
+        # Centralized derived parameters
         # ------------------------------------------------------------------
-        self.P = cfg["system"]["P"]
-        self.B = cfg["system"]["B"]
-        self.SNR_dB = cfg["system"]["SNR_dB"]
+        self.params = build_derived_system_parameters(cfg)
 
-        # ------------------------------------------------------------------
-        # Convert SNR from dB to linear
-        # ------------------------------------------------------------------
-        self.SNR = 10 ** (self.SNR_dB / 10.0)
+        self.P = self.params.P
+        self.B = self.params.B
+        self.SNR_dB = self.params.SNR_dB
+        self.SNR = self.params.SNR
 
-        # ------------------------------------------------------------------
-        # Derive N0 from:
-        #     SNR = P / (B * N0)
-        # =>  N0 = P / (B * SNR)
-        # ------------------------------------------------------------------
-        self.N0 = self.P / (self.B * self.SNR)
-
-        # ------------------------------------------------------------------
-        # Resource-block duration approximation
-        #
-        # ✅ NEW / INTERPRETATIVE LOGIC
-        # Until the pulse shape and explicit matched filter are implemented,
-        # one resource block is approximated as lasting 1/B seconds.
-        # ------------------------------------------------------------------
-        self.T_res = 1.0 / self.B
-
-        # ------------------------------------------------------------------
-        # Energy per symbol/resource
-        # ------------------------------------------------------------------
-        self.E_s = self.P * self.T_res   # = P / B
+        self.N0 = self.params.N0
+        self.E_tot = self.params.E_tot
+        self.E_s = self.params.E_s
+        self.signal_level = self.params.signal_level
 
         # ------------------------------------------------------------------
         # Channel type
@@ -149,7 +151,8 @@ class PhysicalChannel:
 
             SNR = P / (B * N0)
 
-        via:
+        via the centrally derived parameter:
+
             N0 = P / (B * SNR_linear)
 
         and models the matched-filter output as:
@@ -157,7 +160,7 @@ class PhysicalChannel:
             y = sqrt(E_s) * signal + n
 
         with:
-            E_s = P / B
+            E_s = (P * tau) / L
             n ~ CN(0, N0)
 
         Parameters
@@ -195,6 +198,9 @@ class PhysicalChannel:
 
             y = sqrt(E_s) * signal
 
+        where:
+            E_s = (P * tau) / L
+
         Parameters
         ----------
         signal : np.ndarray
@@ -207,7 +213,7 @@ class PhysicalChannel:
             Complex-valued clean output tensor.
         """
 
-        transmitted = np.sqrt(self.E_s) * signal.astype(complex)
+        transmitted = self.signal_level * signal.astype(complex)
         return transmitted
 
     def _awgn(self, signal):
@@ -220,7 +226,8 @@ class PhysicalChannel:
 
             SNR = P / (B * N0)
 
-        through:
+        through the centrally derived parameter:
+
             N0 = P / (B * SNR_linear)
 
         and uses the current matched-filter-output approximation:
@@ -228,7 +235,7 @@ class PhysicalChannel:
             y = sqrt(E_s) * signal + n
 
         where:
-            E_s = P / B
+            E_s = (P * tau) / L
 
         and:
             n ~ CN(0, N0)
@@ -263,10 +270,9 @@ class PhysicalChannel:
         - but through the derived N0, which sets the AWGN level.
         """
 
-        transmitted = np.sqrt(self.E_s) * signal.astype(complex)
+        transmitted = self.signal_level * signal.astype(complex)
 
         noise = np.sqrt(self.N0 / 2.0) * (
             np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape)
         )
-
         return transmitted + noise

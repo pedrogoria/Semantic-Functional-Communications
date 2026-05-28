@@ -1,7 +1,7 @@
 """
 RbCP signal representation vs Benchmark + SFC using physical system parameters.
 
-This module now produces:
+This module produces:
 
 - x_filtered
 - x_zero_mean
@@ -19,9 +19,8 @@ System parameters are physical:
 - W
 - tau
 
-Derived parameters:
-- N
-- M_RbCP
+Derived parameters are obtained centrally from:
+    build_derived_system_parameters(cfg)
 
 IMPORTANT
 ---------
@@ -36,7 +35,7 @@ That means:
 
 IMPORTANT CHANGE REQUESTED
 --------------------------
-The SFC branch is now fed with:
+The SFC branch is fed with:
     ta, tb
 
 and NOT with:
@@ -62,8 +61,7 @@ from sfc.core.nyquist import Nyquist
 from sfc.core.channel.SFCChannel import SFCChannel
 
 from sfc.core.system_parameters import (
-    compute_N,
-    compute_M_rbcp,
+    build_derived_system_parameters,
 )
 
 
@@ -82,38 +80,33 @@ def generate_rbcp_signal_representation(cfg):
     rng = np.random.default_rng(cfg["reproducibility"]["seed"])
 
     # -------------------------------------------------------------------------
-    # SYSTEM PARAMETERS
+    # Centralized physical/system-derived parameters
     # -------------------------------------------------------------------------
-    S = cfg["system"]["S"]
-    B = cfg["system"]["B"]
-    R = cfg["system"]["R"]
-    L = cfg["system"]["L"]
+    params = build_derived_system_parameters(cfg)
 
-    SNR_dB = cfg["system"]["SNR_dB"]
-    SNR = 10 ** (SNR_dB / 10.0)
+    S = params.S
+    B = params.B
+    R = params.R
+    L = params.L
+
+    SNR_dB = params.SNR_dB
+    SNR = params.SNR
+
+    W = params.W
+    tau = params.tau
+
+    N = params.N
+    M_rbcp = params.M_rbcp
 
     print(f"[INFO] SNR (dB) = {SNR_dB}")
     print(f"[INFO] SNR (linear) = {SNR:.4e}")
-
-    # -------------------------------------------------------------------------
-    # SIGNAL PARAMETERS
-    # -------------------------------------------------------------------------
-    W = cfg["signal"]["W"]
-    tau = cfg["signal"]["tau"]
-    Tt = cfg["signal"]["Tt"]
-
-    # -------------------------------------------------------------------------
-    # DERIVED PARAMETERS
-    # -------------------------------------------------------------------------
-    N = compute_N(W, tau)
-    M_rbcp = compute_M_rbcp(S, W, tau, B, SNR)
-
     print(f"[INFO] Derived N = {N}")
     print(f"[INFO] Derived M_RbCP = {M_rbcp}")
 
     w0 = 2 * np.pi / tau
     n_vec = np.arange(1, N + 1)
 
+    Tt = cfg["signal"]["Tt"]
     t = np.arange(0, tau, Tt)
 
     # -------------------------------------------------------------------------
@@ -186,7 +179,7 @@ def generate_rbcp_signal_representation(cfg):
     # IMPORTANT CHANGE:
     # SFC is fed with ta and tb (NOT ta_q / tb_q)
     # -------------------------------------------------------------------------
-    x_sfc = _sfc_reconstruction(
+    x_sfc, sfc_debug = _sfc_reconstruction(
         ta=ta,
         tb=tb,
         t=t,
@@ -222,6 +215,7 @@ def generate_rbcp_signal_representation(cfg):
         "tb": tb,
         "ta_q": ta_q,
         "tb_q": tb_q,
+        "sfc_debug": sfc_debug,
     }
 
 
@@ -270,11 +264,6 @@ def _sfc_reconstruction(ta, tb, t, tau, w0, N, cfg):
     to sensor 0 in a local sensor_x_event.
     """
 
-    # -------------------------------------------------------------------------
-    # Phase core for:
-    # - ta/tb -> events
-    # - events -> ta/tb
-    # -------------------------------------------------------------------------
     phase_core = PhaseCoefficientCore(
         T=tau,
         harmonics=N,
@@ -287,20 +276,14 @@ def _sfc_reconstruction(ta, tb, t, tau, w0, N, cfg):
         threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
     )
 
-    # -------------------------------------------------------------------------
-    # Reshape ta/tb to the trusted phase-core format:
-    #   (num_periods, harmonics, sensors)
-    # -------------------------------------------------------------------------
+    # trusted shape: (num_periods, harmonics, sensors)
     ta_3d = ta.reshape(1, N, 1)
     tb_3d = tb.reshape(1, N, 1)
 
     events = phase_core.ta_tb_to_events(ta_3d, tb_3d)
 
     # -------------------------------------------------------------------------
-    # Build a local cfg for SFCChannel with explicit sensor_x_event
-    #
-    # Representative-signal figure:
-    # all current event IDs are assigned to sensor 0
+    # Build local cfg for SFCChannel
     # -------------------------------------------------------------------------
     cfg_sfc = copy.deepcopy(cfg)
 
@@ -315,16 +298,19 @@ def _sfc_reconstruction(ta, tb, t, tau, w0, N, cfg):
 
     cfg_sfc["channel"]["sensor_x_event"] = sensor_x_event
 
-    # defaults if not provided in YAML
     cfg_sfc["channel"].setdefault("collision_mode", "sum")
     cfg_sfc["channel"].setdefault("type", "awgn")
-    cfg_sfc["channel"].setdefault("threshold", 0.5)
     cfg_sfc["channel"].setdefault("detection_mode", "threshold")
     cfg_sfc["channel"].setdefault("score_threshold", cfg_sfc["system"]["L"])
 
+    # If absolute threshold is not set, let detector derive it centrally
+    if "threshold" not in cfg_sfc["channel"]:
+        cfg_sfc["channel"].setdefault("threshold_factor", 0.5)
+
     sfc_channel = SFCChannel(cfg_sfc)
 
-    events_est = sfc_channel(events)
+    out = sfc_channel(events, return_intermediates=True)
+    events_est = out["events_est"]
 
     ta_rec, tb_rec = phase_core.event_to_ta_tb(events_est)
 
@@ -333,7 +319,15 @@ def _sfc_reconstruction(ta, tb, t, tau, w0, N, cfg):
 
     x_sfc = recover_signal(ta_rec, tb_rec, t, w0)
 
-    return x_sfc
+    debug = {
+        "events": events,
+        "events_est": events_est,
+        "ta_rec": ta_rec,
+        "tb_rec": tb_rec,
+        "channel_intermediates": out,
+    }
+
+    return x_sfc, debug
 
 
 # =============================================================================
@@ -361,7 +355,7 @@ def _benchmark_nyquist(x, tau, Tt, W, B, SNR, cfg):
 
     benchmark_cfg = cfg.get("benchmark", {})
 
-    # sampling_rate configurable from YAML, default = W
+    # configurable from YAML, default = W
     sampling_rate = benchmark_cfg.get("sampling_rate", W)
 
     # Shannon capacity
