@@ -1,0 +1,180 @@
+figure:
+  id: sfc_duplicate_rx
+  manuscript_figure: 4
+  title: "Average probability of receiving duplicate values versus B"
+  description: >
+    Reproduction of Figure 4: average probability of receiving duplicate
+    values (epsilon) versus B, including the upper bound from Lemma 5 and
+    Monte Carlo curves for random signals and uniformly distributed phase
+    parameters.
+
+# ----------------------------------------------------------------------
+# EXECUTION MODES
+# ----------------------------------------------------------------------
+mode:
+  theory: true
+  monte_carlo_random_signals: true
+  monte_carlo_uniform_t: true
+
+# ----------------------------------------------------------------------
+# SYSTEM PARAMETERS
+# ----------------------------------------------------------------------
+system:
+  S: 8
+  P: 1.0
+  B: null          # swept below
+  R: 12
+  L: 4
+  SNR_dB: -20.0
+
+  # Optional bandwidth sharing among sensors.
+  # If omitted or null, the core should divide the total bandwidth equally.
+  bandwidth_allocation: null
+
+# ----------------------------------------------------------------------
+# SIGNAL PARAMETERS
+# ----------------------------------------------------------------------
+signal:
+  W: 6.0
+  tau: 1.0
+  Tt: 0.01
+
+  # Figure 4 explicitly uses N = 3; this is also consistent with
+  # N = floor(W * tau / 2) = floor(6 * 1 / 2) = 3.
+  N_override: 3
+
+  distribution: "uniform"
+  peak_to_peak: 12.0
+
+  normalize_dft: true
+  normalization_target: 3.9
+
+# ----------------------------------------------------------------------
+# SWEEP PARAMETERS
+# ----------------------------------------------------------------------
+sweep:
+  B:
+    start: 10000
+    stop: 90001
+    step: 10000
+
+# ----------------------------------------------------------------------
+# SFC / CHANNEL SETTINGS
+# ----------------------------------------------------------------------
+channel:
+  type: "clean"
+  collision_mode: "sum"
+
+  detection_mode: "threshold"
+  threshold_factor: 0.5
+
+# ----------------------------------------------------------------------
+# DUPLICATE-DETECTION EXPERIMENT
+# ----------------------------------------------------------------------
+duplicate_rx:
+  # Number of Monte Carlo realizations for each B
+  interactions: 100
+
+  # A "duplicate" occurs when at least one parameter t_z^(s,n)
+  # is received more than once in the same transmission cycle.
+  criterion: "nonunique_t"
+
+# ----------------------------------------------------------------------
+# MONTE CARLO SETTINGS
+# ----------------------------------------------------------------------
+monte_carlo:
+  seed: 47
+
+  random_signals:
+    enabled: true
+
+  uniform_t:
+    enabled: true
+
+    # Uniformly distributed ta/tb in the canonical interval:
+    # [-pi/(n w0), pi/(n w0)]
+    enabled_per_harmonic_interval: true
+
+# ----------------------------------------------------------------------
+# THEORY SETTINGS
+# ----------------------------------------------------------------------
+theory:
+  upper_bound: true
+
+  # Lemma 5 uses:
+  #   epsilon <= 1 - M_time! / ((M_time - 2NS)! * M_time^(2NS))
+  #
+  # with:
+  #   M_time = tau * B / R
+  use_lemma_5: true
+
+# ----------------------------------------------------------------------
+# METRICS
+# ----------------------------------------------------------------------
+metrics:
+  epsilon: true
+
+  aggregation:
+    mean: true
+
+# ----------------------------------------------------------------------
+# OUTPUT
+# ----------------------------------------------------------------------
+output:
+  base_dir: "data/results"
+  figure_dir: "sfc_duplicate_rx"
+
+  save_dat: true
+  save_plot: true
+  save_metadata: true
+  save_config_copy: true
+
+  formats:
+    plot: ["png", "pdf"]
+    data: ["dat"]
+
+# ----------------------------------------------------------------------
+# DATA FORMAT
+# ----------------------------------------------------------------------
+data_format:
+  columns:
+    - B
+    - epsilon_upper_bound
+    - epsilon_mc_random_signals
+    - epsilon_mc_uniform_t
+    - num_trials
+
+  delimiter: "\t"
+
+# ----------------------------------------------------------------------
+# PLOT SETTINGS
+# ----------------------------------------------------------------------
+plot:
+  x_axis: "B"
+  y_axis: "epsilon"
+  x_scale: "linear"
+  y_scale: "log"
+  show_grid: true
+  legend: true
+
+  styles:
+    upper_bound: "line"
+    random_signals: "line_with_markers"
+    uniform_t: "line_with_markers"
+
+  label_map:
+    upper_bound: "Upper bound"
+    random_clean: "Random signals (clean)"
+    random_awgn: "Random signals (awgn)"
+    uniform_clean: "Uniform t (clean)"
+    uniform_awgn: "Uniform t (awgn)"
+
+
+
+# ----------------------------------------------------------------------
+# REPRODUCIBILITY
+# ----------------------------------------------------------------------
+reproducibility:
+  save_git_commit: true
+  save_timestamp: true
+  seed: 47

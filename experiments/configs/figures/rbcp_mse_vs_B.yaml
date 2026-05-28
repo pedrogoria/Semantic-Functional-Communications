@@ -1,0 +1,210 @@
+figure:
+  id: rbcp_mse_vs_B
+  manuscript_figure: 5
+  title: "MSE versus B for RbCP, RbCP_time, SFC, and Benchmark Approach"
+  description: >
+    Reproduction of Figure 5: MSE versus B for the Benchmark Approach,
+    RbCP, RbCP_time, and SFC.
+
+# ----------------------------------------------------------------------
+# EXPERIMENT MODES
+# ----------------------------------------------------------------------
+mode:
+  run_benchmark: true
+  run_rbcp: true
+  run_rbcp_time: true
+  run_sfc: true
+
+  # IMPORTANT:
+  # No semantic-based error detection in Figure 5.
+  semantic_error_detection: false
+
+# ----------------------------------------------------------------------
+# SYSTEM PARAMETERS
+# ----------------------------------------------------------------------
+system:
+  S: 8
+  R: 12
+  L: 4
+
+  # Figure 5 in the manuscript uses SNR = -16 dB.
+  SNR_dB: -16.0
+
+  # ------------------------------------------------------------------
+  # MANUSCRIPT-FAITHFUL POWER MODEL
+  #
+  # Keep SNR fixed while sweeping B:
+  #   SNR = P / (B * N0)
+  #
+  # Therefore, for each B:
+  #   P(B) = SNR * B * N0
+  #
+  # We keep N0 fixed and derive P from B.
+  # ------------------------------------------------------------------
+  manuscript_faithful_power_model: true
+  derive_P_from_fixed_N0: true
+
+  # Fixed noise parameter used to derive P(B).
+  # Chosen to follow the manuscript-faithful interpretation of Figure 5.
+  N0: 0.007
+
+  # Placeholder; pipeline should overwrite P for each B when
+  # derive_P_from_fixed_N0 = true
+  P: null
+
+  # ------------------------------------------------------------------
+  # BANDWIDTH SHARING
+  #
+  # If null, the core divides the total bandwidth equally among S sensors.
+  # This affects only communication-budget-based quantities such as:
+  # - M_RbCP
+  # - Benchmark bits per sample
+  # ------------------------------------------------------------------
+  bandwidth_allocation: null
+
+# ----------------------------------------------------------------------
+# SIGNAL PARAMETERS
+# ----------------------------------------------------------------------
+signal:
+  W: 10.4
+  tau: 1.0
+  Tt: 0.01
+
+  # Figure 5 explicitly uses N = 5
+  N_override: 5
+
+  # Monte Carlo source generation
+  distribution: "uniform"
+
+  # Unless otherwise stated, the manuscript uses a peak-to-peak
+  # amplitude of 4 V for the signals.
+  peak_to_peak: 4.0
+
+  normalize_dft: true
+  normalization_target: 3.9
+
+# ----------------------------------------------------------------------
+# DC HANDLING
+# ----------------------------------------------------------------------
+dc:
+  enabled: false
+
+# ----------------------------------------------------------------------
+# BENCHMARK APPROACH
+# ----------------------------------------------------------------------
+benchmark:
+  enabled: true
+  sampling_rate: 10.4
+  effective_rate_factor: 2.0
+  enforce_eq17_rate_matching: true
+
+# ----------------------------------------------------------------------
+# SFC / CHANNEL SETTINGS
+# ----------------------------------------------------------------------
+channel:
+  # Real SFC branch uses the tailored multiuser communication solution
+  type: "awgn"
+  collision_mode: "sum"
+
+  detection_mode: "threshold"
+  threshold_factor: 0.5
+  score_threshold: 4     # default = L
+
+# ----------------------------------------------------------------------
+# RbCP_time SETTINGS
+# ----------------------------------------------------------------------
+rbcp_time:
+  enabled: true
+
+  # IMPORTANT:
+  # Figure 5 interpretation:
+  # RbCP_time is the error-free time-model boundary:
+  #
+  #   signal -> ta/tb -> events -> ta/tb -> signal
+  #
+  # i.e., NO physical channel and NO SFC/MAC layer here.
+  use_error_free_time_model: true
+
+# ----------------------------------------------------------------------
+# SWEEP PARAMETERS
+# ----------------------------------------------------------------------
+sweep:
+  B:
+    # Range chosen to match the scale shown in Figure 5.
+    start: 5000
+    stop: 40001
+    step: 5000
+
+# ----------------------------------------------------------------------
+# MONTE CARLO / AVERAGING
+# ----------------------------------------------------------------------
+monte_carlo:
+  seed: 47
+  interactions: 20
+
+# ----------------------------------------------------------------------
+# METRICS
+# ----------------------------------------------------------------------
+metrics:
+  mse: true
+
+  aggregation:
+    mean: true
+
+# ----------------------------------------------------------------------
+# OUTPUT
+# ----------------------------------------------------------------------
+output:
+  base_dir: "data/results"
+  figure_dir: "rbcp_mse_vs_B"
+
+  save_dat: true
+  save_plot: true
+  save_metadata: true
+  save_config_copy: true
+
+  formats:
+    plot: ["png", "pdf"]
+    data: ["dat"]
+
+# ----------------------------------------------------------------------
+# DATA FORMAT
+# ----------------------------------------------------------------------
+data_format:
+  columns:
+    - B
+    - P_derived
+    - mse_benchmark
+    - mse_rbcp
+    - mse_rbcp_time
+    - mse_sfc
+    - num_trials
+
+  delimiter: "\t"
+
+# ----------------------------------------------------------------------
+# PLOT SETTINGS
+# ----------------------------------------------------------------------
+plot:
+  x_axis: "B"
+  y_axis: "MSE"
+
+  x_scale: "linear"
+  y_scale: "log"
+
+  show_grid: true
+  legend: true
+
+  label_map:
+    benchmark: "Benchmark Approach"
+    rbcp: "RbCP"
+    rbcp_time: "RbCP_time"
+    sfc: "SFC"
+
+# ----------------------------------------------------------------------
+# REPRODUCIBILITY
+# ----------------------------------------------------------------------
+reproducibility:
+  save_git_commit: true
+  save_timestamp: true
+  seed: 47

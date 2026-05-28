@@ -192,8 +192,8 @@ def recover_signal(ta, tb, t, w0):
 
     for n in range(NN):
         x[n, :] = (
-            np.cos((n + 1) * w0 * (t - ta[n]))
-            + np.cos((n + 1) * w0 * (t - tb[n]))
+                np.cos((n + 1) * w0 * (t - ta[n]))
+                + np.cos((n + 1) * w0 * (t - tb[n]))
         )
 
     return np.sum(x, 0)

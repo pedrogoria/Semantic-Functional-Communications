@@ -11,7 +11,7 @@ We denote the signal-to-noise ratio by:
 
 where:
 - P  : average transmit power per sensor
-- B  : channel bandwidth
+- B  : total system bandwidth
 - N0 : noise parameter used by the SFC physical channel
 
 In the software:
@@ -49,7 +49,7 @@ At this stage of the implementation:
 2. The energy per transmitted symbol/resource is:
        E_s = E_tot / L = (P * tau) / L
 
-3. The output is interpreted as the matched-filter output per resource:
+3. The output is interpreted as the matched-filter output per resource-slot:
        y = sqrt(E_s) * signal + n
 
 4. The additive noise is complex Gaussian:
@@ -62,11 +62,16 @@ At this stage of the implementation:
 
 IMPORTANT
 ---------
-This means that the physical channel returns a COMPLEX tensor.
+This module now operates on the FINAL CHANNEL FRAME, i.e.:
 
-Therefore, downstream detection should use |y|, correlation, or another
-matched-filter-compatible decision rule, rather than a plain real-valued
-threshold directly on y.
+    signal.shape = (rx_slots_total, R)
+
+and returns:
+
+    y.shape = (rx_slots_total, R)
+
+This is consistent with the manuscript-level idea that the channel operates on
+the received resource-time frame after the temporal placement of the maps.
 
 Future work may refine:
 - actual pulse shape
@@ -92,10 +97,10 @@ class PhysicalChannel:
     Input / Output shape
     --------------------
     Input:
-        signal : (num_time_slots, L, R)
+        signal : (rx_slots_total, R)
 
     Output:
-        y : (num_time_slots, L, R), complex-valued
+        y : (rx_slots_total, R), complex-valued
     """
 
     def __init__(self, cfg):
@@ -143,7 +148,7 @@ class PhysicalChannel:
 
     def transmit(self, signal):
         """
-        Transmit the aggregate tensor through the physical channel.
+        Transmit the final channel frame through the physical channel.
 
         PRINCIPLE
         ---------
@@ -166,17 +171,20 @@ class PhysicalChannel:
         Parameters
         ----------
         signal : np.ndarray
-            Aggregate transmitted tensor with shape:
-                (num_time_slots, L, R)
+            Final channel frame with shape:
+                (rx_slots_total, R)
 
-            This tensor is interpreted as the structured resource activation
+            This matrix is interpreted as the structured resource-time frame
             BEFORE physical-layer amplitude/noise effects.
 
         Returns
         -------
         np.ndarray
-            Complex-valued received tensor with the same shape as the input.
+            Complex-valued received frame with the same shape as the input.
         """
+
+        assert len(signal.shape) == 2, \
+            "signal must have shape (rx_slots_total, R)"
 
         if self.mode == "clean":
             return self._clean(signal)
@@ -193,8 +201,8 @@ class PhysicalChannel:
 
         PRINCIPLE
         ---------
-        The clean-channel output is still interpreted as the matched-filter
-        output for the transmitted resource symbols:
+        The clean-channel output is interpreted as the matched-filter output
+        for the transmitted resource-time frame:
 
             y = sqrt(E_s) * signal
 
@@ -204,13 +212,13 @@ class PhysicalChannel:
         Parameters
         ----------
         signal : np.ndarray
-            Input tensor with shape:
-                (num_time_slots, L, R)
+            Input frame with shape:
+                (rx_slots_total, R)
 
         Returns
         -------
         np.ndarray
-            Complex-valued clean output tensor.
+            Complex-valued clean output frame.
         """
 
         transmitted = self.signal_level * signal.astype(complex)
@@ -218,7 +226,7 @@ class PhysicalChannel:
 
     def _awgn(self, signal):
         """
-        Apply complex AWGN at the matched-filter output.
+        Apply complex AWGN to the final channel frame.
 
         PRINCIPLE
         ---------
@@ -255,13 +263,13 @@ class PhysicalChannel:
         Parameters
         ----------
         signal : np.ndarray
-            Input tensor with shape:
-                (num_time_slots, L, R)
+            Input frame with shape:
+                (rx_slots_total, R)
 
         Returns
         -------
         np.ndarray
-            Complex-valued noisy output tensor.
+            Complex-valued noisy output frame.
 
         Notes
         -----
@@ -275,4 +283,5 @@ class PhysicalChannel:
         noise = np.sqrt(self.N0 / 2.0) * (
             np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape)
         )
+
         return transmitted + noise

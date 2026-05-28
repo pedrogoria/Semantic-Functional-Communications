@@ -1,32 +1,44 @@
 """
 sfc/core/system_parameters.py
 
-Core module for deriving system parameters based on the physical model.
+Builder and compatibility layer for system-level derived parameters.
 
-This file centralizes:
-- number of harmonics (N)
-- channel capacity
-- number of RbCP bins (M_RbCP)
-- number of temporal resources for SFC (M_time)
-- physical quantities derived from:
-    P, B, R, L, SNR_dB, W, tau
-
-Design goal
+Design rule
 -----------
-Avoid duplicated physical calculations across:
+- Closed-form theoretical formulas live in:
+      sfc/core/theory.py
+- This file is responsible for:
+    1. Packaging primary + derived quantities into a frozen dataclass
+    2. Building the central parameter object from cfg
+    3. Preserving backward compatibility through lightweight wrappers
+
+This avoids duplication of physics / communication formulas across:
 - physical_channel.py
 - detection.py
-- figure pipelines
-- future SFC modules
-
-Single source of truth
-----------------------
-All physical/system-derived quantities should be computed here and then
-consumed by the other modules.
+- pipelines
+- debug scripts
 """
 
-import numpy as np
 from dataclasses import dataclass
+from typing import Optional, Sequence
+
+import numpy as np
+
+from sfc.core.theory import (
+    compute_N as theory_compute_N,
+    compute_capacity as theory_compute_capacity,
+    compute_snr_linear as theory_compute_snr_linear,
+    compute_M_rbcp as theory_compute_M_rbcp,
+    compute_M_rbcp_per_sensor as theory_compute_M_rbcp_per_sensor,
+    compute_M_time as theory_compute_M_time,
+    compute_N0 as theory_compute_N0,
+    compute_total_energy as theory_compute_total_energy,
+    compute_symbol_energy as theory_compute_symbol_energy,
+    compute_signal_level as theory_compute_signal_level,
+    compute_default_detection_threshold as theory_compute_default_detection_threshold,
+    compute_bandwidth_allocation as theory_compute_bandwidth_allocation,
+    compute_sensor_bandwidths as theory_compute_sensor_bandwidths,
+)
 
 
 # =============================================================================
@@ -36,7 +48,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class DerivedSystemParameters:
     """
-    Immutable container for system-level derived parameters.
+    Immutable container for system-level primary + derived parameters.
 
     Primary parameters
     ------------------
@@ -47,7 +59,7 @@ class DerivedSystemParameters:
         Average transmit power per sensor.
 
     B : float
-        Channel bandwidth.
+        Total system bandwidth.
 
     R : int
         Number of resources / subcarriers.
@@ -56,13 +68,13 @@ class DerivedSystemParameters:
         Number of temporal resources / symbols per cycle.
 
     SNR_dB : float
-        Signal-to-noise ratio in dB, as stored in the cfg.
+        Signal-to-noise ratio in dB.
 
     W : float
         Signal bandwidth.
 
     tau : float
-        Duration of one cycle / frame.
+        Cycle / frame duration.
 
     Derived parameters
     ------------------
@@ -73,11 +85,14 @@ class DerivedSystemParameters:
         Number of harmonics.
 
     M_rbcp : int
-        Number of quantization bins for the RbCP representation.
+        Common feasible number of RbCP bins.
+
+    M_rbcp_per_sensor : np.ndarray
+        Feasible RbCP bins per sensor.
 
     M_time : int
         Number of temporal resources for SFC:
-            M_time = tau * B / R
+            M_time = floor(tau * B / R)
 
     N0 : float
         Noise parameter derived from:
@@ -89,15 +104,21 @@ class DerivedSystemParameters:
 
     E_s : float
         Energy per transmitted symbol/resource:
-            E_s = E_tot / L = (P * tau) / L
+            E_s = (P * tau) / L
 
     signal_level : float
-        Expected amplitude scale at the matched-filter output:
+        Expected matched-filter signal amplitude:
             sqrt(E_s)
 
     default_threshold : float
-        Default detection threshold derived from:
+        Default detector threshold:
             threshold_factor * signal_level
+
+    bandwidth_allocation : np.ndarray
+        Fraction of total bandwidth assigned to each sensor.
+
+    B_per_sensor : np.ndarray
+        Effective bandwidth assigned to each sensor.
     """
 
     # primary inputs
@@ -114,319 +135,22 @@ class DerivedSystemParameters:
     SNR: float
     N: int
     M_rbcp: int
+    M_rbcp_per_sensor: np.ndarray
     M_time: int
     N0: float
     E_tot: float
     E_s: float
     signal_level: float
     default_threshold: float
+    bandwidth_allocation: np.ndarray
+    B_per_sensor: np.ndarray
 
 
 # =============================================================================
-# N (NUMBER OF HARMONICS)
+# CENTRAL BUILDER
 # =============================================================================
 
-def compute_N(W, tau):
-    """
-    Compute the number of harmonics.
-
-        N = floor(W * tau / 2)
-
-    Parameters
-    ----------
-    W : float
-        Signal bandwidth.
-
-    tau : float
-        Duration of observation frame / cycle.
-
-    Returns
-    -------
-    int
-        Number of harmonics.
-    """
-    return int(np.floor((W * tau) / 2))
-
-
-# =============================================================================
-# CHANNEL CAPACITY
-# =============================================================================
-
-def compute_capacity(B, SNR):
-    """
-    Compute the Shannon channel capacity.
-
-        C = B * log2(1 + SNR)
-
-    Parameters
-    ----------
-    B : float
-        Channel bandwidth.
-
-    SNR : float
-        Signal-to-noise ratio in linear scale.
-
-    Returns
-    -------
-    float
-        Capacity in bits per second.
-    """
-    return B * np.log2(1 + SNR)
-
-
-# =============================================================================
-# RBCP BINS
-# =============================================================================
-
-def compute_M_rbcp(S, W, tau, B, SNR):
-    """
-    Compute the number of quantization bins for RbCP.
-
-    Derived from the communication constraint:
-        2 * N * S * log2(M_RbCP) <= tau * B * log2(1 + SNR)
-
-    Therefore:
-        bits_per_symbol = [tau * B * log2(1 + SNR)] / [2 * N * S]
-
-        M_RbCP = 2 ^ floor(bits_per_symbol)
-
-    Parameters
-    ----------
-    S : int
-        Number of sensors/signals.
-
-    W : float
-        Signal bandwidth.
-
-    tau : float
-        Frame duration.
-
-    B : float
-        Channel bandwidth.
-
-    SNR : float
-        Signal-to-noise ratio in linear scale.
-
-    Returns
-    -------
-    int
-        Number of bins (power of 2).
-    """
-
-    N = compute_N(W, tau)
-
-    capacity_bits = tau * compute_capacity(B, SNR)
-
-    bits_per_symbol = capacity_bits / (2 * N * S)
-
-    bits_per_symbol = max(bits_per_symbol, 1e-12)
-    bits_int = int(np.floor(bits_per_symbol))
-
-    return int(2 ** bits_int)
-
-
-# =============================================================================
-# SFC TEMPORAL RESOURCES (NOT BENCHMARK)
-# =============================================================================
-
-def compute_M_time(tau, B, R):
-    """
-    Compute the temporal resources for SFC.
-
-        M_time = tau * B / R
-
-    Parameters
-    ----------
-    tau : float
-        Frame duration.
-
-    B : float
-        Channel bandwidth.
-
-    R : int
-        Number of resources / subcarriers.
-
-    Returns
-    -------
-    int
-        Number of temporal resources for SFC.
-    """
-    return int(np.floor((tau * B) / R))
-
-
-# =============================================================================
-# SNR CONVERSION
-# =============================================================================
-
-def compute_snr_linear(SNR_dB):
-    """
-    Convert SNR from dB to linear scale.
-
-    Parameters
-    ----------
-    SNR_dB : float
-        SNR in dB.
-
-    Returns
-    -------
-    float
-        SNR in linear scale.
-    """
-    return 10 ** (SNR_dB / 10.0)
-
-
-# =============================================================================
-# NOISE PARAMETER
-# =============================================================================
-
-def compute_N0(P, B, SNR):
-    """
-    Compute the noise parameter N0 from:
-
-        SNR = P / (B * N0)
-
-    Therefore:
-
-        N0 = P / (B * SNR)
-
-    Parameters
-    ----------
-    P : float
-        Average transmit power.
-
-    B : float
-        Channel bandwidth.
-
-    SNR : float
-        Signal-to-noise ratio in linear scale.
-
-    Returns
-    -------
-    float
-        Noise parameter N0.
-    """
-    return P / (B * SNR)
-
-
-# =============================================================================
-# ENERGY
-# =============================================================================
-
-def compute_total_energy(P, tau):
-    """
-    Compute total available energy per cycle:
-
-        E_tot = P * tau
-
-    Parameters
-    ----------
-    P : float
-        Average transmit power.
-
-    tau : float
-        Cycle / frame duration.
-
-    Returns
-    -------
-    float
-        Total available energy per cycle.
-    """
-    return P * tau
-
-
-def compute_symbol_energy(P, tau, L):
-    """
-    Compute the average energy per transmitted symbol/resource.
-
-    Under the current modeling assumption, the total available energy over one
-    cycle is uniformly distributed across the L transmitted symbols/resources:
-
-        E_s = (P * tau) / L
-
-    Parameters
-    ----------
-    P : float
-        Average transmit power.
-
-    tau : float
-        Cycle / frame duration.
-
-    L : int
-        Number of temporal symbols/resources per cycle.
-
-    Returns
-    -------
-    float
-        Energy per symbol/resource.
-    """
-    return (P * tau) / L
-
-
-def compute_signal_level(P, tau, L):
-    """
-    Compute the expected matched-filter output amplitude scale:
-
-        signal_level = sqrt(E_s)
-
-    where:
-        E_s = (P * tau) / L
-
-    Parameters
-    ----------
-    P : float
-        Average transmit power.
-
-    tau : float
-        Cycle / frame duration.
-
-    L : int
-        Number of symbols/resources per cycle.
-
-    Returns
-    -------
-    float
-        Expected signal amplitude level.
-    """
-    E_s = compute_symbol_energy(P, tau, L)
-    return np.sqrt(E_s)
-
-
-def compute_default_detection_threshold(P, tau, L, threshold_factor=0.5):
-    """
-    Compute the default detection threshold.
-
-        threshold = threshold_factor * sqrt(E_s)
-
-    where:
-        E_s = (P * tau) / L
-
-    Parameters
-    ----------
-    P : float
-        Average transmit power.
-
-    tau : float
-        Cycle / frame duration.
-
-    L : int
-        Number of symbols/resources per cycle.
-
-    threshold_factor : float, optional
-        Multiplicative factor applied to the expected signal level.
-
-    Returns
-    -------
-    float
-        Default detection threshold.
-    """
-    return threshold_factor * compute_signal_level(P, tau, L)
-
-
-# =============================================================================
-# FULL BUILDER
-# =============================================================================
-
-def build_derived_system_parameters(cfg, threshold_factor=None):
+def build_derived_system_parameters(cfg, threshold_factor: Optional[float] = None):
     """
     Build the full set of derived system parameters from the configuration.
 
@@ -443,8 +167,16 @@ def build_derived_system_parameters(cfg, threshold_factor=None):
             cfg["signal"]["W"]
             cfg["signal"]["tau"]
 
-    threshold_factor : float, optional
+        Optional:
+            cfg["system"]["bandwidth_allocation"]
+            cfg["channel"]["threshold_factor"]
+
+    threshold_factor : float or None, optional
         Factor used to derive the default detector threshold.
+
+        If None, it is read from:
+            cfg["channel"]["threshold_factor"]
+        and defaults to 0.5 if absent.
 
     Returns
     -------
@@ -453,7 +185,7 @@ def build_derived_system_parameters(cfg, threshold_factor=None):
     """
 
     # -------------------------------------------------------------------------
-    # Primary parameters from cfg
+    # Primary parameters
     # -------------------------------------------------------------------------
     S = cfg["system"]["S"]
     P = cfg["system"]["P"]
@@ -465,25 +197,56 @@ def build_derived_system_parameters(cfg, threshold_factor=None):
     W = cfg["signal"]["W"]
     tau = cfg["signal"]["tau"]
 
+    bandwidth_allocation = cfg["system"].get("bandwidth_allocation", None)
+
+    # -------------------------------------------------------------------------
+    # Threshold factor source
+    # -------------------------------------------------------------------------
     if threshold_factor is None:
         threshold_factor = cfg.get("channel", {}).get("threshold_factor", 0.5)
 
     # -------------------------------------------------------------------------
-    # Derived
+    # Derived quantities from theory.py
     # -------------------------------------------------------------------------
-    SNR = compute_snr_linear(SNR_dB)
+    SNR = theory_compute_snr_linear(SNR_dB)
 
-    N = compute_N(W, tau)
-    M_rbcp = compute_M_rbcp(S, W, tau, B, SNR)
-    M_time = compute_M_time(tau, B, R)
+    N = theory_compute_N(W, tau)
 
-    N0 = compute_N0(P, B, SNR)
+    alloc, B_per_sensor = theory_compute_sensor_bandwidths(
+        B=B,
+        S=S,
+        bandwidth_allocation=bandwidth_allocation
+    )
 
-    E_tot = compute_total_energy(P, tau)
-    E_s = compute_symbol_energy(P, tau, L)
-    signal_level = compute_signal_level(P, tau, L)
+    M_rbcp_per_sensor = theory_compute_M_rbcp_per_sensor(
+        S=S,
+        W=W,
+        tau=tau,
+        B=B,
+        SNR=SNR,
+        bandwidth_allocation=bandwidth_allocation
+    )
 
-    default_threshold = compute_default_detection_threshold(
+    M_rbcp = theory_compute_M_rbcp(
+        S=S,
+        W=W,
+        tau=tau,
+        B=B,
+        SNR=SNR,
+        bandwidth_allocation=bandwidth_allocation
+    )
+
+    M_time = theory_compute_M_time(tau, B, R)
+
+    # IMPORTANT:
+    # As specified in the project, N0 uses the TOTAL system bandwidth B.
+    N0 = theory_compute_N0(P, B, SNR)
+
+    E_tot = theory_compute_total_energy(P, tau)
+    E_s = theory_compute_symbol_energy(P, tau, L)
+    signal_level = theory_compute_signal_level(P, tau, L)
+
+    default_threshold = theory_compute_default_detection_threshold(
         P=P,
         tau=tau,
         L=L,
@@ -502,10 +265,179 @@ def build_derived_system_parameters(cfg, threshold_factor=None):
         SNR=SNR,
         N=N,
         M_rbcp=M_rbcp,
+        M_rbcp_per_sensor=M_rbcp_per_sensor,
         M_time=M_time,
         N0=N0,
         E_tot=E_tot,
         E_s=E_s,
         signal_level=signal_level,
         default_threshold=default_threshold,
+        bandwidth_allocation=alloc,
+        B_per_sensor=B_per_sensor,
     )
+
+
+# =============================================================================
+# BACKWARD-COMPATIBILITY WRAPPERS
+# =============================================================================
+#
+# These wrappers preserve old imports such as:
+#   from sfc.core.system_parameters import compute_N, compute_M_rbcp, ...
+#
+# Internally, they simply delegate to theory.py.
+# =============================================================================
+
+def compute_N(W: float, tau: float) -> int:
+    """
+    Backward-compatible wrapper for theory.compute_N().
+    """
+    return theory_compute_N(W, tau)
+
+
+def compute_capacity(B: float, SNR: float) -> float:
+    """
+    Backward-compatible wrapper for theory.compute_capacity().
+    """
+    return theory_compute_capacity(B, SNR)
+
+
+def compute_snr_linear(SNR_dB: float) -> float:
+    """
+    Backward-compatible wrapper for theory.compute_snr_linear().
+    """
+    return theory_compute_snr_linear(SNR_dB)
+
+
+def compute_bandwidth_allocation(
+    S: int,
+    bandwidth_allocation: Optional[Sequence[float]] = None
+) -> np.ndarray:
+    """
+    Backward-compatible wrapper for theory.compute_bandwidth_allocation().
+    """
+    return theory_compute_bandwidth_allocation(S, bandwidth_allocation)
+
+
+def compute_sensor_bandwidths(
+    B: float,
+    S: int,
+    bandwidth_allocation: Optional[Sequence[float]] = None
+):
+    """
+    Backward-compatible wrapper for theory.compute_sensor_bandwidths().
+    """
+    return theory_compute_sensor_bandwidths(B, S, bandwidth_allocation)
+
+
+def compute_M_rbcp(
+    S: int,
+    W: float,
+    tau: float,
+    B: float,
+    SNR: float,
+    bandwidth_allocation: Optional[Sequence[float]] = None
+) -> int:
+    """
+    Backward-compatible wrapper for theory.compute_M_rbcp().
+    """
+    return theory_compute_M_rbcp(
+        S=S,
+        W=W,
+        tau=tau,
+        B=B,
+        SNR=SNR,
+        bandwidth_allocation=bandwidth_allocation
+    )
+
+
+def compute_M_rbcp_per_sensor(
+    S: int,
+    W: float,
+    tau: float,
+    B: float,
+    SNR: float,
+    bandwidth_allocation: Optional[Sequence[float]] = None
+) -> np.ndarray:
+    """
+    Backward-compatible wrapper for theory.compute_M_rbcp_per_sensor().
+    """
+    return theory_compute_M_rbcp_per_sensor(
+        S=S,
+        W=W,
+        tau=tau,
+        B=B,
+        SNR=SNR,
+        bandwidth_allocation=bandwidth_allocation
+    )
+
+
+def compute_M_time(tau: float, B: float, R: int) -> int:
+    """
+    Backward-compatible wrapper for theory.compute_M_time().
+    """
+    return theory_compute_M_time(tau, B, R)
+
+
+def compute_N0(P: float, B: float, SNR: float) -> float:
+    """
+    Backward-compatible wrapper for theory.compute_N0().
+    """
+    return theory_compute_N0(P, B, SNR)
+
+
+def compute_total_energy(P: float, tau: float) -> float:
+    """
+    Backward-compatible wrapper for theory.compute_total_energy().
+    """
+    return theory_compute_total_energy(P, tau)
+
+
+def compute_symbol_energy(P: float, tau: float, L: int) -> float:
+    """
+    Backward-compatible wrapper for theory.compute_symbol_energy().
+    """
+    return theory_compute_symbol_energy(P, tau, L)
+
+
+def compute_signal_level(P: float, tau: float, L: int) -> float:
+    """
+    Backward-compatible wrapper for theory.compute_signal_level().
+    """
+    return theory_compute_signal_level(P, tau, L)
+
+
+def compute_default_detection_threshold(
+    P: float,
+    tau: float,
+    L: int,
+    threshold_factor: float = 0.5
+) -> float:
+    """
+    Backward-compatible wrapper for theory.compute_default_detection_threshold().
+    """
+    return theory_compute_default_detection_threshold(P, tau, L, threshold_factor)
+
+
+# =============================================================================
+# OPTIONAL EXPORT LIST
+# =============================================================================
+
+__all__ = [
+    "DerivedSystemParameters",
+    "build_derived_system_parameters",
+
+    # backward-compatible wrappers
+    "compute_N",
+    "compute_capacity",
+    "compute_snr_linear",
+    "compute_bandwidth_allocation",
+    "compute_sensor_bandwidths",
+    "compute_M_rbcp",
+    "compute_M_rbcp_per_sensor",
+    "compute_M_time",
+    "compute_N0",
+    "compute_total_energy",
+    "compute_symbol_energy",
+    "compute_signal_level",
+    "compute_default_detection_threshold",
+]

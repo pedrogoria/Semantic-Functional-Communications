@@ -43,7 +43,7 @@ signal:
   Tt: 0.001
 
   # Signal amplitude adjustment
-  peak_to_peak: 8.0
+  peak_to_peak: 12.0
 
   # DFT normalization
   normalize_dft: true

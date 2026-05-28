@@ -1,631 +1,695 @@
 """
 sfc/core/theory.py
 
-Trusted analytical/theoretical formulas extracted from the manuscript.
+Central repository for closed-form theoretical relations used across the project.
 
-This module centralizes deterministic, stateless formulas used for:
-- Benchmark / Nyquist theoretical calculations
-- RbCP theoretical calculations
-- Time-domain reporting theoretical calculations
-- SFC overlap upper bound
-- Latency expressions
-- Capacity-induced quantization-bin relations
+This module centralizes formulas from the manuscript, including:
+- number of harmonics N
+- Shannon capacity
+- RbCP Q-factor
+- MSE bounds / approximations for RbCP
+- relations between M and M_RbCP
+- common / per-sensor feasible M_RbCP under bandwidth sharing
+- benchmark bits-per-sample under capacity constraints
+- SFC time-slot relations
+- duplicate-reception upper bound (Lemma 5)
+- physical helper formulas (SNR, N0, energy, thresholds)
 
-IMPORTANT
----------
-This file is intended to contain ONLY closed-form or direct analytical
-expressions from the manuscript.
-
-Allowed contents:
-- deterministic mathematical formulas
-- simple helper functions to combine manuscript equations
-- numerically stable implementations of the exact same formulas
-
-Forbidden contents:
-- Monte Carlo simulation logic
-- file I/O
-- plotting
-- experiment orchestration
-- any approximation not explicitly documented
-
-Design choice
--------------
-Functions are used instead of classes because these formulas are stateless,
-deterministic, and easier to audit in a functional style.
+Design rule
+-----------
+Pipelines, channel modules, debug scripts, and builders should import the
+theoretical relations from this file instead of reimplementing formulas locally.
 """
 
 from __future__ import annotations
 
 import math
+from typing import Optional, Sequence, Tuple
+
 import numpy as np
 
 
 # =============================================================================
-# Basic channel/capacity formulas
+# BASIC SIGNAL / CHANNEL THEORY
 # =============================================================================
 
-def shannon_capacity(B: float, P: float, N0: float) -> float:
+def compute_N(W: float, tau: float) -> int:
     """
-    Compute the Shannon capacity used in the manuscript:
+    Number of harmonics.
 
-        C = B * log2(1 + P / (B * N0))
-
-    Parameters
-    ----------
-    B : float
-        Channel bandwidth.
-
-    P : float
-        Average transmit power.
-
-    N0 : float
-        One-sided noise spectral density parameter as used in the manuscript.
-
-    Returns
-    -------
-    float
-        Shannon capacity in bits per second.
-    """
-
-    return B * np.log2(1.0 + P / (B * N0))
-
-
-def benchmark_rate(W: float, M: float, S: int = 1) -> float:
-    """
-    Benchmark/Nyquist rate:
-
-        R_BA = W * S * log2(M)
+        N = floor(W * tau / 2)
 
     Parameters
     ----------
     W : float
-        Signal bandwidth parameter used in the manuscript.
-
-    M : float
-        Number of quantization bins for the Benchmark approach.
-
-    S : int, optional
-        Number of users/sensors.
-
-    Returns
-    -------
-    float
-        Required rate in bits per second.
-    """
-
-    return W * S * np.log2(M)
-
-
-def rbcp_rate(M_rbcp: float, N: int, tau: float, S: int = 1) -> float:
-    """
-    RbCP reporting rate:
-
-        R_RbCP = (2 * N * S / tau) * log2(M_RbCP)
-
-    Parameters
-    ----------
-    M_rbcp : float
-        Number of bins used to quantize the phase parameters.
-
-    N : int
-        Number of harmonics.
-
+        Signal bandwidth.
     tau : float
-        Observation window / signal period.
-
-    S : int, optional
-        Number of users/sensors.
+        Cycle / frame duration.
 
     Returns
     -------
-    float
-        Required rate in bits per second.
+    int
+        Number of harmonics.
     """
+    return int(np.floor((W * tau) / 2))
 
-    return (2.0 * N * S / tau) * np.log2(M_rbcp)
 
-
-def benchmark_max_bins(B: float, P: float, N0: float, W: float, S: int = 1) -> float:
+def compute_snr_linear(SNR_dB: float) -> float:
     """
-    Maximum Benchmark/Nyquist number of bins under the manuscript capacity model.
+    Convert SNR from dB to linear scale.
+    """
+    return 10 ** (SNR_dB / 10.0)
 
-    From:
-        W * S * log2(M) <= B * log2(1 + P / (B * N0))
 
-    Therefore:
-        M <= (1 + P / (B * N0)) ** (B / (W * S))
+def compute_capacity(B: float, SNR: float) -> float:
+    """
+    Shannon capacity.
+
+        C = B * log2(1 + SNR)
 
     Parameters
     ----------
     B : float
         Channel bandwidth.
-
-    P : float
-        Average transmit power.
-
-    N0 : float
-        Noise spectral density parameter.
-
-    W : float
-        Signal bandwidth parameter.
-
-    S : int, optional
-        Number of users/sensors.
+    SNR : float
+        Signal-to-noise ratio in linear scale.
 
     Returns
     -------
     float
-        Maximum admissible number of bins for the Benchmark approach.
+        Capacity in bits per second.
     """
-
-    return (1.0 + P / (B * N0)) ** (B / (W * S))
-
-
-def rbcp_max_bins(B: float, P: float, N0: float, N: int, tau: float, S: int = 1) -> float:
-    """
-    Maximum RbCP number of bins under the manuscript capacity model.
-
-    From:
-        (2 * N * S / tau) * log2(M_RbCP) <= B * log2(1 + P / (B * N0))
-
-    Therefore:
-        M_RbCP <= (1 + P / (B * N0)) ** (tau * B / (2 * N * S))
-
-    Parameters
-    ----------
-    B : float
-        Channel bandwidth.
-
-    P : float
-        Average transmit power.
-
-    N0 : float
-        Noise spectral density parameter.
-
-    N : int
-        Number of harmonics.
-
-    tau : float
-        Observation window / signal period.
-
-    S : int, optional
-        Number of users/sensors.
-
-    Returns
-    -------
-    float
-        Maximum admissible number of bins for RbCP.
-    """
-
-    return (1.0 + P / (B * N0)) ** (tau * B / (2.0 * N * S))
+    return B * np.log2(1 + SNR)
 
 
 # =============================================================================
-# Figure-1 / Figure-2 related formulas
+# RbCP THEORY (LEMMA 4 / PROPOSITION 2)
 # =============================================================================
 
-def compute_q(M: float) -> float:
+def compute_q(M_rbcp: int) -> float:
     """
-    Compute the Q factor used in the manuscript:
+    Compute the Q term used in Lemma 3 / Lemma 4 / Proposition 2:
 
-        Q = (M / (2*pi)) * sin(pi / M)
+        Q = (M_RbCP / (2*pi)) * sin(pi / M_RbCP)
 
     Parameters
     ----------
-    M : float
-        Number of quantization bins.
+    M_rbcp : int
+        Number of quantization bins for the RbCP representation.
 
     Returns
     -------
     float
         Q factor.
     """
-
-    return (M / (2.0 * np.pi)) * np.sin(np.pi / M)
-
-
-def benchmark_mse(M: float) -> float:
-    """
-    Benchmark/Nyquist normalized MSE:
-
-        MSE_{x,y} = 1 / (12 * M^2)
-
-    Parameters
-    ----------
-    M : float
-        Number of quantization bins.
-
-    Returns
-    -------
-    float
-        Normalized MSE of the Benchmark approach.
-    """
-
-    return 1.0 / (12.0 * M**2)
-
-
-def rbcp_mse_general(N: int, Q: float, I) -> float:
-    """
-    General RbCP MSE from the manuscript (Lemma 3 / Eq. 12):
-
-        MSE_RbCP = 2N - sum_n [4Q - (2Q - 1)^2 * I_n]
-
-    Parameters
-    ----------
-    N : int
-        Number of harmonics.
-
-    Q : float
-        Q factor defined by the manuscript.
-
-    I : float or array-like
-        Integral term from the joint distribution of t_a and t_b.
-        If scalar, the same value is used for all harmonics.
-        If array-like, it must contain one value per harmonic.
-
-    Returns
-    -------
-    float
-        Theoretical RbCP MSE.
-    """
-
-    I_arr = np.asarray(I, dtype=float)
-
-    if I_arr.ndim == 0:
-        I_arr = np.full(N, float(I_arr))
-
-    if I_arr.shape[0] != N:
-        raise ValueError("I must be scalar or have length N.")
-
-    return 2.0 * N - np.sum(4.0 * Q - (2.0 * Q - 1.0) ** 2 * I_arr)
-
-
-def rbcp_mse_lower_bound(N: int, Q: float) -> float:
-    """
-    Lower bound from Lemma 4:
-
-        (MSE_RbCP / N) >= 1 - 4Q^2
-
-    Therefore:
-        MSE_RbCP >= N * (1 - 4Q^2)
-
-    Parameters
-    ----------
-    N : int
-        Number of harmonics.
-
-    Q : float
-        Q factor.
-
-    Returns
-    -------
-    float
-        Lower bound on MSE_RbCP.
-    """
-
-    return N * (1.0 - 4.0 * Q**2)
+    return (M_rbcp / (2.0 * np.pi)) * np.sin(np.pi / M_rbcp)
 
 
 def rbcp_mse_upper_bound(N: int, Q: float) -> float:
     """
-    Upper bound from Lemma 4:
+    Lemma 4 upper bound for MSE_RbCP:
 
-        (MSE_RbCP / N) <= 4 * (1/2 - Q) * (3/2 - Q)
+        MSE_RbCP / N <= 4 * (1/2 - Q) * (3/2 - Q)
 
     Therefore:
-        MSE_RbCP <= 4N * (1/2 - Q) * (3/2 - Q)
+
+        MSE_upper = 4 * N * (1/2 - Q) * (3/2 - Q)
 
     Parameters
     ----------
     N : int
         Number of harmonics.
-
     Q : float
         Q factor.
 
     Returns
     -------
     float
-        Upper bound on MSE_RbCP.
+        Upper bound on the RbCP MSE.
     """
-
     return 4.0 * N * (0.5 - Q) * (1.5 - Q)
+
+
+def rbcp_mse_lower_bound(N: int, Q: float) -> float:
+    """
+    Lemma 4 lower bound for MSE_RbCP:
+
+        MSE_RbCP / N >= 1 - 4Q^2
+
+    Therefore:
+
+        MSE_lower = N * (1 - 4Q^2)
+
+    Parameters
+    ----------
+    N : int
+        Number of harmonics.
+    Q : float
+        Q factor.
+
+    Returns
+    -------
+    float
+        Lower bound on the RbCP MSE.
+    """
+    return N * (1.0 - 4.0 * Q * Q)
 
 
 def rbcp_mse_star(N: int, Q: float) -> float:
     """
     Proposition 2:
 
-        MSE*_RbCP = 2N * (1 - 2Q)
+        MSE*_RbCP = 2N (1 - 2Q)
 
     Parameters
     ----------
     N : int
         Number of harmonics.
-
     Q : float
         Q factor.
 
     Returns
     -------
     float
-        Analytical MSE* under the manuscript uniformity assumptions.
+        MSE*_RbCP.
     """
-
     return 2.0 * N * (1.0 - 2.0 * Q)
 
 
 # =============================================================================
-# Bin relations used in the manuscript
+# RELATION BETWEEN M AND M_RbCP (EQ. 17)
 # =============================================================================
 
-def xi_from_bandwidth(W: float, w0: float) -> float:
+def compute_M_rbcp_from_M(M: float, W: float, tau: float) -> float:
     """
-    Compute the xi term used in Eq. (17):
+    Equation (17):
 
-        xi = pi*W / w0 - floor(pi*W / w0)
+        M_RbCP = M * tau * W / (2N)
 
-    Parameters
-    ----------
-    W : float
-        Signal bandwidth parameter.
+    with:
+        N = floor(W * tau / 2)
 
-    w0 : float
-        Fundamental angular frequency.
-
-    Returns
-    -------
-    float
-        Fractional spectral remainder xi in [0, 1).
-    """
-
-    return np.pi * W / w0 - np.floor(np.pi * W / w0)
-
-
-def rbcp_bins_from_benchmark(M: float, W: float, w0: float, tau: float | None = None) -> float:
-    """
-    Compute M_RbCP from M using the manuscript relation (Eq. 17).
-
-    The manuscript gives:
-        M_RbCP = M * (tau * W) / (2N)
-
-    Using tau = 2*pi / w0 and N = floor(pi*W / w0), the equivalent expression is:
-        M_RbCP = M * (pi*W) / (pi*W - xi*w0)
+    This is equivalent to the manuscript relation:
+        M_RbCP = M * pi*W / (pi*W - xi*w0)
 
     Parameters
     ----------
     M : float
-        Benchmark number of bins.
-
+        Number of Benchmark quantization bins.
     W : float
-        Signal bandwidth parameter.
-
-    w0 : float
-        Fundamental angular frequency.
-
-    tau : float or None, optional
-        Signal period / observation window. If None, tau is inferred as 2*pi / w0.
+        Signal bandwidth.
+    tau : float
+        Frame duration.
 
     Returns
     -------
     float
-        Manuscript-equivalent number of RbCP bins.
+        Corresponding M_RbCP value.
     """
-
-    if tau is None:
-        tau = 2.0 * np.pi / w0
-
-    N = int(np.floor(np.pi * W / w0))
+    N = compute_N(W, tau)
     return M * tau * W / (2.0 * N)
 
 
-def time_bins(tau: float, B: float, R: float) -> float:
+def compute_M_from_M_rbcp(M_rbcp: float, W: float, tau: float) -> float:
     """
-    Number of time bins used by the Time abstraction:
+    Inverse of Equation (17):
+
+        M = M_RbCP * (2N) / (tau * W)
+
+    Parameters
+    ----------
+    M_rbcp : float
+        Number of RbCP bins.
+    W : float
+        Signal bandwidth.
+    tau : float
+        Frame duration.
+
+    Returns
+    -------
+    float
+        Corresponding Benchmark M value.
+    """
+    N = compute_N(W, tau)
+    return M_rbcp * (2.0 * N) / (tau * W)
+
+
+# =============================================================================
+# BANDWIDTH SHARING AMONG SENSORS
+# =============================================================================
+
+def compute_bandwidth_allocation(
+    S: int,
+    bandwidth_allocation: Optional[Sequence[float]] = None
+) -> np.ndarray:
+    """
+    Compute / validate the bandwidth-allocation vector.
+
+    Rules
+    -----
+    - if None: equal split among S sensors
+    - otherwise:
+        * length must be S
+        * entries must be nonnegative
+        * sum must be 1
+
+    Returns
+    -------
+    np.ndarray
+        Allocation vector of length S.
+    """
+    if bandwidth_allocation is None:
+        return np.ones(S, dtype=float) / S
+
+    alloc = np.asarray(bandwidth_allocation, dtype=float)
+
+    if alloc.ndim != 1:
+        raise ValueError("bandwidth_allocation must be a 1D vector")
+
+    if len(alloc) != S:
+        raise ValueError(
+            f"bandwidth_allocation must have length S={S}, got {len(alloc)}"
+        )
+
+    if np.any(alloc < 0):
+        raise ValueError("bandwidth_allocation must contain nonnegative values")
+
+    if not np.isclose(np.sum(alloc), 1.0):
+        raise ValueError(
+            f"bandwidth_allocation must sum to 1, got sum={np.sum(alloc)}"
+        )
+
+    return alloc
+
+
+def compute_sensor_bandwidths(
+    B: float,
+    S: int,
+    bandwidth_allocation: Optional[Sequence[float]] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute effective per-sensor bandwidths from the total bandwidth B.
+
+    Returns
+    -------
+    tuple
+        (allocation, B_per_sensor)
+    """
+    alloc = compute_bandwidth_allocation(S, bandwidth_allocation)
+    B_per_sensor = B * alloc
+    return alloc, B_per_sensor
+
+
+# =============================================================================
+# RbCP FEASIBLE NUMBER OF BINS UNDER BANDWIDTH SHARING
+# =============================================================================
+
+def compute_M_rbcp_single_sensor(W: float, tau: float, B_sensor: float, SNR: float) -> int:
+    """
+    Feasible number of RbCP bins for ONE sensor.
+
+    For one sensor:
+        2N log2(M_RbCP) <= tau * B_sensor * log2(1 + SNR)
+
+    Parameters
+    ----------
+    W : float
+        Signal bandwidth.
+    tau : float
+        Frame duration.
+    B_sensor : float
+        Bandwidth slice assigned to this sensor.
+    SNR : float
+        Signal-to-noise ratio in linear scale.
+
+    Returns
+    -------
+    int
+        Feasible M_RbCP for one sensor.
+    """
+    N = compute_N(W, tau)
+
+    capacity_bits = tau * compute_capacity(B_sensor, SNR)
+    bits_per_symbol = capacity_bits / (2.0 * N)
+
+    bits_per_symbol = max(bits_per_symbol, 1e-12)
+    bits_int = int(np.floor(bits_per_symbol))
+
+    return int(2 ** bits_int)
+
+
+def compute_M_rbcp_per_sensor(
+    S: int,
+    W: float,
+    tau: float,
+    B: float,
+    SNR: float,
+    bandwidth_allocation: Optional[Sequence[float]] = None
+) -> np.ndarray:
+    """
+    Per-sensor feasible M_RbCP values, accounting for bandwidth sharing.
+
+    Returns
+    -------
+    np.ndarray
+        Shape (S,)
+    """
+    _, B_per_sensor = compute_sensor_bandwidths(B, S, bandwidth_allocation)
+
+    return np.array([
+        compute_M_rbcp_single_sensor(W, tau, B_s, SNR)
+        for B_s in B_per_sensor
+    ], dtype=int)
+
+
+def compute_M_rbcp(
+    S: int,
+    W: float,
+    tau: float,
+    B: float,
+    SNR: float,
+    bandwidth_allocation: Optional[Sequence[float]] = None
+) -> int:
+    """
+    Common feasible M_RbCP across S sensors.
+
+    If bandwidth is equally split, all sensors get the same value.
+    If bandwidth is unevenly split, this returns the minimum per-sensor value
+    so that it is safe as a common M_RbCP.
+
+    This is the bandwidth-sharing-aware interpretation of the manuscript
+    multiuser constraint.
+
+    Returns
+    -------
+    int
+        Common feasible M_RbCP.
+    """
+    M_vec = compute_M_rbcp_per_sensor(
+        S=S,
+        W=W,
+        tau=tau,
+        B=B,
+        SNR=SNR,
+        bandwidth_allocation=bandwidth_allocation,
+    )
+    return int(np.min(M_vec))
+
+
+# =============================================================================
+# BENCHMARK / NYQUIST COMMUNICATION BUDGET
+# =============================================================================
+
+def compute_benchmark_bits_per_sample_single_sensor(
+    tau: float,
+    B_sensor: float,
+    SNR: float,
+    sampling_rate: float
+) -> int:
+    """
+    Feasible number of bits per sample for one Benchmark/Nyquist sensor.
+
+    For one sensor:
+        C_sensor = B_sensor * log2(1 + SNR)
+        bits_total = tau * C_sensor
+        num_samples = floor(tau * sampling_rate)
+        bits_per_sample = bits_total / num_samples
+
+    Returns
+    -------
+    int
+        Feasible bits per sample.
+    """
+    C_sensor = compute_capacity(B_sensor, SNR)
+    bits_total = tau * C_sensor
+
+    num_samples = int(np.floor(tau * sampling_rate))
+    if num_samples <= 0:
+        raise ValueError("sampling_rate leads to zero samples in one cycle")
+
+    bits_per_sample = bits_total / num_samples
+    bits_int = int(np.floor(bits_per_sample))
+    bits_int = max(bits_int, 1)
+
+    return bits_int
+
+
+def compute_benchmark_bits_per_sample_per_sensor(
+    S: int,
+    tau: float,
+    B: float,
+    SNR: float,
+    sampling_rate: float,
+    bandwidth_allocation: Optional[Sequence[float]] = None
+) -> np.ndarray:
+    """
+    Per-sensor feasible bits-per-sample for the Benchmark/Nyquist branch.
+
+    Returns
+    -------
+    np.ndarray
+        Shape (S,)
+    """
+    _, B_per_sensor = compute_sensor_bandwidths(B, S, bandwidth_allocation)
+
+    return np.array([
+        compute_benchmark_bits_per_sample_single_sensor(
+            tau=tau,
+            B_sensor=B_s,
+            SNR=SNR,
+            sampling_rate=sampling_rate
+        )
+        for B_s in B_per_sensor
+    ], dtype=int)
+
+
+# =============================================================================
+# SFC TIME / SLOT RELATIONS
+# =============================================================================
+
+def compute_M_time(tau: float, B: float, R: int) -> int:
+    """
+    Number of time bins / symbol-start bins for the SFC time model:
 
         M_time = tau * B / R
 
-    Parameters
-    ----------
-    tau : float
-        Signal period / observation window.
+    In the discrete simulation, we use the floor-consistent value:
+        floor(tau * B / R)
 
-    B : float
-        Channel bandwidth.
+    Returns
+    -------
+    int
+        Discrete M_time used in the simulations.
+    """
+    return int(np.floor((tau * B) / R))
 
-    R : float
-        Number of channel uses per symbol (as defined in the manuscript).
+
+def compute_slot_duration(B: float, R: int) -> float:
+    """
+    Duration of one SFC symbol slot:
+
+        T_slot = R / B
 
     Returns
     -------
     float
-        Number of time bins.
+        Slot duration in seconds.
     """
+    return R / B
 
-    return tau * B / R
 
-
-def time_quantization_interval(n: int, w0: float, tau: float, B: float, R: float) -> float:
+def compute_slots_per_period(tau: float, B: float, R: int) -> int:
     """
-    Time-domain quantization interval from the manuscript:
+    Number of possible event-start slots per period:
 
-        l_time = 2*pi*R / (n * w0 * tau * B)
-
-    Parameters
-    ----------
-    n : int
-        Harmonic index.
-
-    w0 : float
-        Fundamental angular frequency.
-
-    tau : float
-        Signal period / observation window.
-
-    B : float
-        Channel bandwidth.
-
-    R : float
-        Number of channel uses per symbol.
+        floor(tau / (R/B)) = floor(tau * B / R)
 
     Returns
     -------
-    float
-        Time-domain quantization interval.
+    int
+        Slots per period.
     """
+    return int(np.floor(tau * B / R))
 
-    return 2.0 * np.pi * R / (n * w0 * tau * B)
+
+def compute_event_slots_total(tau: float, B: float, R: int, n_periods: int) -> int:
+    """
+    Total number of possible event-start slots over n_periods.
+    """
+    return compute_slots_per_period(tau, B, R) * n_periods
+
+
+def compute_rx_slots_total(tau: float, B: float, R: int, n_periods: int, L: int) -> int:
+    """
+    Total number of received discrete-time slots once the map length L is taken
+    into account.
+
+        rx_slots_total = event_slots_total + L - 1
+
+    Returns
+    -------
+    int
+        Length of the final received frame.
+    """
+    return compute_event_slots_total(tau, B, R, n_periods) + L - 1
 
 
 # =============================================================================
-# SFC overlap / duplicate-event upper bound
+# DUPLICATE-RECEPTION UPPER BOUND (LEMMA 5)
 # =============================================================================
 
-def sfc_duplicate_probability_upper_bound(m_time: int, N: int, S: int) -> float:
+def epsilon_upper_bound(M_time: int, N: int, S: int) -> float:
     """
-    Lemma 5 upper bound for the probability of receiving duplicate values.
+    Compute the upper bound from Lemma 5:
 
-    The manuscript gives:
         epsilon <= 1 - M_time! / ((M_time - 2NS)! * M_time^(2NS))
 
-    This implementation is mathematically equivalent, but computed through
-    log-gamma for numerical stability.
+    If M_time < 2NS, duplicates are guaranteed by the pigeonhole principle,
+    so epsilon = 1.
 
     Parameters
     ----------
-    m_time : int
-        Number of time bins (M_time).
-
+    M_time : int
+        Number of time bins available in one cycle.
     N : int
         Number of harmonics.
-
     S : int
-        Number of sensors/users.
+        Number of sensors.
 
     Returns
     -------
     float
-        Upper bound on epsilon.
-
-    Notes
-    -----
-    If m_time < 2*N*S, the exact factorial expression is not defined because
-    (M_time - 2NS)! would be negative. In that regime, the bound effectively
-    saturates to 1 for practical purposes, since collision-free placement of
-    all events is impossible.
+        Upper bound on the average probability of receiving duplicate values.
     """
+    k = 2 * N * S
 
-    total_events = 2 * N * S
-
-    if m_time < total_events:
+    if M_time < k:
         return 1.0
 
-    log_num = math.lgamma(m_time + 1)
-    log_den = math.lgamma(m_time - total_events + 1) + total_events * math.log(m_time)
+    # log( M_time! / ((M_time-k)! * M_time^k) )
+    log_ratio = (
+        math.lgamma(M_time + 1)
+        - math.lgamma(M_time - k + 1)
+        - k * math.log(M_time)
+    )
 
-    epsilon0 = math.exp(log_num - log_den)
-    return 1.0 - epsilon0
+    no_duplicate_prob = math.exp(log_ratio)
+    epsilon = 1.0 - no_duplicate_prob
+
+    return float(max(0.0, min(1.0, epsilon)))
 
 
 # =============================================================================
-# Latency formulas
+# PHYSICAL HELPER FORMULAS
 # =============================================================================
 
-def rbcp_total_latency(tau: float, N: int, M_rbcp: float, C: float) -> float:
+def compute_N0(P: float, B: float, SNR: float) -> float:
     """
-    Total latency of the RbCP approach (Eq. 24):
+    Noise parameter from:
 
-        L_total_RbCP = tau + (2N * log2(M_RbCP)) / C
+        SNR = P / (B * N0)
 
-    Parameters
-    ----------
-    tau : float
-        Observation window / sensing latency.
+    Therefore:
+        N0 = P / (B * SNR)
 
-    N : int
-        Number of harmonics.
-
-    M_rbcp : float
-        Number of RbCP quantization bins.
-
-    C : float
-        Channel capacity.
-
-    Returns
-    -------
-    float
-        Total RbCP latency.
+    IMPORTANT
+    ---------
+    This uses the TOTAL system bandwidth B.
     """
+    return P / (B * SNR)
 
-    return tau + (2.0 * N * np.log2(M_rbcp)) / C
 
-
-def benchmark_total_latency(W: float, tau: float, M: float, C: float) -> float:
+def compute_total_energy(P: float, tau: float) -> float:
     """
-    Total latency of the Benchmark approach (Eq. 25):
+    Total available energy per cycle:
 
-        L_total_BA = (W * tau * log2(M)) / C + 1/W
-
-    Parameters
-    ----------
-    W : float
-        Signal bandwidth parameter.
-
-    tau : float
-        Observation window / signal period.
-
-    M : float
-        Number of Benchmark quantization bins.
-
-    C : float
-        Channel capacity.
-
-    Returns
-    -------
-    float
-        Total Benchmark latency.
+        E_tot = P * tau
     """
+    return P * tau
 
-    return (W * tau * np.log2(M)) / C + 1.0 / W
+
+def compute_symbol_energy(P: float, tau: float, L: int) -> float:
+    """
+    Energy per transmitted symbol/resource:
+
+        E_s = (P * tau) / L
+    """
+    return (P * tau) / L
 
 
-def rbcp_has_lower_latency_than_benchmark(
+def compute_signal_level(P: float, tau: float, L: int) -> float:
+    """
+    Expected matched-filter output amplitude scale:
+
+        sqrt(E_s)
+    """
+    return np.sqrt(compute_symbol_energy(P, tau, L))
+
+
+def compute_default_detection_threshold(
+    P: float,
     tau: float,
-    N: int,
-    M_rbcp: float,
-    W: float,
-    M: float,
-    C: float
-) -> bool:
+    L: int,
+    threshold_factor: float = 0.5
+) -> float:
     """
-    Evaluate the latency inequality discussed in the manuscript:
+    Default detection threshold:
 
-        tau + (2N * log2(M_RbCP))/C < (W*tau*log2(M))/C + 1/W
+        threshold = threshold_factor * sqrt(E_s)
 
-    Parameters
-    ----------
-    tau : float
-        Observation window / signal period.
-
-    N : int
-        Number of harmonics.
-
-    M_rbcp : float
-        RbCP number of bins.
-
-    W : float
-        Signal bandwidth parameter.
-
-    M : float
-        Benchmark number of bins.
-
-    C : float
-        Channel capacity.
-
-    Returns
-    -------
-    bool
-        True if the RbCP latency is lower than the Benchmark latency.
+    with:
+        E_s = (P * tau) / L
     """
+    return threshold_factor * compute_signal_level(P, tau, L)
 
-    return rbcp_total_latency(tau, N, M_rbcp, C) < benchmark_total_latency(W, tau, M, C)
+
+# =============================================================================
+# OPTIONAL EXPORT LIST
+# =============================================================================
+
+__all__ = [
+    # basic theory
+    "compute_N",
+    "compute_snr_linear",
+    "compute_capacity",
+
+    # RbCP theory
+    "compute_q",
+    "rbcp_mse_upper_bound",
+    "rbcp_mse_lower_bound",
+    "rbcp_mse_star",
+
+    # M <-> M_RbCP
+    "compute_M_rbcp_from_M",
+    "compute_M_from_M_rbcp",
+
+    # bandwidth sharing
+    "compute_bandwidth_allocation",
+    "compute_sensor_bandwidths",
+
+    # RbCP feasible bins
+    "compute_M_rbcp_single_sensor",
+    "compute_M_rbcp_per_sensor",
+    "compute_M_rbcp",
+
+    # Benchmark bits/sample
+    "compute_benchmark_bits_per_sample_single_sensor",
+    "compute_benchmark_bits_per_sample_per_sensor",
+
+    # SFC time / slot relations
+    "compute_M_time",
+    "compute_slot_duration",
+    "compute_slots_per_period",
+    "compute_event_slots_total",
+    "compute_rx_slots_total",
+
+    # Duplicate probability
+    "epsilon_upper_bound",
+
+    # Physical helpers
+    "compute_N0",
+    "compute_total_energy",
+    "compute_symbol_energy",
+    "compute_signal_level",
+    "compute_default_detection_threshold",
+]

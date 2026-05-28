@@ -1,4 +1,6 @@
 """
+sfc/pipelines/rbcp_signal_representation.py
+
 RbCP signal representation vs Benchmark + SFC using physical system parameters.
 
 This module produces:
@@ -29,7 +31,7 @@ For this figure, we propagate one representative signal through the SFC stack.
 
 That means:
 - the figure still plots one signal
-- but M_RbCP is derived using the full system-level S
+- but M_RbCP is derived using the full system-level S and bandwidth sharing
 - all event IDs of this representative signal are assigned locally to sensor 0
   in a figure-specific sensor_x_event used only inside this pipeline
 
@@ -44,6 +46,22 @@ and NOT with:
 That is:
 - x_rbcp uses quantized ta/tb
 - x_sfc uses non-quantized ta/tb and relies on the SFC event/channel stack
+
+BANDWIDTH SHARING
+-----------------
+The total bandwidth B is the total system bandwidth.
+
+Only the communication-budget-based quantities use per-sensor bandwidth slices:
+- M_RbCP
+- Benchmark / Nyquist bits-per-sample
+
+For this representative-signal figure, the benchmark branch uses the bandwidth
+slice of sensor 0:
+
+    B_sensor = params.B_per_sensor[0]
+
+If no bandwidth allocation is provided in the YAML, the split is equal among
+all S sensors.
 """
 
 import copy
@@ -62,6 +80,7 @@ from sfc.core.channel.SFCChannel import SFCChannel
 
 from sfc.core.system_parameters import (
     build_derived_system_parameters,
+    compute_benchmark_bits_per_sample_single_sensor,
 )
 
 
@@ -102,6 +121,8 @@ def generate_rbcp_signal_representation(cfg):
     print(f"[INFO] SNR (linear) = {SNR:.4e}")
     print(f"[INFO] Derived N = {N}")
     print(f"[INFO] Derived M_RbCP = {M_rbcp}")
+    print(f"[INFO] Bandwidth allocation = {params.bandwidth_allocation}")
+    print(f"[INFO] B_per_sensor = {params.B_per_sensor}")
 
     w0 = 2 * np.pi / tau
     n_vec = np.arange(1, N + 1)
@@ -193,15 +214,19 @@ def generate_rbcp_signal_representation(cfg):
     # =========================
     # BENCHMARK BRANCH
     # =========================
+    #
+    # IMPORTANT:
+    # Benchmark uses the per-sensor bandwidth slice of the representative
+    # signal (sensor 0), not the total B.
     # -------------------------------------------------------------------------
     x_benchmark = _benchmark_nyquist(
-        x_zero_mean,
-        tau,
-        Tt,
-        W,
-        B,
-        SNR,
-        cfg
+        x_zero_mean=x_zero_mean,
+        tau=tau,
+        Tt=Tt,
+        W=W,
+        SNR=SNR,
+        B_sensor=params.B_per_sensor[0],
+        cfg=cfg
     )
 
     return {
@@ -334,7 +359,7 @@ def _sfc_reconstruction(ta, tb, t, tau, w0, N, cfg):
 # BENCHMARK (NYQUIST CAPACITY-BASED)
 # =============================================================================
 
-def _benchmark_nyquist(x, tau, Tt, W, B, SNR, cfg):
+def _benchmark_nyquist(x_zero_mean, tau, Tt, W, SNR, B_sensor, cfg):
     """
     Benchmark using the Nyquist core.
 
@@ -344,12 +369,21 @@ def _benchmark_nyquist(x, tau, Tt, W, B, SNR, cfg):
           benchmark.sampling_rate
     - if omitted, defaults to W
 
+    IMPORTANT
+    ---------
+    The benchmark communication budget uses the bandwidth slice of the
+    representative sensor:
+
+        B_sensor
+
+    and NOT the total system bandwidth B.
+
     Capacity
     --------
-    C = B log2(1 + SNR)
+    C_sensor = B_sensor * log2(1 + SNR)
 
     The number of bits per sample is derived from:
-        bits_total = tau * C
+        bits_total = tau * C_sensor
         bits_per_sample = bits_total / num_samples
     """
 
@@ -358,17 +392,15 @@ def _benchmark_nyquist(x, tau, Tt, W, B, SNR, cfg):
     # configurable from YAML, default = W
     sampling_rate = benchmark_cfg.get("sampling_rate", W)
 
-    # Shannon capacity
-    C = B * np.log2(1 + SNR)
-    bits_total = tau * C
-
-    num_samples = int(np.floor(tau * sampling_rate))
-    bits_per_sample = bits_total / num_samples
-
-    bits_int = int(np.floor(bits_per_sample))
-    bits_int = max(bits_int, 1)
+    bits_int = compute_benchmark_bits_per_sample_single_sensor(
+        tau=tau,
+        B_sensor=B_sensor,
+        SNR=SNR,
+        sampling_rate=sampling_rate
+    )
 
     print(f"[INFO] Benchmark sampling_rate = {sampling_rate}")
+    print(f"[INFO] Benchmark B_sensor = {B_sensor}")
     print(f"[INFO] Benchmark bits/sample = {bits_int}")
 
     nyq = Nyquist(
@@ -383,8 +415,6 @@ def _benchmark_nyquist(x, tau, Tt, W, B, SNR, cfg):
 
     t = np.arange(0, tau, Tt)
 
-    xs = nyq(x, t, quantize=False)
+    xs = nyq(x_zero_mean, t, quantize=False)
     xs_q = nyq.quantize(xs)
     x_rec = nyq.recover_signal(xs_q)
-
-    return x_rec

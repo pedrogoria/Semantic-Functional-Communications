@@ -5,15 +5,25 @@ Detection block for SFC.
 
 CURRENT ROLE
 ------------
-Recover event-related map hypotheses from the received aggregate signal.
+Recover event-related map hypotheses from the final received channel frame.
 
 IMPORTANT
 ---------
-The physical channel returns the complex matched-filter output.
+The physical channel now returns the final complex-valued channel frame with
+shape:
 
-Therefore detection is based on the magnitude of the received signal:
+    y.shape = (rx_slots_total, R)
 
-    abs(y) > threshold
+where:
+- rx_slots_total = event_slots_total + L - 1
+- R is the number of sub-carriers/resources
+
+Therefore detection must be based on:
+1. the magnitude of the received frame:
+       abs(y)
+2. sliding windows of length L:
+       y[t0:t0+L, :]
+   for each possible event-start slot t0
 
 PHYSICAL PRINCIPLE
 ------------------
@@ -21,33 +31,20 @@ The physical channel uses the manuscript-consistent relation:
 
     SNR = P / (B * N0)
 
+and the matched-filter-output approximation:
+
+    y = sqrt(E_s) * signal + n
+
 with:
-- P  : average transmit power per sensor
-- B  : channel bandwidth
-- N0 : noise parameter
+    E_s = (P * tau) / L
 
-The same system-level parameters are also used by the Benchmark model, but
-for the SFC channel they determine the received symbol level and the noise.
+The default threshold is derived centrally through:
 
-CENTRALIZATION RULE
--------------------
-This module does NOT recompute local physical quantities such as:
-- SNR_linear
-- N0
-- E_tot
-- E_s
-- signal_level
-- default_threshold
+    build_derived_system_parameters(cfg)
 
-Instead, all these quantities are derived centrally through:
-
-    build_derived_system_parameters(cfg, threshold_factor=...)
-
-so that the physical model remains consistent across:
+so that the detector remains consistent with:
 - physical_channel.py
-- detection.py
-- pipelines
-- future channel modules
+- the system-level power/bandwidth model
 
 DETECTION MODES
 ---------------
@@ -65,17 +62,22 @@ Default behavior
 If score_threshold is not provided, then:
     score_threshold = L
 
-Threshold rule
---------------
-If cfg["channel"]["threshold"] is explicitly provided, use it.
+INPUT / OUTPUT CONVENTION
+-------------------------
+Input:
+    y : (rx_slots_total, R)
 
-Otherwise derive:
+reference_maps:
+    (num_event_ids, L, R)
 
-    threshold = default_threshold
+Output:
+    maps_est : (event_slots_total, num_event_ids, L, R)
 
-where default_threshold is built centrally from:
+where:
+    event_slots_total = rx_slots_total - L + 1
 
-    threshold_factor * signal_level
+This output format is compatible with:
+    EventMapper.maps_to_events(maps_est)
 """
 
 import numpy as np
@@ -85,7 +87,7 @@ from sfc.core.system_parameters import build_derived_system_parameters
 
 class MapDetector:
     """
-    Recover maps from the received aggregate signal.
+    Recover event-related map hypotheses from the final received channel frame.
     """
 
     def __init__(self, cfg):
@@ -99,14 +101,10 @@ class MapDetector:
 
         Notes
         -----
-        The detector threshold is determined as follows:
-
-        1. If cfg["channel"]["threshold"] is explicitly provided,
-           use that value directly.
-
-        2. Otherwise, derive the threshold centrally from:
-               threshold_factor * signal_level
-           where signal_level is built from the shared physical model.
+        Threshold logic:
+        - if cfg["channel"]["threshold"] is explicitly provided, use it
+        - otherwise use the centralized default threshold derived from:
+              threshold_factor * signal_level
         """
 
         self.cfg = cfg
@@ -120,7 +118,7 @@ class MapDetector:
         # ------------------------------------------------------------------
         self.mode = det_cfg.get("detection_mode", "threshold")
 
-        # Optional score threshold in map-score domain.
+        # Optional score threshold in map-matching domain.
         # If absent, use L at runtime.
         self.score_threshold = det_cfg.get("score_threshold", None)
 
@@ -136,9 +134,6 @@ class MapDetector:
 
         # ------------------------------------------------------------------
         # Threshold configuration
-        #
-        # If explicit threshold is not given, derive it centrally from:
-        #     threshold_factor * signal_level
         # ------------------------------------------------------------------
         if "threshold" in det_cfg:
             self.threshold = det_cfg["threshold"]
@@ -147,13 +142,13 @@ class MapDetector:
 
     def detect(self, y, reference_maps=None):
         """
-        Detect maps from the received aggregate signal.
+        Detect maps from the final received channel frame.
 
         Parameters
         ----------
         y : np.ndarray
-            Shape:
-                (num_time_slots, L, R)
+            Final received channel frame with shape:
+                (rx_slots_total, R)
 
             May be complex-valued.
 
@@ -165,54 +160,73 @@ class MapDetector:
         -------
         np.ndarray
             If reference_maps is None:
-                binary aggregate maps, shape (num_time_slots, L, R)
+                binary thresholded frame with shape:
+                    (rx_slots_total, R)
 
             If reference_maps is provided:
-                estimated per-event maps, shape:
-                    (num_time_slots, num_event_ids, L, R)
+                estimated per-event maps with shape:
+                    (event_slots_total, num_event_ids, L, R)
+
+        Detection logic
+        ---------------
+        For each possible event-start slot t0:
+        - extract the L-row window:
+              rec_win = y_bin[t0:t0+L, :]
+        - compare it to each reference map
+        - decide according to the chosen detection mode
         """
 
-        assert len(y.shape) == 3, \
-            "y must have shape (num_time_slots, L, R)"
+        assert len(y.shape) == 2, \
+            "y must have shape (rx_slots_total, R)"
 
         # ------------------------------------------------------------------
-        # Detect active resource cells based on magnitude of the complex
-        # matched-filter output.
+        # Threshold the magnitude of the complex matched-filter output
         # ------------------------------------------------------------------
         y_bin = (np.abs(y) > self.threshold).astype(float)
 
         if reference_maps is None:
             return y_bin
 
-        num_time_slots = y_bin.shape[0]
-        num_event_ids = reference_maps.shape[0]
-        L = reference_maps.shape[1]
+        # reference_maps shape: (num_event_ids, L, R)
+        assert len(reference_maps.shape) == 3, \
+            "reference_maps must have shape (num_event_ids, L, R)"
+
+        num_event_ids, L, R = reference_maps.shape
+
+        assert y_bin.shape[1] == R, \
+            "y.shape[1] must match reference_maps.shape[2]"
+
+        rx_slots_total = y_bin.shape[0]
+        event_slots_total = rx_slots_total - L + 1
+
+        if event_slots_total <= 0:
+            raise ValueError(
+                "Invalid dimensions: rx_slots_total - L + 1 must be positive"
+            )
 
         score_threshold = self.score_threshold if self.score_threshold is not None else L
 
-        maps_est = np.zeros(
-            (num_time_slots, num_event_ids, y_bin.shape[1], y_bin.shape[2])
-        )
+        maps_est = np.zeros((event_slots_total, num_event_ids, L, R))
 
-        for t in range(num_time_slots):
-            rec = y_bin[t]
+        for t0 in range(event_slots_total):
+            rec_win = y_bin[t0:t0 + L, :]   # shape: (L, R)
 
             for event_id in range(num_event_ids):
                 ref = reference_maps[event_id]
 
-                score = np.sum(rec * ref)
+                score = np.sum(rec_win * ref)
 
                 if self.mode == "strict":
                     if score == L:
-                        maps_est[t, event_id] = ref
+                        maps_est[t0, event_id] = ref
 
                 elif self.mode == "loose":
                     if score > 0:
-                        maps_est[t, event_id] = ref
+                        maps_est[t0, event_id] = ref
 
                 elif self.mode == "threshold":
                     if score >= score_threshold:
-                        maps_est[t, event_id] = ref
+                        maps_est[t0, event_id] = ref
 
                 else:
                     raise ValueError(f"Unknown detection mode: {self.mode}")
