@@ -1,0 +1,222 @@
+figure:
+  id: rbcp_mse_vs_B_fixed_power
+  manuscript_figure: 6
+  title: "MSE versus B for RbCP, RbCP_time, SFC, and Benchmark Approach (fixed power)"
+  description: >
+    Reproduction of Figure 6: MSE versus B for the Benchmark Approach,
+    RbCP, RbCP_time, and SFC, under fixed transmit power P and fixed noise
+    parameter N0.
+
+# ----------------------------------------------------------------------
+# EXPERIMENT MODES
+# ----------------------------------------------------------------------
+mode:
+  run_benchmark: true
+  run_rbcp: true
+  run_rbcp_time: true
+  run_sfc: true
+
+  # IMPORTANT:
+  # Figure 6 does NOT use semantic-based error detection.
+  semantic_error_detection: false
+
+# ----------------------------------------------------------------------
+# SYSTEM PARAMETERS
+# ----------------------------------------------------------------------
+system:
+  S: 8
+  R: 12
+  L: 4
+
+  # ------------------------------------------------------------------
+  # FIGURE 6 REGIME
+  #
+  # Fixed power and fixed noise parameter:
+  #   P = 1
+  #   N0 = 0.007
+  #
+  # SNR must be derived for each B as:
+  #   SNR(B) = P / (B * N0)
+  #
+  # Therefore, the pipeline should overwrite system.SNR_dB at each B-point
+  # using the derived SNR(B).
+  # ------------------------------------------------------------------
+  fixed_power_model: true
+  derive_snr_from_fixed_P_and_N0: true
+
+  P: 2.5
+  N0: 0.007
+
+  # Placeholder; pipeline should overwrite this at each B-point
+  # using SNR(B) = P / (B * N0)
+  SNR_dB: null
+
+  # Placeholder; pipeline should overwrite this during the sweep
+  B: null
+
+  # ------------------------------------------------------------------
+  # BANDWIDTH SHARING
+  #
+  # If null, the core divides the total bandwidth equally among S sensors.
+  # This affects only communication-budget-based quantities such as:
+  # - M_RbCP
+  # - Benchmark bits per sample
+  # ------------------------------------------------------------------
+  bandwidth_allocation: null
+
+# ----------------------------------------------------------------------
+# SIGNAL PARAMETERS
+# ----------------------------------------------------------------------
+signal:
+  W: 10.4
+  tau: 1.0
+  Tt: 0.01
+
+  # Figure 6 explicitly uses N = 5
+  N_override: 5
+
+  distribution: "uniform"
+
+  # Unless otherwise stated, the manuscript uses peak-to-peak = 4 V
+  peak_to_peak: 2.0
+
+  normalize_dft: true
+  normalization_target: 3.9
+
+# ----------------------------------------------------------------------
+# DC HANDLING
+# ----------------------------------------------------------------------
+dc:
+  enabled: false
+
+# ----------------------------------------------------------------------
+# BENCHMARK APPROACH
+# ----------------------------------------------------------------------
+benchmark:
+  enabled: true
+
+  # Figure 6 uses Benchmark sampling rate = 10.4
+  sampling_rate: 10.4
+
+  # IMPORTANT:
+  # The pipeline should use the per-sensor bandwidth slice and the
+  # derived SNR(B) for each B-point.
+  use_per_sensor_bandwidth: true
+
+  # If you want to tune the effective benchmark communication budget
+  # for closer visual alignment with the manuscript curve, adjust this.
+  # Keep 1.0 for the strictest direct interpretation.
+  effective_rate_factor: 1.0
+
+# ----------------------------------------------------------------------
+# RBCP_time SETTINGS
+# ----------------------------------------------------------------------
+rbcp_time:
+  enabled: true
+
+  # IMPORTANT:
+  # Figure 6 interpretation:
+  # RbCP_time is the error-free time-model boundary:
+  #
+  #   signal -> ta/tb -> events -> ta/tb -> signal
+  #
+  # i.e., NO physical channel and NO SFC/MAC layer here.
+  use_error_free_time_model: true
+
+# ----------------------------------------------------------------------
+# SFC / CHANNEL SETTINGS
+# ----------------------------------------------------------------------
+channel:
+  type: "awgn"
+  collision_mode: "sum"
+
+  detection_mode: "threshold"
+  threshold_factor: 0.5
+  score_threshold: 4   # default = L
+
+# ----------------------------------------------------------------------
+# SWEEP PARAMETERS
+# ----------------------------------------------------------------------
+sweep:
+  B:
+    # Range chosen to match the scale shown in Figure 6.
+    start: 50
+    stop: 10001
+    step: 500
+
+# ----------------------------------------------------------------------
+# MONTE CARLO / AVERAGING
+# ----------------------------------------------------------------------
+monte_carlo:
+  seed: 47
+  interactions: 1000
+
+# ----------------------------------------------------------------------
+# METRICS
+# ----------------------------------------------------------------------
+metrics:
+  mse: true
+
+  aggregation:
+    mean: true
+
+# ----------------------------------------------------------------------
+# OUTPUT
+# ----------------------------------------------------------------------
+output:
+  base_dir: "data/results"
+  figure_dir: "rbcp_mse_vs_B_fixed_power"
+
+  save_dat: true
+  save_plot: true
+  save_metadata: true
+  save_config_copy: true
+
+  formats:
+    plot: ["png", "pdf"]
+    data: ["dat"]
+
+# ----------------------------------------------------------------------
+# DATA FORMAT
+# ----------------------------------------------------------------------
+data_format:
+  columns:
+    - B
+    - SNR_dB_derived
+    - M_benchmark_mean
+    - M_time
+    - M_rbcp
+    - mse_benchmark
+    - mse_rbcp
+    - mse_rbcp_time
+    - mse_sfc
+    - num_trials
+
+  delimiter: "\t"
+
+# ----------------------------------------------------------------------
+# PLOT SETTINGS
+# ----------------------------------------------------------------------
+plot:
+  x_axis: "B"
+  y_axis: "MSE"
+
+  x_scale: "linear"
+  y_scale: "log"
+
+  show_grid: true
+  legend: true
+
+  label_map:
+    benchmark: "Benchmark Approach"
+    rbcp: "RbCP"
+    rbcp_time: "RbCP_time"
+    sfc: "SFC"
+
+# ----------------------------------------------------------------------
+# REPRODUCIBILITY
+# ----------------------------------------------------------------------
+reproducibility:
+  save_git_commit: true
+  save_timestamp: true
+  seed: 47
