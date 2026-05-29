@@ -1,27 +1,28 @@
 """
-scripts/run_rbcp_mse_vs_B.py
+scripts/run_rbcp_benchmark_truncation_mse_vs_B.py
 
-Runner for manuscript Figure 5-style experiment:
+Runner for the truncation-comparison figure:
 
     MSE versus B for:
-    - Benchmark Approach
-    - RbCP
-    - RbCP_time
-    - SFC
+    - Benchmark (free M)
+    - Benchmark (power-of-two M)
+    - RbCP (free M_RbCP)
+    - RbCP (power-of-two M_RbCP)
 
 This runner:
 - reads the YAML config
-- runs the MSE-vs-B pipeline
+- runs the truncation-comparison pipeline
 - saves the .dat output
 - saves metadata and a copy of the config
-- generates the plot
+- generates the main MSE plot
+- generates a diagnostics plot for M and M_RbCP
 
 Usage (Python Console - PyCharm)
 --------------------------------
-from scripts.run_rbcp_mse_vs_B import run_rbcp_mse_vs_B
+from scripts.run_rbcp_benchmark_truncation_mse_vs_B import run_rbcp_benchmark_truncation_mse_vs_B
 
-df = run_rbcp_mse_vs_B(
-    "experiments/configs/figures/rbcp_mse_vs_B.yaml"
+df = run_rbcp_benchmark_truncation_mse_vs_B(
+    "experiments/configs/figures/rbcp_benchmark_truncation_mse_vs_B.yaml"
 )
 """
 
@@ -34,8 +35,8 @@ import subprocess
 import matplotlib.pyplot as plt
 import yaml
 
-from sfc.pipelines.rbcp_mse_vs_B import (
-    generate_rbcp_mse_vs_B_data,
+from sfc.pipelines.rbcp_benchmark_truncation_mse_vs_B import (
+    generate_rbcp_benchmark_truncation_mse_vs_B_data,
     save_dat_file,
 )
 
@@ -94,7 +95,7 @@ def save_data(df, cfg, output_dir, timestamp):
     data_cfg = cfg["output"].get("formats", {}).get("data", ["dat"])
     delimiter = cfg.get("data_format", {}).get("delimiter", "\t")
 
-    base_name = f"rbcp_mse_vs_B_{timestamp}"
+    base_name = f"rbcp_benchmark_truncation_mse_vs_B_{timestamp}"
 
     for fmt in data_cfg:
         path = os.path.join(output_dir, f"{base_name}.{fmt}")
@@ -113,7 +114,7 @@ def save_data(df, cfg, output_dir, timestamp):
 
 def generate_plot(df, cfg, output_dir, timestamp):
     """
-    Generate the Figure 5-style MSE-vs-B plot.
+    Generate the main truncation-comparison MSE-vs-B plot.
     """
 
     plot_cfg = cfg.get("plot", {})
@@ -122,51 +123,51 @@ def generate_plot(df, cfg, output_dir, timestamp):
     plt.figure(figsize=(9, 5))
 
     # -------------------------------------------------------------------------
-    # Benchmark Approach
+    # Benchmark free
     # -------------------------------------------------------------------------
-    if "mse_benchmark" in df.columns and df["mse_benchmark"].notna().any():
+    if "mse_benchmark_free" in df.columns and df["mse_benchmark_free"].notna().any():
         plt.plot(
             df["B"],
-            df["mse_benchmark"],
+            df["mse_benchmark_free"],
             linestyle="-",
             linewidth=2,
-            label=labels.get("benchmark", "Benchmark Approach")
+            label=labels.get("benchmark_free", "Benchmark (free M)")
         )
 
     # -------------------------------------------------------------------------
-    # RbCP
+    # Benchmark power-of-two
     # -------------------------------------------------------------------------
-    if "mse_rbcp" in df.columns and df["mse_rbcp"].notna().any():
+    if "mse_benchmark_pow2" in df.columns and df["mse_benchmark_pow2"].notna().any():
         plt.plot(
             df["B"],
-            df["mse_rbcp"],
+            df["mse_benchmark_pow2"],
             linestyle="--",
             linewidth=2,
-            label=labels.get("rbcp", "RbCP")
+            label=labels.get("benchmark_pow2", "Benchmark (power-of-two M)")
         )
 
     # -------------------------------------------------------------------------
-    # RbCP_time
+    # RbCP free
     # -------------------------------------------------------------------------
-    if "mse_rbcp_time" in df.columns and df["mse_rbcp_time"].notna().any():
+    if "mse_rbcp_free" in df.columns and df["mse_rbcp_free"].notna().any():
         plt.plot(
             df["B"],
-            df["mse_rbcp_time"],
+            df["mse_rbcp_free"],
             linestyle="-.",
             linewidth=2,
-            label=labels.get("rbcp_time", "RbCP_time")
+            label=labels.get("rbcp_free", "RbCP (free M_RbCP)")
         )
 
     # -------------------------------------------------------------------------
-    # SFC
+    # RbCP power-of-two
     # -------------------------------------------------------------------------
-    if "mse_sfc" in df.columns and df["mse_sfc"].notna().any():
+    if "mse_rbcp_pow2" in df.columns and df["mse_rbcp_pow2"].notna().any():
         plt.plot(
             df["B"],
-            df["mse_sfc"],
+            df["mse_rbcp_pow2"],
             linestyle=":",
             linewidth=2,
-            label=labels.get("sfc", "SFC")
+            label=labels.get("rbcp_pow2", "RbCP (power-of-two M_RbCP)")
         )
 
     plt.xlabel(plot_cfg.get("x_axis", "B"))
@@ -186,12 +187,87 @@ def generate_plot(df, cfg, output_dir, timestamp):
 
     plt.title(cfg.get("figure", {}).get(
         "title",
-        "MSE versus B for RbCP, RbCP_time, SFC, and Benchmark Approach"
+        "Benchmark and RbCP MSE versus B: free vs power-of-two truncation"
     ))
 
     for fmt in cfg["output"]["formats"]["plot"]:
         plt.savefig(
-            os.path.join(output_dir, f"rbcp_mse_vs_B_{timestamp}.{fmt}"),
+            os.path.join(output_dir, f"rbcp_benchmark_truncation_mse_vs_B_{timestamp}.{fmt}"),
+            bbox_inches="tight"
+        )
+
+    plt.show(block=True)
+    plt.close()
+
+
+def generate_diagnostics_plot(df, cfg, output_dir, timestamp):
+    """
+    Plot diagnostic quantities versus B:
+    - M_benchmark_free
+    - M_benchmark_pow2
+    - M_rbcp_free
+    - M_rbcp_pow2
+    """
+
+    plt.figure(figsize=(9, 5))
+
+    if "M_benchmark_free" in df.columns and df["M_benchmark_free"].notna().any():
+        plt.plot(
+            df["B"],
+            df["M_benchmark_free"],
+            linestyle="-",
+            marker="o",
+            linewidth=2,
+            markersize=4,
+            label="M_benchmark (free)"
+        )
+
+    if "M_benchmark_pow2" in df.columns and df["M_benchmark_pow2"].notna().any():
+        plt.plot(
+            df["B"],
+            df["M_benchmark_pow2"],
+            linestyle="--",
+            marker="s",
+            linewidth=2,
+            markersize=4,
+            label="M_benchmark (power-of-two)"
+        )
+
+    if "M_rbcp_free" in df.columns and df["M_rbcp_free"].notna().any():
+        plt.plot(
+            df["B"],
+            df["M_rbcp_free"],
+            linestyle="-.",
+            marker="^",
+            linewidth=2,
+            markersize=4,
+            label="M_RbCP (free)"
+        )
+
+    if "M_rbcp_pow2" in df.columns and df["M_rbcp_pow2"].notna().any():
+        plt.plot(
+            df["B"],
+            df["M_rbcp_pow2"],
+            linestyle=":",
+            marker="d",
+            linewidth=2,
+            markersize=4,
+            label="M_RbCP (power-of-two)"
+        )
+
+    plt.xlabel("B")
+    plt.ylabel("Value")
+    plt.yscale("log")
+    plt.grid(True)
+    plt.legend()
+    plt.title("Diagnostic quantities versus B")
+
+    for fmt in cfg["output"]["formats"]["plot"]:
+        plt.savefig(
+            os.path.join(
+                output_dir,
+                f"rbcp_benchmark_truncation_mse_vs_B_diagnostics_{timestamp}.{fmt}"
+            ),
             bbox_inches="tight"
         )
 
@@ -211,7 +287,7 @@ def save_metadata(cfg, df, output_dir, timestamp, config_path):
     meta_path = os.path.join(output_dir, f"metadata_{timestamp}.txt")
 
     with open(meta_path, "w") as f:
-        f.write("Experiment: rbcp_mse_vs_B\n")
+        f.write("Experiment: rbcp_benchmark_truncation_mse_vs_B\n")
         f.write(f"Timestamp: {timestamp}\n")
         f.write(f"Git commit: {get_git_commit()}\n")
         f.write(f"Config file: {config_path}\n\n")
@@ -228,6 +304,22 @@ def save_metadata(cfg, df, output_dir, timestamp, config_path):
             f.write(f"P_derived min: {df['P_derived'].min()}\n")
             f.write(f"P_derived max: {df['P_derived'].max()}\n\n")
 
+        if "M_benchmark_free" in df.columns:
+            f.write(f"M_benchmark_free min: {df['M_benchmark_free'].min()}\n")
+            f.write(f"M_benchmark_free max: {df['M_benchmark_free'].max()}\n\n")
+
+        if "M_benchmark_pow2" in df.columns:
+            f.write(f"M_benchmark_pow2 min: {df['M_benchmark_pow2'].min()}\n")
+            f.write(f"M_benchmark_pow2 max: {df['M_benchmark_pow2'].max()}\n\n")
+
+        if "M_rbcp_free" in df.columns:
+            f.write(f"M_rbcp_free min: {df['M_rbcp_free'].min()}\n")
+            f.write(f"M_rbcp_free max: {df['M_rbcp_free'].max()}\n\n")
+
+        if "M_rbcp_pow2" in df.columns:
+            f.write(f"M_rbcp_pow2 min: {df['M_rbcp_pow2'].min()}\n")
+            f.write(f"M_rbcp_pow2 max: {df['M_rbcp_pow2'].max()}\n\n")
+
         f.write("--- CONFIG SNAPSHOT ---\n\n")
         f.write(yaml.dump(cfg, sort_keys=False))
 
@@ -240,9 +332,9 @@ def copy_config_file(config_path, output_dir):
 # MAIN
 # =============================================================================
 
-def run_rbcp_mse_vs_B(config_path):
+def run_rbcp_benchmark_truncation_mse_vs_B(config_path):
     """
-    Run the Figure 5-style MSE-vs-B experiment.
+    Run the truncation-comparison MSE-vs-B experiment.
 
     Parameters
     ----------
@@ -260,14 +352,14 @@ def run_rbcp_mse_vs_B(config_path):
     output_dir, timestamp = prepare_output_dir(cfg)
 
     print("[INFO] Output directory:", output_dir)
-    print("[INFO] Running rbcp_mse_vs_B...\n")
-    print(f"[INFO] Figure title: {cfg.get('figure', {}).get('title', 'rbcp_mse_vs_B')}")
+    print("[INFO] Running rbcp_benchmark_truncation_mse_vs_B...\n")
+    print(f"[INFO] Figure title: {cfg.get('figure', {}).get('title', 'rbcp_benchmark_truncation_mse_vs_B')}")
     print(f"[INFO] Config path: {config_path}")
 
     # -------------------------------------------------------------------------
     # RUN PIPELINE
     # -------------------------------------------------------------------------
-    df = generate_rbcp_mse_vs_B_data(cfg)
+    df = generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg)
 
     print("\n[INFO] Generated dataframe preview:")
     print(df.head())
@@ -280,11 +372,14 @@ def run_rbcp_mse_vs_B(config_path):
         print("[INFO] Data saved")
 
     # -------------------------------------------------------------------------
-    # PLOT
+    # PLOTS
     # -------------------------------------------------------------------------
     if cfg["output"].get("save_plot", True):
         generate_plot(df, cfg, output_dir, timestamp)
-        print("[INFO] Plot saved")
+        print("[INFO] Main plot saved")
+
+        generate_diagnostics_plot(df, cfg, output_dir, timestamp)
+        print("[INFO] Diagnostics plot saved")
 
     # -------------------------------------------------------------------------
     # METADATA
@@ -309,7 +404,7 @@ def main():
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
-    run_rbcp_mse_vs_B(args.config)
+    run_rbcp_benchmark_truncation_mse_vs_B(args.config)
 
 
 if __name__ == "__main__":

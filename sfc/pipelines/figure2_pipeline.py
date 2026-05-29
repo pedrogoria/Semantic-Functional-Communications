@@ -22,6 +22,7 @@ from sfc.core.theory import (
     compute_q,
     rbcp_mse_upper_bound,
     rbcp_mse_star,
+    compute_M_from_M_rbcp,
 )
 from sfc.core.fourier import FourierCoefficientCore
 from sfc.core.phase_cof import calc_ta_tb
@@ -37,6 +38,21 @@ from sfc.core.filters import filter_periodic
 def generate_figure2_data(cfg):
     """
     Generate dataset for Figure 2.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Final dataset with columns:
+        - M_RbCP
+        - N
+        - Q
+        - upper_bound
+        - mse_star
+        - mse_mc_mean
+        - mse_mc_std
+        - num_trials
+        - benchmark_M
+        - benchmark_mse
     """
 
     rng = np.random.default_rng(cfg["monte_carlo"]["seed"])
@@ -100,8 +116,11 @@ def generate_figure2_data(cfg):
 # =============================================================================
 
 def _run_mc_block(N, M, cfg, rng):
-    n_trials = cfg["monte_carlo"]["interactions"]
+    """
+    Run Monte Carlo block for a fixed pair (N, M_RbCP).
+    """
 
+    n_trials = cfg["monte_carlo"]["interactions"]
     mse_values = np.zeros(n_trials)
 
     for i in range(n_trials):
@@ -119,8 +138,11 @@ def _run_mc_block(N, M, cfg, rng):
 # =============================================================================
 
 def _run_single_trial(N, M, cfg, rng):
+    """
+    Single Monte Carlo trial for Figure 2.
+    """
 
-    T = cfg["signal"]["T"]
+    T = _get_signal_period(cfg)
     Tt = cfg["signal"]["Tt"]
     w0 = 2 * np.pi / T
     n_vec = np.arange(1, N + 1)
@@ -139,7 +161,7 @@ def _run_single_trial(N, M, cfg, rng):
     p2p_target = cfg["signal"]["peak_to_peak"]
     current_p2p = np.max(x_filtered) - np.min(x_filtered)
 
-    if p2p_target != 0:
+    if p2p_target != 0 and current_p2p != 0:
         x_filtered = x_filtered * (p2p_target / current_p2p)
 
     # ------------------------------------------------------------
@@ -201,9 +223,30 @@ def _run_single_trial(N, M, cfg, rng):
 # SIGNAL GENERATION
 # =============================================================================
 
-def _generate_signal(cfg, rng):
+def _get_signal_period(cfg):
+    """
+    Get the signal period from the configuration.
 
-    T = cfg["signal"]["T"]
+    Accepts either:
+    - cfg["signal"]["T"]   (legacy convention)
+    - cfg["signal"]["tau"] (newer project-wide convention)
+    """
+
+    if "T" in cfg["signal"]:
+        return cfg["signal"]["T"]
+
+    if "tau" in cfg["signal"]:
+        return cfg["signal"]["tau"]
+
+    raise KeyError("Expected cfg['signal']['T'] or cfg['signal']['tau'].")
+
+
+def _generate_signal(cfg, rng):
+    """
+    Generate a random signal according to the YAML configuration.
+    """
+
+    T = _get_signal_period(cfg)
     Tt = cfg["signal"]["Tt"]
 
     t = np.arange(0, T, Tt)
@@ -226,19 +269,36 @@ def _generate_signal(cfg, rng):
 
 def _compute_benchmark(M_rbcp, cfg):
     """
-    Compute benchmark MSE_x,y = 1 / (12 M^2)
+    Compute Benchmark curve for Figure 2.
 
-    Relation between M and M_RbCP:
-    simplified mapping (same order scaling)
+    According to the manuscript discussion for Figure 2, the Benchmark curve
+    should be obtained by mapping M_RbCP to Benchmark M using Eq. (17), and
+    then evaluating:
+
+        MSE_x,y = 1 / (12 * M^2)
+
+    Note
+    ----
+    This is the normalized Benchmark expression used in the manuscript.
     """
 
     if not cfg["benchmark"]["enabled"]:
         return np.nan, np.nan
 
-    # simple proportional mapping
-    M = M_rbcp
+    T = _get_signal_period(cfg)
 
-    mse = 1 / (12 * M**2)
+    # Benchmark settings for the manuscript comparison curve
+    benchmark_cfg = cfg["benchmark"]
+    W_benchmark = benchmark_cfg["W"]
+
+    # Eq. (17): map M_RbCP -> M
+    M = compute_M_from_M_rbcp(
+        M_rbcp=M_rbcp,
+        W=W_benchmark,
+        tau=T
+    )
+
+    mse = 1.0 / (12.0 * (M ** 2))
 
     return M, mse
 
@@ -248,6 +308,9 @@ def _compute_benchmark(M_rbcp, cfg):
 # =============================================================================
 
 def save_dat_file(df, path, delimiter="\t"):
+    """
+    Save the dataset to a .dat-compatible tabular file.
+    """
 
     df.to_csv(
         path,

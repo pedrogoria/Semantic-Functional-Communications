@@ -1,39 +1,53 @@
 """
-sfc/pipelines/rbcp_mse_vs_B.py
+sfc/pipelines/rbcp_benchmark_truncation_mse_vs_B.py
 
-Pipeline for reproducing manuscript Figure 5:
+Diagnostic pipeline comparing truncation policies for Benchmark and RbCP.
 
-    MSE versus B for:
-    - Benchmark Approach
-    - RbCP
-    - RbCP_time
-    - SFC
+This figure evaluates, as a function of B:
 
-Important modeling choices
---------------------------
-1. Bandwidth sharing:
-   Communication-budget-based quantities use the per-sensor bandwidth slice
-   derived centrally through build_derived_system_parameters(cfg).
+- Benchmark with free integer M
+- Benchmark with power-of-two M
+- RbCP with free integer M_RbCP
+- RbCP with power-of-two M_RbCP
 
-2. RbCP_time:
-   Interpreted as the error-free time-model boundary:
-       signal -> ta/tb -> events -> ta/tb -> signal
-   i.e., NO physical channel and NO SFC/MAC layer here.
+Important simplifications
+-------------------------
+1. No channel:
+   - no SFC
+   - no RbCP_time
+   - no AWGN
+   - no semantic error detection
 
-3. No semantic-based error detection:
-   Figure 5 does NOT use semantic error detection.
-
-4. Manuscript-faithful power model:
-   Keep SNR_dB fixed and N0 fixed, and derive P(B) from:
+2. Figure-5-style power model:
+   Keep SNR_dB fixed and N0 fixed, derive P(B) from:
        SNR = P / (B * N0)
-
    Therefore:
        P(B) = SNR * B * N0
 
-5. Quantization policy:
-   This pipeline relies on the defaults already implemented in the core:
-   - M and M_RbCP are free integers by default
-   - no power-of-two restriction unless explicitly requested in cfg
+3. Benchmark:
+   Treated analytically in absolute MSE:
+       MSE = (peak_to_peak^2) / (12 * M^2)
+
+4. RbCP:
+   Evaluated by Monte Carlo signal generation and reconstruction using:
+       ta/tb -> quantization -> signal reconstruction
+
+5. Truncation policies are compared explicitly using the YAML block:
+   comparison:
+     benchmark:
+       free_integer:
+         force_power_of_two: false
+         rounding_mode: "floor"
+       power_of_two:
+         force_power_of_two: true
+         rounding_mode: "floor"
+     rbcp:
+       free_integer:
+         force_power_of_two: false
+         rounding_mode: "floor"
+       power_of_two:
+         force_power_of_two: true
+         rounding_mode: "floor"
 """
 
 import copy
@@ -45,11 +59,10 @@ from sfc.core.fourier import FourierCoefficientCore
 from sfc.core.phase_cof import PhaseCoefficientCore
 from sfc.core.quantization import quantize_ta_tb
 from sfc.core.reconstruction import recover_signal
-from sfc.core.channel.SFCChannel import SFCChannel
-
 from sfc.core.system_parameters import (
     build_derived_system_parameters,
     compute_benchmark_M_per_sensor,
+    compute_M_rbcp,
 )
 from sfc.core.theory import compute_snr_linear
 
@@ -58,9 +71,9 @@ from sfc.core.theory import compute_snr_linear
 # MAIN ENTRY POINT
 # =============================================================================
 
-def generate_rbcp_mse_vs_B_data(cfg):
+def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
     """
-    Generate the Figure 5 dataset.
+    Generate the truncation-comparison dataset.
 
     Parameters
     ----------
@@ -73,16 +86,20 @@ def generate_rbcp_mse_vs_B_data(cfg):
         DataFrame with columns:
         - B
         - P_derived
-        - mse_benchmark
-        - mse_rbcp
-        - mse_rbcp_time
-        - mse_sfc
+        - M_benchmark_free
+        - M_benchmark_pow2
+        - M_rbcp_free
+        - M_rbcp_pow2
+        - mse_benchmark_free
+        - mse_benchmark_pow2
+        - mse_rbcp_free
+        - mse_rbcp_pow2
         - num_trials
     """
 
     rng = np.random.default_rng(cfg["monte_carlo"]["seed"])
 
-    print("[INFO] Starting rbcp_mse_vs_B data generation")
+    print("[INFO] Starting rbcp_benchmark_truncation_mse_vs_B data generation")
     print(f"[INFO] Monte Carlo seed = {cfg['monte_carlo']['seed']}")
     print(
         f"[INFO] Sweep B from {cfg['sweep']['B']['start']} "
@@ -91,9 +108,6 @@ def generate_rbcp_mse_vs_B_data(cfg):
     )
     print(f"[INFO] Trials per B = {cfg['monte_carlo']['interactions']}")
 
-    # -------------------------------------------------------------------------
-    # Sweep values of B
-    # -------------------------------------------------------------------------
     b_cfg = cfg["sweep"]["B"]
     b_values = np.arange(b_cfg["start"], b_cfg["stop"], b_cfg["step"])
 
@@ -103,7 +117,7 @@ def generate_rbcp_mse_vs_B_data(cfg):
         cfg_B = copy.deepcopy(cfg)
 
         # ---------------------------------------------------------------------
-        # Manuscript-faithful power model:
+        # Figure-5-style power model:
         # keep SNR fixed and N0 fixed, derive P(B)
         # ---------------------------------------------------------------------
         cfg_B["system"]["B"] = float(B)
@@ -113,6 +127,74 @@ def generate_rbcp_mse_vs_B_data(cfg):
 
         N = cfg_B["signal"].get("N_override", params.N)
         n_trials = cfg_B["monte_carlo"]["interactions"]
+
+        # ---------------------------------------------------------------------
+        # Comparison policies
+        # ---------------------------------------------------------------------
+        bench_free_cfg = cfg_B["comparison"]["benchmark"]["free_integer"]
+        bench_pow2_cfg = cfg_B["comparison"]["benchmark"]["power_of_two"]
+
+        rbcp_free_cfg = cfg_B["comparison"]["rbcp"]["free_integer"]
+        rbcp_pow2_cfg = cfg_B["comparison"]["rbcp"]["power_of_two"]
+
+        # ---------------------------------------------------------------------
+        # Benchmark M per sensor (from core)
+        # ---------------------------------------------------------------------
+        benchmark_cfg = cfg_B.get("benchmark", {})
+        sampling_rate = benchmark_cfg.get("sampling_rate", params.W)
+        effective_rate_factor = benchmark_cfg.get("effective_rate_factor", 1.0)
+
+        M_benchmark_free_vec = compute_benchmark_M_per_sensor(
+            S=params.S,
+            tau=params.tau,
+            B=params.B,
+            SNR=params.SNR,
+            sampling_rate=effective_rate_factor * sampling_rate,
+            bandwidth_allocation=params.bandwidth_allocation,
+            force_power_of_two=bench_free_cfg["force_power_of_two"],
+            rounding_mode=bench_free_cfg["rounding_mode"]
+        )
+
+        M_benchmark_pow2_vec = compute_benchmark_M_per_sensor(
+            S=params.S,
+            tau=params.tau,
+            B=params.B,
+            SNR=params.SNR,
+            sampling_rate=effective_rate_factor * sampling_rate,
+            bandwidth_allocation=params.bandwidth_allocation,
+            force_power_of_two=bench_pow2_cfg["force_power_of_two"],
+            rounding_mode=bench_pow2_cfg["rounding_mode"]
+        )
+
+        # Store one scalar diagnostic value for each policy.
+        # If bandwidth allocation is equal, min = mean = max anyway.
+        M_benchmark_free = int(np.min(M_benchmark_free_vec))
+        M_benchmark_pow2 = int(np.min(M_benchmark_pow2_vec))
+
+        # ---------------------------------------------------------------------
+        # RbCP M (from core)
+        # ---------------------------------------------------------------------
+        M_rbcp_free = compute_M_rbcp(
+            S=params.S,
+            W=params.W,
+            tau=params.tau,
+            B=params.B,
+            SNR=params.SNR,
+            bandwidth_allocation=params.bandwidth_allocation,
+            force_power_of_two=rbcp_free_cfg["force_power_of_two"],
+            rounding_mode=rbcp_free_cfg["rounding_mode"]
+        )
+
+        M_rbcp_pow2 = compute_M_rbcp(
+            S=params.S,
+            W=params.W,
+            tau=params.tau,
+            B=params.B,
+            SNR=params.SNR,
+            bandwidth_allocation=params.bandwidth_allocation,
+            force_power_of_two=rbcp_pow2_cfg["force_power_of_two"],
+            rounding_mode=rbcp_pow2_cfg["rounding_mode"]
+        )
 
         print("\n[INFO] ------------------------------------------------------------")
         print(f"[INFO] B = {B:.1f} Hz")
@@ -125,54 +207,65 @@ def generate_rbcp_mse_vs_B_data(cfg):
         print(f"[INFO] N0 = {cfg_B['system']['N0']:.6e}")
         print(f"[INFO] bandwidth_allocation = {params.bandwidth_allocation}")
         print(f"[INFO] B_per_sensor = {params.B_per_sensor}")
-        print(f"[INFO] M_RbCP = {params.M_rbcp}")
-        print(f"[INFO] M_RbCP per sensor = {params.M_rbcp_per_sensor}")
-        print(f"[INFO] quantization_force_power_of_two = {params.quantization_force_power_of_two}")
-        print(f"[INFO] quantization_rounding_mode = {params.quantization_rounding_mode}")
+
+        print(f"[INFO] M_benchmark_free_vec = {M_benchmark_free_vec}")
+        print(f"[INFO] M_benchmark_pow2_vec = {M_benchmark_pow2_vec}")
+        print(f"[INFO] M_rbcp_free = {M_rbcp_free}")
+        print(f"[INFO] M_rbcp_pow2 = {M_rbcp_pow2}")
 
         # ---------------------------------------------------------------------
-        # Build one SFC channel for this B-point and reuse in all trials
+        # Benchmark MSEs (analytical, once per B)
         # ---------------------------------------------------------------------
-        sfc_channel = None
-        if cfg_B["mode"].get("run_sfc", False):
-            sfc_channel = _build_sfc_channel_for_B(cfg_B, N, params.S)
+        mse_benchmark_free = _run_benchmark_branch(
+            cfg=cfg_B,
+            M_per_sensor=M_benchmark_free_vec
+        )
+
+        mse_benchmark_pow2 = _run_benchmark_branch(
+            cfg=cfg_B,
+            M_per_sensor=M_benchmark_pow2_vec
+        )
 
         # ---------------------------------------------------------------------
-        # Monte Carlo accumulation
+        # Monte Carlo for RbCP only
         # ---------------------------------------------------------------------
-        mse_benchmark_sum = 0.0
-        mse_rbcp_sum = 0.0
-        mse_rbcp_time_sum = 0.0
-        mse_sfc_sum = 0.0
+        mse_rbcp_free_sum = 0.0
+        mse_rbcp_pow2_sum = 0.0
 
         for i in range(n_trials):
-            trial = _run_one_trial(cfg_B, rng, N, sfc_channel=sfc_channel)
+            trial = _run_one_trial(
+                cfg=cfg_B,
+                rng=rng,
+                N=N,
+                M_rbcp_free=M_rbcp_free,
+                M_rbcp_pow2=M_rbcp_pow2
+            )
 
-            mse_benchmark_sum += trial["mse_benchmark"]
-            mse_rbcp_sum += trial["mse_rbcp"]
-            mse_rbcp_time_sum += trial["mse_rbcp_time"]
-            mse_sfc_sum += trial["mse_sfc"]
+            mse_rbcp_free_sum += trial["mse_rbcp_free"]
+            mse_rbcp_pow2_sum += trial["mse_rbcp_pow2"]
 
             if (i + 1) % max(1, n_trials // 5) == 0:
                 print(f"[INFO] Trial progress: {i + 1}/{n_trials}")
 
-        mse_benchmark = mse_benchmark_sum / n_trials
-        mse_rbcp = mse_rbcp_sum / n_trials
-        mse_rbcp_time = mse_rbcp_time_sum / n_trials
-        mse_sfc = mse_sfc_sum / n_trials
+        mse_rbcp_free = mse_rbcp_free_sum / n_trials
+        mse_rbcp_pow2 = mse_rbcp_pow2_sum / n_trials
 
-        print(f"[INFO] mse_benchmark = {mse_benchmark:.6e}")
-        print(f"[INFO] mse_rbcp = {mse_rbcp:.6e}")
-        print(f"[INFO] mse_rbcp_time = {mse_rbcp_time:.6e}")
-        print(f"[INFO] mse_sfc = {mse_sfc:.6e}")
+        print(f"[INFO] mse_benchmark_free = {mse_benchmark_free:.6e}")
+        print(f"[INFO] mse_benchmark_pow2 = {mse_benchmark_pow2:.6e}")
+        print(f"[INFO] mse_rbcp_free = {mse_rbcp_free:.6e}")
+        print(f"[INFO] mse_rbcp_pow2 = {mse_rbcp_pow2:.6e}")
 
         results.append({
             "B": B,
             "P_derived": cfg_B["system"]["P"],
-            "mse_benchmark": mse_benchmark,
-            "mse_rbcp": mse_rbcp,
-            "mse_rbcp_time": mse_rbcp_time,
-            "mse_sfc": mse_sfc,
+            "M_benchmark_free": M_benchmark_free,
+            "M_benchmark_pow2": M_benchmark_pow2,
+            "M_rbcp_free": M_rbcp_free,
+            "M_rbcp_pow2": M_rbcp_pow2,
+            "mse_benchmark_free": mse_benchmark_free,
+            "mse_benchmark_pow2": mse_benchmark_pow2,
+            "mse_rbcp_free": mse_rbcp_free,
+            "mse_rbcp_pow2": mse_rbcp_pow2,
             "num_trials": n_trials,
         })
 
@@ -180,7 +273,7 @@ def generate_rbcp_mse_vs_B_data(cfg):
 
 
 # =============================================================================
-# MANUSCRIPT-FAITHFUL POWER MODEL
+# FIGURE-5-STYLE POWER MODEL
 # =============================================================================
 
 def _derive_power_from_fixed_snr_and_n0(cfg):
@@ -201,93 +294,25 @@ def _derive_power_from_fixed_snr_and_n0(cfg):
 
 
 # =============================================================================
-# SFC CHANNEL BUILDER
-# =============================================================================
-
-def _build_sfc_channel_for_B(cfg_B, N, S):
-    """
-    Build one SFCChannel instance to be reused for all trials of the current B.
-    """
-
-    cfg_sfc = copy.deepcopy(cfg_B)
-
-    if "channel" not in cfg_sfc:
-        cfg_sfc["channel"] = {}
-
-    cfg_sfc["channel"]["sensor_x_event"] = _build_sensor_x_event(S, N)
-    cfg_sfc["channel"]["collision_mode"] = cfg_sfc["channel"].get("collision_mode", "sum")
-    cfg_sfc["channel"]["type"] = cfg_sfc["channel"].get("type", "awgn")
-    cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get("detection_mode", "threshold")
-    cfg_sfc["channel"]["score_threshold"] = cfg_sfc["channel"].get(
-        "score_threshold",
-        cfg_sfc["system"]["L"]
-    )
-
-    if "threshold" not in cfg_sfc["channel"]:
-        cfg_sfc["channel"]["threshold_factor"] = cfg_sfc["channel"].get(
-            "threshold_factor",
-            0.5
-        )
-
-    if "reproducibility" not in cfg_sfc:
-        cfg_sfc["reproducibility"] = {}
-
-    if "seed" not in cfg_sfc["reproducibility"]:
-        cfg_sfc["reproducibility"]["seed"] = cfg_B.get(
-            "reproducibility", {}
-        ).get(
-            "seed",
-            cfg_B.get("monte_carlo", {}).get("seed", 12345)
-        )
-
-    return SFCChannel(cfg_sfc)
-
-
-def _build_sensor_x_event(S, N):
-    """
-    Build the sensor-event association matrix.
-
-    Event ordering:
-    for each sensor s:
-        [ta events for N harmonics][tb events for N harmonics]
-
-    Total number of event IDs:
-        2 * N * S
-    """
-
-    num_event_ids = 2 * N * S
-    sensor_x_event = np.zeros((S, num_event_ids))
-
-    for s in range(S):
-        start = 2 * s * N
-        stop = 2 * (s + 1) * N
-        sensor_x_event[s, start:stop] = 1.0
-
-    return sensor_x_event
-
-
-# =============================================================================
 # ONE MONTE CARLO TRIAL
 # =============================================================================
 
-def _run_one_trial(cfg, rng, N, sfc_channel=None):
+def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
     """
-    Run one Monte Carlo trial and return the four MSE values.
+    Run one Monte Carlo trial and return the two RbCP MSE values.
 
     Returns
     -------
     dict
         {
-            "mse_benchmark": ...,
-            "mse_rbcp": ...,
-            "mse_rbcp_time": ...,
-            "mse_sfc": ...
+            "mse_rbcp_free": ...,
+            "mse_rbcp_pow2": ...
         }
     """
 
     params = build_derived_system_parameters(cfg)
 
-    # One period per trial for Figure 5
+    # One period per trial
     n_periods = 1
     tau = params.tau
     Tt = cfg["signal"]["Tt"]
@@ -357,59 +382,32 @@ def _run_one_trial(cfg, rng, N, sfc_channel=None):
     )
 
     # -------------------------------------------------------------------------
-    # 7. Benchmark
+    # 7. RbCP free
     # -------------------------------------------------------------------------
-    mse_benchmark = _run_benchmark_branch(
-        cfg=cfg,
-        params=params
-    )
-
-    # -------------------------------------------------------------------------
-    # 8. RbCP
-    # -------------------------------------------------------------------------
-    mse_rbcp = _run_rbcp_branch(
+    mse_rbcp_free = _run_rbcp_branch(
         ta=ta,
         tb=tb,
         x_ref=x_zero_mean,
         t=t,
         tau=tau,
-        M_rbcp=params.M_rbcp
+        M_rbcp=M_rbcp_free
     )
 
     # -------------------------------------------------------------------------
-    # 9. RbCP_time (error-free time model, no channel)
+    # 8. RbCP power-of-two
     # -------------------------------------------------------------------------
-    mse_rbcp_time = _run_rbcp_time_branch(
+    mse_rbcp_pow2 = _run_rbcp_branch(
         ta=ta,
         tb=tb,
-        cfg=cfg,
-        params=params,
-        N=N,
         x_ref=x_zero_mean,
         t=t,
-        n_periods=n_periods
-    )
-
-    # -------------------------------------------------------------------------
-    # 10. SFC
-    # -------------------------------------------------------------------------
-    mse_sfc = _run_sfc_branch(
-        ta=ta,
-        tb=tb,
-        cfg=cfg,
-        params=params,
-        N=N,
-        x_ref=x_zero_mean,
-        t=t,
-        n_periods=n_periods,
-        sfc_channel=sfc_channel
+        tau=tau,
+        M_rbcp=M_rbcp_pow2
     )
 
     return {
-        "mse_benchmark": mse_benchmark,
-        "mse_rbcp": mse_rbcp,
-        "mse_rbcp_time": mse_rbcp_time,
-        "mse_sfc": mse_sfc,
+        "mse_rbcp_free": mse_rbcp_free,
+        "mse_rbcp_pow2": mse_rbcp_pow2,
     }
 
 
@@ -559,48 +557,25 @@ def _compute_phase_coefficients(an, bn, tau, N, S, cfg, params, n_periods):
 # BENCHMARK BRANCH
 # =============================================================================
 
-def _run_benchmark_branch(cfg, params):
+def _run_benchmark_branch(cfg, M_per_sensor):
     """
-    Benchmark Approach for Figure 5.
+    Analytical Benchmark branch in absolute MSE:
 
-    IMPORTANT
-    ---------
-    This branch is treated analytically, not through Monte Carlo reconstruction.
+        MSE_abs = (peak_to_peak^2) / (12 * M^2)
 
-    The benchmark uses the feasible number of bins M produced by the core
-    (free integer by default, floor-rounded, unless the cfg explicitly requests
-    otherwise), and computes the ABSOLUTE MSE:
-
-        MSE = (peak_to_peak^2) / (12 * M^2)
+    Returns the average over sensors.
     """
 
     if not cfg["mode"].get("run_benchmark", False):
         return np.nan
 
-    benchmark_cfg = cfg.get("benchmark", {})
-    sampling_rate = benchmark_cfg.get("sampling_rate", params.W)
-    effective_rate_factor = benchmark_cfg.get("effective_rate_factor", 2.0)
     peak_to_peak = cfg["signal"]["peak_to_peak"]
 
-    # The core now handles the quantization policy.
-    # To preserve the historical effect of effective_rate_factor, we apply it
-    # as an equivalent scaling of the sampling rate.
-    M_vec = compute_benchmark_M_per_sensor(
-        S=params.S,
-        tau=params.tau,
-        B=params.B,
-        SNR=params.SNR,
-        sampling_rate=effective_rate_factor * sampling_rate,
-        bandwidth_allocation=params.bandwidth_allocation,
-        force_power_of_two=params.quantization_force_power_of_two,
-        rounding_mode=params.quantization_rounding_mode
-    )
-
     mse_sum = 0.0
-    for M in M_vec:
+    for M in M_per_sensor:
         mse_sum += (peak_to_peak ** 2) / (12.0 * (float(M) ** 2))
 
-    return mse_sum / len(M_vec)
+    return mse_sum / len(M_per_sensor)
 
 
 # =============================================================================
@@ -630,123 +605,6 @@ def _run_rbcp_branch(ta, tb, x_ref, t, tau, M_rbcp):
                 tb_q[p, :, s],
                 t,
                 2 * np.pi / tau
-            )
-
-            mse_sum += np.mean((x_ref[:, p, s] - x_rec) ** 2)
-            count += 1
-
-    return mse_sum / count
-
-
-# =============================================================================
-# RbCP_time BRANCH
-# =============================================================================
-
-def _run_rbcp_time_branch(ta, tb, cfg, params, N, x_ref, t, n_periods):
-    """
-    Error-free time-model branch:
-
-        signal -> ta/tb -> events -> ta/tb -> signal
-
-    No physical channel is used here.
-    """
-
-    if not cfg["mode"].get("run_rbcp_time", False):
-        return np.nan
-
-    w0 = 2 * np.pi / params.tau
-
-    phase_core = PhaseCoefficientCore(
-        T=params.tau,
-        harmonics=N,
-        n_sub_symbol=params.L,
-        resource=params.R,
-        sensor_nodes=params.S,
-        bandwidth=params.B,
-        detect_errors=False,
-        periods=n_periods,
-        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
-    )
-
-    events = phase_core.ta_tb_to_events(ta, tb)
-    ta_rec, tb_rec = phase_core.event_to_ta_tb(events)
-
-    ta_rec = np.real(ta_rec)
-    tb_rec = np.real(tb_rec)
-
-    _, _, S_dim = x_ref.shape
-    mse_sum = 0.0
-    count = 0
-
-    for p in range(n_periods):
-        for s in range(S_dim):
-            x_rec = recover_signal(
-                ta_rec[p, :, s],
-                tb_rec[p, :, s],
-                t,
-                w0
-            )
-
-            mse_sum += np.mean((x_ref[:, p, s] - x_rec) ** 2)
-            count += 1
-
-    return mse_sum / count
-
-
-# =============================================================================
-# SFC BRANCH
-# =============================================================================
-
-def _run_sfc_branch(ta, tb, cfg, params, N, x_ref, t, n_periods, sfc_channel):
-    """
-    Run SFC branch and return average MSE over sensors/periods.
-
-    IMPORTANT:
-    - uses non-quantized ta/tb
-    - does NOT use semantic error detection in Figure 5
-    """
-
-    if not cfg["mode"].get("run_sfc", False):
-        return np.nan
-
-    if sfc_channel is None:
-        return np.nan
-
-    w0 = 2 * np.pi / params.tau
-
-    phase_core = PhaseCoefficientCore(
-        T=params.tau,
-        harmonics=N,
-        n_sub_symbol=params.L,
-        resource=params.R,
-        sensor_nodes=params.S,
-        bandwidth=params.B,
-        detect_errors=False,
-        periods=n_periods,
-        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
-    )
-
-    events = phase_core.ta_tb_to_events(ta, tb)
-
-    out = sfc_channel(events)
-    events_est = out["events_est"] if isinstance(out, dict) else out
-
-    ta_rec, tb_rec = phase_core.event_to_ta_tb(events_est)
-
-    ta_rec = np.real(ta_rec)
-    tb_rec = np.real(tb_rec)
-
-    _, _, S_dim = x_ref.shape
-    mse_sum = 0.0
-    count = 0
-
-    for p in range(n_periods):
-        for s in range(S_dim):
-            x_rec = recover_signal(
-                ta_rec[p, :, s],
-                tb_rec[p, :, s],
-                t,
-                w0
             )
 
             mse_sum += np.mean((x_ref[:, p, s] - x_rec) ** 2)

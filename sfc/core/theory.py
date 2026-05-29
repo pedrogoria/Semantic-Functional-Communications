@@ -8,9 +8,8 @@ This module centralizes formulas from the manuscript, including:
 - Shannon capacity
 - RbCP Q-factor
 - MSE bounds / approximations for RbCP
-- relations between M and M_RbCP
 - common / per-sensor feasible M_RbCP under bandwidth sharing
-- benchmark bits-per-sample under capacity constraints
+- benchmark feasible number of bins M under capacity constraints
 - SFC time-slot relations
 - duplicate-reception upper bound (Lemma 5)
 - physical helper formulas (SNR, N0, energy, thresholds)
@@ -19,6 +18,24 @@ Design rule
 -----------
 Pipelines, channel modules, debug scripts, and builders should import the
 theoretical relations from this file instead of reimplementing formulas locally.
+
+Quantization policy
+-------------------
+Default behavior:
+- M and M_RbCP are free integers
+- no power-of-two restriction
+- floor rounding
+
+Power-of-two restriction can still be requested explicitly via:
+    force_power_of_two=True
+
+Important note
+--------------
+This file does NOT require any manuscript-specific switch such as:
+    enforce_eq17_rate_matching
+
+Eq. (17) remains available as a theoretical relationship between M and M_RbCP,
+but it is not enforced here as a mandatory global policy.
 """
 
 from __future__ import annotations
@@ -51,7 +68,7 @@ def compute_N(W: float, tau: float) -> int:
     int
         Number of harmonics.
     """
-    return int(np.floor((W * tau) / 2))
+    return int(np.floor((W * tau) / 2.0))
 
 
 def compute_snr_linear(SNR_dB: float) -> float:
@@ -79,14 +96,109 @@ def compute_capacity(B: float, SNR: float) -> float:
     float
         Capacity in bits per second.
     """
-    return B * np.log2(1 + SNR)
+    return B * np.log2(1.0 + SNR)
+
+
+# =============================================================================
+# QUANTIZATION ROUNDING HELPERS
+# =============================================================================
+
+def _apply_integer_rounding(value: float, rounding_mode: str = "floor") -> int:
+    """
+    Convert a positive real value to an integer according to the selected
+    rounding mode.
+
+    Parameters
+    ----------
+    value : float
+        Positive real value to be converted.
+
+    rounding_mode : str, optional
+        One of:
+            - "floor"  (default)
+            - "ceil"
+            - "round"
+
+    Returns
+    -------
+    int
+        Integerized value, with minimum 1.
+    """
+
+    value = max(float(value), 1.0)
+
+    if rounding_mode == "floor":
+        out = int(np.floor(value))
+    elif rounding_mode == "ceil":
+        out = int(np.ceil(value))
+    elif rounding_mode == "round":
+        out = int(np.round(value))
+    else:
+        raise ValueError(
+            f"Invalid rounding_mode='{rounding_mode}'. "
+            f"Use 'floor', 'ceil', or 'round'."
+        )
+
+    return max(out, 1)
+
+
+def _finalize_M(
+    M_continuous: float,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
+) -> int:
+    """
+    Finalize a continuous-valued number of quantization bins M.
+
+    Default behavior
+    ----------------
+    - free integer M
+    - no power-of-two constraint
+    - round according to `rounding_mode`
+
+    If force_power_of_two=True
+    --------------------------
+    The nearest allowed value is constrained to:
+        2^k
+
+    with k obtained by applying the same `rounding_mode` to log2(M_continuous).
+
+    Parameters
+    ----------
+    M_continuous : float
+        Continuous-valued M obtained from a theoretical inequality.
+
+    force_power_of_two : bool, optional
+        If True, constrain the final M to powers of 2.
+
+    rounding_mode : str, optional
+        One of:
+            - "floor"  (default)
+            - "ceil"
+            - "round"
+
+    Returns
+    -------
+    int
+        Final integer M.
+    """
+
+    M_continuous = max(float(M_continuous), 1.0)
+
+    if not force_power_of_two:
+        return _apply_integer_rounding(M_continuous, rounding_mode)
+
+    k_continuous = np.log2(M_continuous)
+    k_int = _apply_integer_rounding(k_continuous, rounding_mode)
+
+    return int(2 ** k_int)
 
 
 # =============================================================================
 # RbCP THEORY (LEMMA 4 / PROPOSITION 2)
 # =============================================================================
 
-def compute_q(M_rbcp: int) -> float:
+def compute_q(M_rbcp: float) -> float:
     """
     Compute the Q term used in Lemma 3 / Lemma 4 / Proposition 2:
 
@@ -94,7 +206,7 @@ def compute_q(M_rbcp: int) -> float:
 
     Parameters
     ----------
-    M_rbcp : int
+    M_rbcp : float
         Number of quantization bins for the RbCP representation.
 
     Returns
@@ -102,6 +214,7 @@ def compute_q(M_rbcp: int) -> float:
     float
         Q factor.
     """
+    M_rbcp = max(float(M_rbcp), 1.0)
     return (M_rbcp / (2.0 * np.pi)) * np.sin(np.pi / M_rbcp)
 
 
@@ -189,9 +302,6 @@ def compute_M_rbcp_from_M(M: float, W: float, tau: float) -> float:
     with:
         N = floor(W * tau / 2)
 
-    This is equivalent to the manuscript relation:
-        M_RbCP = M * pi*W / (pi*W - xi*w0)
-
     Parameters
     ----------
     M : float
@@ -204,7 +314,7 @@ def compute_M_rbcp_from_M(M: float, W: float, tau: float) -> float:
     Returns
     -------
     float
-        Corresponding M_RbCP value.
+        Corresponding continuous-valued M_RbCP.
     """
     N = compute_N(W, tau)
     return M * tau * W / (2.0 * N)
@@ -228,7 +338,7 @@ def compute_M_from_M_rbcp(M_rbcp: float, W: float, tau: float) -> float:
     Returns
     -------
     float
-        Corresponding Benchmark M value.
+        Corresponding continuous-valued Benchmark M.
     """
     N = compute_N(W, tau)
     return M_rbcp * (2.0 * N) / (tau * W)
@@ -258,6 +368,7 @@ def compute_bandwidth_allocation(
     np.ndarray
         Allocation vector of length S.
     """
+
     if bandwidth_allocation is None:
         return np.ones(S, dtype=float) / S
 
@@ -295,6 +406,7 @@ def compute_sensor_bandwidths(
     tuple
         (allocation, B_per_sensor)
     """
+
     alloc = compute_bandwidth_allocation(S, bandwidth_allocation)
     B_per_sensor = B * alloc
     return alloc, B_per_sensor
@@ -304,38 +416,68 @@ def compute_sensor_bandwidths(
 # RbCP FEASIBLE NUMBER OF BINS UNDER BANDWIDTH SHARING
 # =============================================================================
 
-def compute_M_rbcp_single_sensor(W: float, tau: float, B_sensor: float, SNR: float) -> int:
+def compute_M_rbcp_single_sensor(
+    W: float,
+    tau: float,
+    B_sensor: float,
+    SNR: float,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
+) -> int:
     """
-    Feasible number of RbCP bins for ONE sensor.
+    Compute the feasible number of RbCP bins for one sensor.
 
-    For one sensor:
+    Communication constraint for one sensor:
         2N log2(M_RbCP) <= tau * B_sensor * log2(1 + SNR)
+
+    Therefore:
+        M_RbCP <= (1 + SNR)^(tau * B_sensor / (2N))
+
+    Default behavior
+    ----------------
+    - M_RbCP is a free integer
+    - no power-of-two restriction
+    - rounding_mode="floor"
 
     Parameters
     ----------
     W : float
         Signal bandwidth.
+
     tau : float
         Frame duration.
+
     B_sensor : float
         Bandwidth slice assigned to this sensor.
+
     SNR : float
         Signal-to-noise ratio in linear scale.
+
+    force_power_of_two : bool, optional
+        If True, restrict the final M_RbCP to powers of 2.
+
+    rounding_mode : str, optional
+        One of:
+            - "floor"  (default)
+            - "ceil"
+            - "round"
 
     Returns
     -------
     int
         Feasible M_RbCP for one sensor.
     """
+
     N = compute_N(W, tau)
 
-    capacity_bits = tau * compute_capacity(B_sensor, SNR)
-    bits_per_symbol = capacity_bits / (2.0 * N)
+    exponent = (tau * B_sensor) / (2.0 * N)
+    M_continuous = (1.0 + SNR) ** exponent
 
-    bits_per_symbol = max(bits_per_symbol, 1e-12)
-    bits_int = int(np.floor(bits_per_symbol))
-
-    return int(2 ** bits_int)
+    return _finalize_M(
+        M_continuous=M_continuous,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
+    )
 
 
 def compute_M_rbcp_per_sensor(
@@ -344,20 +486,36 @@ def compute_M_rbcp_per_sensor(
     tau: float,
     B: float,
     SNR: float,
-    bandwidth_allocation: Optional[Sequence[float]] = None
+    bandwidth_allocation: Optional[Sequence[float]] = None,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
 ) -> np.ndarray:
     """
     Per-sensor feasible M_RbCP values, accounting for bandwidth sharing.
+
+    Default behavior
+    ----------------
+    - free integer M_RbCP
+    - no power-of-two restriction
+    - rounding_mode="floor"
 
     Returns
     -------
     np.ndarray
         Shape (S,)
     """
+
     _, B_per_sensor = compute_sensor_bandwidths(B, S, bandwidth_allocation)
 
     return np.array([
-        compute_M_rbcp_single_sensor(W, tau, B_s, SNR)
+        compute_M_rbcp_single_sensor(
+            W=W,
+            tau=tau,
+            B_sensor=B_s,
+            SNR=SNR,
+            force_power_of_two=force_power_of_two,
+            rounding_mode=rounding_mode
+        )
         for B_s in B_per_sensor
     ], dtype=int)
 
@@ -368,23 +526,25 @@ def compute_M_rbcp(
     tau: float,
     B: float,
     SNR: float,
-    bandwidth_allocation: Optional[Sequence[float]] = None
+    bandwidth_allocation: Optional[Sequence[float]] = None,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
 ) -> int:
     """
     Common feasible M_RbCP across S sensors.
 
-    If bandwidth is equally split, all sensors get the same value.
-    If bandwidth is unevenly split, this returns the minimum per-sensor value
-    so that it is safe as a common M_RbCP.
-
-    This is the bandwidth-sharing-aware interpretation of the manuscript
-    multiuser constraint.
+    Default behavior
+    ----------------
+    - free integer M_RbCP
+    - no power-of-two restriction
+    - rounding_mode="floor"
 
     Returns
     -------
     int
         Common feasible M_RbCP.
     """
+
     M_vec = compute_M_rbcp_per_sensor(
         S=S,
         W=W,
@@ -392,46 +552,161 @@ def compute_M_rbcp(
         B=B,
         SNR=SNR,
         bandwidth_allocation=bandwidth_allocation,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode,
     )
     return int(np.min(M_vec))
 
 
 # =============================================================================
-# BENCHMARK / NYQUIST COMMUNICATION BUDGET
+# BENCHMARK FEASIBLE NUMBER OF BINS
+# =============================================================================
+
+def compute_benchmark_M_single_sensor(
+    tau: float,
+    B_sensor: float,
+    SNR: float,
+    sampling_rate: float,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
+) -> int:
+    """
+    Compute the feasible number of Benchmark quantization bins M for one sensor.
+
+    Communication constraint for one sensor:
+        sampling_rate * log2(M) <= B_sensor * log2(1 + SNR)
+
+    Therefore:
+        M <= (1 + SNR)^(B_sensor / sampling_rate)
+
+    Default behavior
+    ----------------
+    - free integer M
+    - no power-of-two restriction
+    - rounding_mode="floor"
+
+    Parameters
+    ----------
+    tau : float
+        Frame duration. Present for interface symmetry.
+
+    B_sensor : float
+        Effective bandwidth assigned to one sensor.
+
+    SNR : float
+        Signal-to-noise ratio in linear scale.
+
+    sampling_rate : float
+        Sampling rate of the Benchmark branch.
+
+    force_power_of_two : bool, optional
+        If True, force M to be a power of 2.
+
+    rounding_mode : str, optional
+        One of:
+            - "floor"  (default)
+            - "ceil"
+            - "round"
+
+    Returns
+    -------
+    int
+        Feasible number of bins M.
+    """
+
+    _ = tau  # kept for interface consistency
+
+    if sampling_rate <= 0:
+        raise ValueError("sampling_rate must be positive")
+
+    exponent = B_sensor / sampling_rate
+    M_continuous = (1.0 + SNR) ** exponent
+
+    return _finalize_M(
+        M_continuous=M_continuous,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
+    )
+
+
+def compute_benchmark_M_per_sensor(
+    S: int,
+    tau: float,
+    B: float,
+    SNR: float,
+    sampling_rate: float,
+    bandwidth_allocation: Optional[Sequence[float]] = None,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
+) -> np.ndarray:
+    """
+    Per-sensor feasible Benchmark M values.
+
+    Default behavior
+    ----------------
+    - free integer M
+    - no power-of-two restriction
+    - rounding_mode="floor"
+
+    Returns
+    -------
+    np.ndarray
+        Shape (S,)
+    """
+
+    _, B_per_sensor = compute_sensor_bandwidths(B, S, bandwidth_allocation)
+
+    return np.array([
+        compute_benchmark_M_single_sensor(
+            tau=tau,
+            B_sensor=B_s,
+            SNR=SNR,
+            sampling_rate=sampling_rate,
+            force_power_of_two=force_power_of_two,
+            rounding_mode=rounding_mode
+        )
+        for B_s in B_per_sensor
+    ], dtype=int)
+
+
+# =============================================================================
+# BENCHMARK BITS-PER-SAMPLE (BACKWARD COMPATIBILITY)
 # =============================================================================
 
 def compute_benchmark_bits_per_sample_single_sensor(
     tau: float,
     B_sensor: float,
     SNR: float,
-    sampling_rate: float
+    sampling_rate: float,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
 ) -> int:
     """
-    Feasible number of bits per sample for one Benchmark/Nyquist sensor.
+    Backward-compatible helper returning an effective bits-per-sample value
+    derived from the feasible Benchmark M.
 
-    For one sensor:
-        C_sensor = B_sensor * log2(1 + SNR)
-        bits_total = tau * C_sensor
-        num_samples = floor(tau * sampling_rate)
-        bits_per_sample = bits_total / num_samples
+    Default behavior
+    ----------------
+    - M is free integer (not necessarily a power of 2)
+    - bits are computed as floor(log2(M))
 
     Returns
     -------
     int
-        Feasible bits per sample.
+        Effective bits per sample.
     """
-    C_sensor = compute_capacity(B_sensor, SNR)
-    bits_total = tau * C_sensor
 
-    num_samples = int(np.floor(tau * sampling_rate))
-    if num_samples <= 0:
-        raise ValueError("sampling_rate leads to zero samples in one cycle")
+    M = compute_benchmark_M_single_sensor(
+        tau=tau,
+        B_sensor=B_sensor,
+        SNR=SNR,
+        sampling_rate=sampling_rate,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
+    )
 
-    bits_per_sample = bits_total / num_samples
-    bits_int = int(np.floor(bits_per_sample))
-    bits_int = max(bits_int, 1)
-
-    return bits_int
+    bits = int(np.floor(np.log2(max(M, 1))))
+    return max(bits, 1)
 
 
 def compute_benchmark_bits_per_sample_per_sensor(
@@ -440,27 +715,32 @@ def compute_benchmark_bits_per_sample_per_sensor(
     B: float,
     SNR: float,
     sampling_rate: float,
-    bandwidth_allocation: Optional[Sequence[float]] = None
+    bandwidth_allocation: Optional[Sequence[float]] = None,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
 ) -> np.ndarray:
     """
-    Per-sensor feasible bits-per-sample for the Benchmark/Nyquist branch.
-
-    Returns
-    -------
-    np.ndarray
-        Shape (S,)
+    Backward-compatible helper returning effective bits-per-sample per sensor
+    derived from feasible Benchmark M values.
     """
-    _, B_per_sensor = compute_sensor_bandwidths(B, S, bandwidth_allocation)
 
-    return np.array([
-        compute_benchmark_bits_per_sample_single_sensor(
-            tau=tau,
-            B_sensor=B_s,
-            SNR=SNR,
-            sampling_rate=sampling_rate
-        )
-        for B_s in B_per_sensor
+    M_vec = compute_benchmark_M_per_sensor(
+        S=S,
+        tau=tau,
+        B=B,
+        SNR=SNR,
+        sampling_rate=sampling_rate,
+        bandwidth_allocation=bandwidth_allocation,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
+    )
+
+    bits_vec = np.array([
+        max(int(np.floor(np.log2(max(M, 1)))), 1)
+        for M in M_vec
     ], dtype=int)
+
+    return bits_vec
 
 
 # =============================================================================
@@ -489,11 +769,6 @@ def compute_slot_duration(B: float, R: int) -> float:
     Duration of one SFC symbol slot:
 
         T_slot = R / B
-
-    Returns
-    -------
-    float
-        Slot duration in seconds.
     """
     return R / B
 
@@ -503,11 +778,6 @@ def compute_slots_per_period(tau: float, B: float, R: int) -> int:
     Number of possible event-start slots per period:
 
         floor(tau / (R/B)) = floor(tau * B / R)
-
-    Returns
-    -------
-    int
-        Slots per period.
     """
     return int(np.floor(tau * B / R))
 
@@ -525,11 +795,6 @@ def compute_rx_slots_total(tau: float, B: float, R: int, n_periods: int, L: int)
     into account.
 
         rx_slots_total = event_slots_total + L - 1
-
-    Returns
-    -------
-    int
-        Length of the final received frame.
     """
     return compute_event_slots_total(tau, B, R, n_periods) + L - 1
 
@@ -561,12 +826,12 @@ def epsilon_upper_bound(M_time: int, N: int, S: int) -> float:
     float
         Upper bound on the average probability of receiving duplicate values.
     """
+
     k = 2 * N * S
 
     if M_time < k:
         return 1.0
 
-    # log( M_time! / ((M_time-k)! * M_time^k) )
     log_ratio = (
         math.lgamma(M_time + 1)
         - math.lgamma(M_time - k + 1)
@@ -653,13 +918,17 @@ __all__ = [
     "compute_snr_linear",
     "compute_capacity",
 
+    # quantization helpers
+    "_apply_integer_rounding",
+    "_finalize_M",
+
     # RbCP theory
     "compute_q",
     "rbcp_mse_upper_bound",
     "rbcp_mse_lower_bound",
     "rbcp_mse_star",
 
-    # M <-> M_RbCP
+    # Eq. (17)
     "compute_M_rbcp_from_M",
     "compute_M_from_M_rbcp",
 
@@ -672,7 +941,9 @@ __all__ = [
     "compute_M_rbcp_per_sensor",
     "compute_M_rbcp",
 
-    # Benchmark bits/sample
+    # Benchmark M / bits
+    "compute_benchmark_M_single_sensor",
+    "compute_benchmark_M_per_sensor",
     "compute_benchmark_bits_per_sample_single_sensor",
     "compute_benchmark_bits_per_sample_per_sensor",
 

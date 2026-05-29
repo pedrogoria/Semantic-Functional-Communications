@@ -1,19 +1,5 @@
 """
-scripts/run_rbcp_mse_vs_B_fixed_power.py
-
-Runner for manuscript Figure 6-style experiment:
-
-    MSE versus B for:
-    - Benchmark Approach
-    - RbCP
-    - RbCP_time
-    - SFC
-
-This runner:
-- reads the YAML config
-- runs the fixed-power MSE-vs-B pipeline
-- saves the .dat output
-- saves metadata and a copy of the config
+scripts/run_rbcp_mse- saves metadata and a copy of the configscripts/run_rbcp_mse_vs_B_fixed_power.py
 - generates the main MSE plot
 - generates a diagnostics plot for M, M_time, M_RbCP
 """
@@ -234,7 +220,10 @@ def generate_diagnostics_plot(df, cfg, output_dir, timestamp):
 
     for fmt in cfg["output"]["formats"]["plot"]:
         plt.savefig(
-            os.path.join(output_dir, f"rbcp_mse_vs_B_fixed_power_diagnostics_{timestamp}.{fmt}"),
+            os.path.join(
+                output_dir,
+                f"rbcp_mse_vs_B_fixed_power_diagnostics_{timestamp}.{fmt}"
+            ),
             bbox_inches="tight"
         )
 
@@ -270,6 +259,18 @@ def save_metadata(cfg, df, output_dir, timestamp, config_path):
         if "SNR_dB_derived" in df.columns:
             f.write(f"SNR_dB_derived min: {df['SNR_dB_derived'].min()}\n")
             f.write(f"SNR_dB_derived max: {df['SNR_dB_derived'].max()}\n\n")
+
+        if "M_benchmark_mean" in df.columns:
+            f.write(f"M_benchmark_mean min: {df['M_benchmark_mean'].min()}\n")
+            f.write(f"M_benchmark_mean max: {df['M_benchmark_mean'].max()}\n\n")
+
+        if "M_time" in df.columns:
+            f.write(f"M_time min: {df['M_time'].min()}\n")
+            f.write(f"M_time max: {df['M_time'].max()}\n\n")
+
+        if "M_rbcp" in df.columns:
+            f.write(f"M_rbcp min: {df['M_rbcp'].min()}\n")
+            f.write(f"M_rbcp max: {df['M_rbcp'].max()}\n\n")
 
         f.write("--- CONFIG SNAPSHOT ---\n\n")
         f.write(yaml.dump(cfg, sort_keys=False))

@@ -399,8 +399,11 @@ def _trial_random_signals(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
     # -------------------------------------------------------------------------
     # 8. SFC channels
     # -------------------------------------------------------------------------
-    events_est_clean = sfc_channel_clean(events)
-    events_est_awgn = sfc_channel_awgn(events)
+    out_clean = sfc_channel_clean(events)
+    out_awgn = sfc_channel_awgn(events)
+
+    events_est_clean = _extract_events_est(out_clean)
+    events_est_awgn = _extract_events_est(out_awgn)
 
     # -------------------------------------------------------------------------
     # 9. Duplicate criterion
@@ -469,8 +472,11 @@ def _trial_uniform_t(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
     # -------------------------------------------------------------------------
     # 3. SFC channels
     # -------------------------------------------------------------------------
-    events_est_clean = sfc_channel_clean(events)
-    events_est_awgn = sfc_channel_awgn(events)
+    out_clean = sfc_channel_clean(events)
+    out_awgn = sfc_channel_awgn(events)
+
+    events_est_clean = _extract_events_est(out_clean)
+    events_est_awgn = _extract_events_est(out_awgn)
 
     # -------------------------------------------------------------------------
     # 4. Duplicate criterion
@@ -506,6 +512,27 @@ def _build_sensor_x_event(S, N):
         sensor_x_event[s, start:stop] = 1.0
 
     return sensor_x_event
+
+
+# =============================================================================
+# SFC OUTPUT HELPERS
+# =============================================================================
+
+def _extract_events_est(channel_output):
+    """
+    Extract events_est from the SFC channel output.
+
+    Supports both:
+    - np.ndarray directly
+    - dict-like outputs containing "events_est"
+    """
+
+    if isinstance(channel_output, dict):
+        if "events_est" not in channel_output:
+            raise KeyError("SFC channel output dict does not contain 'events_est'")
+        return channel_output["events_est"]
+
+    return channel_output
 
 
 # =============================================================================

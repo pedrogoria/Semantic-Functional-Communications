@@ -1,0 +1,203 @@
+figure:
+  id: rbcp_benchmark_truncation_mse_vs_B
+  title: "Benchmark and RbCP MSE versus B: free vs power-of-two truncation"
+  description: >
+    Diagnostic figure comparing the impact of truncation policy on Benchmark and
+    RbCP as a function of B. The figure includes:
+      - Benchmark with free integer M
+      - Benchmark with power-of-two M
+      - RbCP with free integer M_RbCP
+      - RbCP with power-of-two M_RbCP
+
+    This is a no-channel figure:
+      - no SFC channel
+      - no RbCP_time
+      - no semantic error detection
+
+# ----------------------------------------------------------------------
+# EXPERIMENT MODES
+# ----------------------------------------------------------------------
+mode:
+  run_benchmark: true
+  run_rbcp: true
+
+  run_rbcp_time: false
+  run_sfc: false
+  semantic_error_detection: false
+
+# ----------------------------------------------------------------------
+# SYSTEM PARAMETERS
+# ----------------------------------------------------------------------
+system:
+  S: 1
+  R: 12
+  L: 4
+
+  # Figure uses the Figure-5-style regime:
+  # keep SNR fixed and N0 fixed, derive P(B)
+  SNR_dB: -16.0
+  N0: 0.007
+
+  # Placeholder; pipeline should overwrite this for each B:
+  B: null
+
+  # Placeholder; pipeline should derive:
+  #   P(B) = SNR * B * N0
+  P: null
+
+  manuscript_faithful_power_model: true
+  derive_P_from_fixed_N0: true
+
+  # If null, bandwidth is split equally among sensors.
+  bandwidth_allocation: null
+
+# ----------------------------------------------------------------------
+# SIGNAL PARAMETERS
+# ----------------------------------------------------------------------
+signal:
+  W: 10.4
+  tau: 1.0
+  Tt: 0.01
+
+  # Keep N fixed to match the Figure-5-style setting
+  N_override: 5
+
+  distribution: "uniform"
+
+  # Absolute-MSE plotting convention
+  peak_to_peak: 12.0
+
+  normalize_dft: true
+  normalization_target: 3.9
+
+# ----------------------------------------------------------------------
+# DC HANDLING
+# ----------------------------------------------------------------------
+dc:
+  enabled: false
+
+# ----------------------------------------------------------------------
+# BENCHMARK APPROACH
+# ----------------------------------------------------------------------
+benchmark:
+  enabled: true
+  sampling_rate: 10.4
+
+  # Preserves the existing Figure-5-style tuning knob
+  effective_rate_factor: 2.0
+
+# ----------------------------------------------------------------------
+# RBCP SETTINGS
+# ----------------------------------------------------------------------
+rbcp:
+  enabled: true
+
+# ----------------------------------------------------------------------
+# TRUNCATION POLICIES TO COMPARE
+# ----------------------------------------------------------------------
+comparison:
+  benchmark:
+    free_integer:
+      force_power_of_two: false
+      rounding_mode: "floor"
+    power_of_two:
+      force_power_of_two: true
+      rounding_mode: "floor"
+
+  rbcp:
+    free_integer:
+      force_power_of_two: false
+      rounding_mode: "floor"
+    power_of_two:
+      force_power_of_two: true
+      rounding_mode: "floor"
+
+# ----------------------------------------------------------------------
+# SWEEP PARAMETERS
+# ----------------------------------------------------------------------
+sweep:
+  B:
+    start: 50
+    stop: 1001
+    step: 50
+
+# ----------------------------------------------------------------------
+# MONTE CARLO / AVERAGING
+# ----------------------------------------------------------------------
+monte_carlo:
+  seed: 47
+  interactions: 200
+
+# ----------------------------------------------------------------------
+# METRICS
+# ----------------------------------------------------------------------
+metrics:
+  mse: true
+
+  aggregation:
+    mean: true
+
+# ----------------------------------------------------------------------
+# OUTPUT
+# ----------------------------------------------------------------------
+output:
+  base_dir: "data/results"
+  figure_dir: "rbcp_benchmark_truncation_mse_vs_B"
+
+  save_dat: true
+  save_plot: true
+  save_metadata: true
+  save_config_copy: true
+
+  formats:
+    plot: ["png", "pdf"]
+    data: ["dat"]
+
+# ----------------------------------------------------------------------
+# DATA FORMAT
+# ----------------------------------------------------------------------
+data_format:
+  columns:
+    - B
+    - P_derived
+
+    - M_benchmark_free
+    - M_benchmark_pow2
+    - M_rbcp_free
+    - M_rbcp_pow2
+
+    - mse_benchmark_free
+    - mse_benchmark_pow2
+    - mse_rbcp_free
+    - mse_rbcp_pow2
+
+    - num_trials
+
+  delimiter: "\t"
+
+# ----------------------------------------------------------------------
+# PLOT SETTINGS
+# ----------------------------------------------------------------------
+plot:
+  x_axis: "B"
+  y_axis: "MSE"
+
+  x_scale: "linear"
+  y_scale: "log"
+
+  show_grid: true
+  legend: true
+
+  label_map:
+    benchmark_free: "Benchmark (free M)"
+    benchmark_pow2: "Benchmark (power-of-two M)"
+    rbcp_free: "RbCP (free M_RbCP)"
+    rbcp_pow2: "RbCP (power-of-two M_RbCP)"
+
+# ----------------------------------------------------------------------
+# REPRODUCIBILITY
+# ----------------------------------------------------------------------
+reproducibility:
+  save_git_commit: true
+  save_timestamp: true
+  seed: 47

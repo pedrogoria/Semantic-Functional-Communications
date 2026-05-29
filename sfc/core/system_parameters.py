@@ -17,6 +17,24 @@ This avoids duplication of physics / communication formulas across:
 - detection.py
 - pipelines
 - debug scripts
+
+Quantization policy
+-------------------
+Default behavior:
+- M and M_RbCP are free integers
+- no power-of-two restriction
+- floor rounding
+
+Optional configuration
+----------------------
+Backward-compatible optional configuration is still supported through:
+
+    quantization:
+      force_power_of_two: false
+      rounding_mode: "floor"
+
+but NOTHING in this file requires:
+    enforce_eq17_rate_matching: true
 """
 
 from dataclasses import dataclass
@@ -38,6 +56,10 @@ from sfc.core.theory import (
     compute_default_detection_threshold as theory_compute_default_detection_threshold,
     compute_bandwidth_allocation as theory_compute_bandwidth_allocation,
     compute_sensor_bandwidths as theory_compute_sensor_bandwidths,
+    compute_benchmark_M_single_sensor as theory_compute_benchmark_M_single_sensor,
+    compute_benchmark_M_per_sensor as theory_compute_benchmark_M_per_sensor,
+    compute_benchmark_bits_per_sample_single_sensor as theory_compute_benchmark_bits_per_sample_single_sensor,
+    compute_benchmark_bits_per_sample_per_sensor as theory_compute_benchmark_bits_per_sample_per_sensor,
 )
 
 
@@ -56,7 +78,7 @@ class DerivedSystemParameters:
         Number of sensors/signals.
 
     P : float
-        Average transmit power per sensor.
+        Average transmit power parameter.
 
     B : float
         Total system bandwidth.
@@ -119,6 +141,12 @@ class DerivedSystemParameters:
 
     B_per_sensor : np.ndarray
         Effective bandwidth assigned to each sensor.
+
+    quantization_force_power_of_two : bool
+        Whether M / M_RbCP are constrained to powers of 2.
+
+    quantization_rounding_mode : str
+        Integer rounding mode used when converting continuous M values.
     """
 
     # primary inputs
@@ -145,6 +173,10 @@ class DerivedSystemParameters:
     bandwidth_allocation: np.ndarray
     B_per_sensor: np.ndarray
 
+    # quantization policy
+    quantization_force_power_of_two: bool
+    quantization_rounding_mode: str
+
 
 # =============================================================================
 # CENTRAL BUILDER
@@ -170,6 +202,8 @@ def build_derived_system_parameters(cfg, threshold_factor: Optional[float] = Non
         Optional:
             cfg["system"]["bandwidth_allocation"]
             cfg["channel"]["threshold_factor"]
+            cfg["quantization"]["force_power_of_two"]
+            cfg["quantization"]["rounding_mode"]
 
     threshold_factor : float or None, optional
         Factor used to derive the default detector threshold.
@@ -200,6 +234,13 @@ def build_derived_system_parameters(cfg, threshold_factor: Optional[float] = Non
     bandwidth_allocation = cfg["system"].get("bandwidth_allocation", None)
 
     # -------------------------------------------------------------------------
+    # Quantization policy (default = free integer M / M_RbCP, floor)
+    # -------------------------------------------------------------------------
+    quant_cfg = cfg.get("quantization", {})
+    force_power_of_two = quant_cfg.get("force_power_of_two", False)
+    rounding_mode = quant_cfg.get("rounding_mode", "floor")
+
+    # -------------------------------------------------------------------------
     # Threshold factor source
     # -------------------------------------------------------------------------
     if threshold_factor is None:
@@ -224,7 +265,9 @@ def build_derived_system_parameters(cfg, threshold_factor: Optional[float] = Non
         tau=tau,
         B=B,
         SNR=SNR,
-        bandwidth_allocation=bandwidth_allocation
+        bandwidth_allocation=bandwidth_allocation,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
     )
 
     M_rbcp = theory_compute_M_rbcp(
@@ -233,7 +276,9 @@ def build_derived_system_parameters(cfg, threshold_factor: Optional[float] = Non
         tau=tau,
         B=B,
         SNR=SNR,
-        bandwidth_allocation=bandwidth_allocation
+        bandwidth_allocation=bandwidth_allocation,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
     )
 
     M_time = theory_compute_M_time(tau, B, R)
@@ -274,17 +319,13 @@ def build_derived_system_parameters(cfg, threshold_factor: Optional[float] = Non
         default_threshold=default_threshold,
         bandwidth_allocation=alloc,
         B_per_sensor=B_per_sensor,
+        quantization_force_power_of_two=force_power_of_two,
+        quantization_rounding_mode=rounding_mode,
     )
 
 
 # =============================================================================
 # BACKWARD-COMPATIBILITY WRAPPERS
-# =============================================================================
-#
-# These wrappers preserve old imports such as:
-#   from sfc.core.system_parameters import compute_N, compute_M_rbcp, ...
-#
-# Internally, they simply delegate to theory.py.
 # =============================================================================
 
 def compute_N(W: float, tau: float) -> int:
@@ -335,7 +376,9 @@ def compute_M_rbcp(
     tau: float,
     B: float,
     SNR: float,
-    bandwidth_allocation: Optional[Sequence[float]] = None
+    bandwidth_allocation: Optional[Sequence[float]] = None,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
 ) -> int:
     """
     Backward-compatible wrapper for theory.compute_M_rbcp().
@@ -346,7 +389,9 @@ def compute_M_rbcp(
         tau=tau,
         B=B,
         SNR=SNR,
-        bandwidth_allocation=bandwidth_allocation
+        bandwidth_allocation=bandwidth_allocation,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
     )
 
 
@@ -356,7 +401,9 @@ def compute_M_rbcp_per_sensor(
     tau: float,
     B: float,
     SNR: float,
-    bandwidth_allocation: Optional[Sequence[float]] = None
+    bandwidth_allocation: Optional[Sequence[float]] = None,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
 ) -> np.ndarray:
     """
     Backward-compatible wrapper for theory.compute_M_rbcp_per_sensor().
@@ -367,7 +414,9 @@ def compute_M_rbcp_per_sensor(
         tau=tau,
         B=B,
         SNR=SNR,
-        bandwidth_allocation=bandwidth_allocation
+        bandwidth_allocation=bandwidth_allocation,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
     )
 
 
@@ -418,6 +467,100 @@ def compute_default_detection_threshold(
     return theory_compute_default_detection_threshold(P, tau, L, threshold_factor)
 
 
+def compute_benchmark_M_single_sensor(
+    tau: float,
+    B_sensor: float,
+    SNR: float,
+    sampling_rate: float,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
+) -> int:
+    """
+    Backward-compatible wrapper for theory.compute_benchmark_M_single_sensor().
+    """
+    return theory_compute_benchmark_M_single_sensor(
+        tau=tau,
+        B_sensor=B_sensor,
+        SNR=SNR,
+        sampling_rate=sampling_rate,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
+    )
+
+
+def compute_benchmark_M_per_sensor(
+    S: int,
+    tau: float,
+    B: float,
+    SNR: float,
+    sampling_rate: float,
+    bandwidth_allocation: Optional[Sequence[float]] = None,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
+) -> np.ndarray:
+    """
+    Backward-compatible wrapper for theory.compute_benchmark_M_per_sensor().
+    """
+    return theory_compute_benchmark_M_per_sensor(
+        S=S,
+        tau=tau,
+        B=B,
+        SNR=SNR,
+        sampling_rate=sampling_rate,
+        bandwidth_allocation=bandwidth_allocation,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
+    )
+
+
+def compute_benchmark_bits_per_sample_single_sensor(
+    tau: float,
+    B_sensor: float,
+    SNR: float,
+    sampling_rate: float,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
+) -> int:
+    """
+    Backward-compatible wrapper for
+    theory.compute_benchmark_bits_per_sample_single_sensor().
+    """
+    return theory_compute_benchmark_bits_per_sample_single_sensor(
+        tau=tau,
+        B_sensor=B_sensor,
+        SNR=SNR,
+        sampling_rate=sampling_rate,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
+    )
+
+
+def compute_benchmark_bits_per_sample_per_sensor(
+    S: int,
+    tau: float,
+    B: float,
+    SNR: float,
+    sampling_rate: float,
+    bandwidth_allocation: Optional[Sequence[float]] = None,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor"
+) -> np.ndarray:
+    """
+    Backward-compatible wrapper for
+    theory.compute_benchmark_bits_per_sample_per_sensor().
+    """
+    return theory_compute_benchmark_bits_per_sample_per_sensor(
+        S=S,
+        tau=tau,
+        B=B,
+        SNR=SNR,
+        sampling_rate=sampling_rate,
+        bandwidth_allocation=bandwidth_allocation,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode
+    )
+
+
 # =============================================================================
 # OPTIONAL EXPORT LIST
 # =============================================================================
@@ -440,4 +583,8 @@ __all__ = [
     "compute_symbol_energy",
     "compute_signal_level",
     "compute_default_detection_threshold",
+    "compute_benchmark_M_single_sensor",
+    "compute_benchmark_M_per_sensor",
+    "compute_benchmark_bits_per_sample_single_sensor",
+    "compute_benchmark_bits_per_sample_per_sensor",
 ]

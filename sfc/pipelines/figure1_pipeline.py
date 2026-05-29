@@ -213,7 +213,7 @@ def _run_single_trial(N, M, cfg, rng):
         Empirical MSE for one Monte Carlo realization.
     """
 
-    T = cfg["signal"]["T"]
+    T = _get_signal_period(cfg)
     Tt = cfg["signal"]["Tt"]
     w0 = 2 * np.pi / T
     n_vec = np.arange(1, N + 1)
@@ -239,7 +239,7 @@ def _run_single_trial(N, M, cfg, rng):
     p2p_target = cfg["signal"]["peak_to_peak"]
     current_p2p = np.max(x_filtered) - np.min(x_filtered)
 
-    if p2p_target != 0:
+    if p2p_target != 0 and current_p2p != 0:
         x_filtered = x_filtered * (p2p_target / current_p2p)
 
     # ------------------------------------------------------------
@@ -313,6 +313,29 @@ def _run_single_trial(N, M, cfg, rng):
 # SIGNAL GENERATION
 # =============================================================================
 
+def _get_signal_period(cfg):
+    """
+    Get the signal period from the configuration.
+
+    Accepts either:
+    - cfg["signal"]["T"]   (legacy figure configuration)
+    - cfg["signal"]["tau"] (newer project-wide convention)
+
+    Returns
+    -------
+    float
+        Signal period.
+    """
+
+    if "T" in cfg["signal"]:
+        return cfg["signal"]["T"]
+
+    if "tau" in cfg["signal"]:
+        return cfg["signal"]["tau"]
+
+    raise KeyError("Expected cfg['signal']['T'] or cfg['signal']['tau'].")
+
+
 def _generate_signal(cfg, rng):
     """
     Generate a random signal according to the YAML configuration.
@@ -339,10 +362,10 @@ def _generate_signal(cfg, rng):
             Generated 1D raw signal.
 
         t : np.ndarray
-            Time vector built using T and Tt from the configuration.
+            Time vector built using T/tau and Tt from the configuration.
     """
 
-    T = cfg["signal"]["T"]
+    T = _get_signal_period(cfg)
     Tt = cfg["signal"]["Tt"]
 
     t = np.arange(0, T, Tt)
@@ -380,10 +403,6 @@ def save_dat_file(df, path, delimiter="\t"):
     delimiter : str, optional
         Delimiter used in the saved file.
         Default is tab.
-
-    Returns
-    -------
-    None
     """
 
     df.to_csv(

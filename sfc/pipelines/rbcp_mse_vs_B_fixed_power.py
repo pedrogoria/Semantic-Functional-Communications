@@ -30,10 +30,10 @@ Important modeling choices
 3. No semantic-based error detection:
    Figure 6 does NOT use semantic error detection.
 
-4. Free M and free M_RbCP in this pipeline:
-   - Benchmark M is NOT constrained to powers of 2.
-   - RbCP M_RbCP is NOT constrained to powers of 2.
-   - Both are only floored to the nearest lower integer >= 1.
+4. Quantization policy:
+   This pipeline relies on the defaults already implemented in the core:
+   - M and M_RbCP are free integers by default
+   - no power-of-two restriction unless explicitly requested in cfg
 """
 
 import copy
@@ -46,7 +46,10 @@ from sfc.core.phase_cof import PhaseCoefficientCore
 from sfc.core.quantization import quantize_ta_tb
 from sfc.core.reconstruction import recover_signal
 from sfc.core.channel.SFCChannel import SFCChannel
-from sfc.core.system_parameters import build_derived_system_parameters
+from sfc.core.system_parameters import (
+    build_derived_system_parameters,
+    compute_benchmark_M_per_sensor,
+)
 
 
 # =============================================================================
@@ -100,7 +103,9 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
         cfg_B = copy.deepcopy(cfg)
         cfg_B["system"]["B"] = float(B)
 
+        # ---------------------------------------------------------------------
         # Figure 6 regime: P fixed, N0 fixed, derive SNR(B)
+        # ---------------------------------------------------------------------
         cfg_B["system"]["SNR_dB"] = _derive_snr_db_from_fixed_P_and_N0(cfg_B)
 
         params = build_derived_system_parameters(cfg_B)
@@ -108,15 +113,31 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
         N = cfg_B["signal"].get("N_override", params.N)
         n_trials = cfg_B["monte_carlo"]["interactions"]
 
-        # Free-M diagnostics
-        M_benchmark_per_sensor = _compute_free_M_benchmark_per_sensor(cfg_B, params)
-        M_rbcp_per_sensor = _compute_free_M_rbcp_per_sensor(params, N)
+        # ---------------------------------------------------------------------
+        # Diagnostic quantities from the core
+        # ---------------------------------------------------------------------
+        benchmark_cfg = cfg_B.get("benchmark", {})
+        sampling_rate = benchmark_cfg.get("sampling_rate", params.W)
+        effective_rate_factor = benchmark_cfg.get("effective_rate_factor", 1.0)
+
+        # We preserve the historical role of effective_rate_factor by applying
+        # it as an equivalent scaling of the sampling rate.
+        M_benchmark_per_sensor = compute_benchmark_M_per_sensor(
+            S=params.S,
+            tau=params.tau,
+            B=params.B,
+            SNR=params.SNR,
+            sampling_rate=effective_rate_factor * sampling_rate,
+            bandwidth_allocation=params.bandwidth_allocation,
+            force_power_of_two=params.quantization_force_power_of_two,
+            rounding_mode=params.quantization_rounding_mode
+        )
 
         M_benchmark_min = float(np.min(M_benchmark_per_sensor))
         M_benchmark_mean = float(np.mean(M_benchmark_per_sensor))
         M_benchmark_max = float(np.max(M_benchmark_per_sensor))
         M_time = int(params.M_time)
-        M_rbcp = int(np.min(M_rbcp_per_sensor))
+        M_rbcp = int(params.M_rbcp)
 
         print("\n[INFO] ------------------------------------------------------------")
         print(f"[INFO] B = {B:.1f} Hz")
@@ -131,22 +152,34 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
         print(f"[INFO] bandwidth_allocation = {params.bandwidth_allocation}")
         print(f"[INFO] B_per_sensor = {params.B_per_sensor}")
         print(f"[INFO] M_benchmark_per_sensor = {M_benchmark_per_sensor}")
-        print(f"[INFO] M_RbCP_per_sensor (free) = {M_rbcp_per_sensor}")
+        print(f"[INFO] M_RbCP per sensor = {params.M_rbcp_per_sensor}")
         print(f"[INFO] M_benchmark_min = {M_benchmark_min}")
         print(f"[INFO] M_benchmark_mean = {M_benchmark_mean}")
         print(f"[INFO] M_benchmark_max = {M_benchmark_max}")
         print(f"[INFO] M_time = {M_time}")
         print(f"[INFO] M_RbCP = {M_rbcp}")
+        print(f"[INFO] quantization_force_power_of_two = {params.quantization_force_power_of_two}")
+        print(f"[INFO] quantization_rounding_mode = {params.quantization_rounding_mode}")
 
+        # ---------------------------------------------------------------------
         # Reuse one SFC channel per B-point
+        # ---------------------------------------------------------------------
         sfc_channel = None
         if cfg_B["mode"].get("run_sfc", False):
             sfc_channel = _build_sfc_channel_for_B(cfg_B, N, params.S)
 
+        # ---------------------------------------------------------------------
         # Benchmark is analytical -> compute once per B
-        mse_benchmark = _run_benchmark_branch(cfg_B, params, M_benchmark_per_sensor)
+        # ---------------------------------------------------------------------
+        mse_benchmark = _run_benchmark_branch(
+            cfg=cfg_B,
+            params=params,
+            M_benchmark_per_sensor=M_benchmark_per_sensor
+        )
 
+        # ---------------------------------------------------------------------
         # Monte Carlo for the other branches
+        # ---------------------------------------------------------------------
         mse_rbcp_sum = 0.0
         mse_rbcp_time_sum = 0.0
         mse_sfc_sum = 0.0
@@ -201,80 +234,16 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
 def _derive_snr_db_from_fixed_P_and_N0(cfg):
     """
     Derive SNR_dB(B) from fixed P and fixed N0 using:
+
         SNR(B) = P / (B * N0)
     """
+
     P = cfg["system"]["P"]
     B = cfg["system"]["B"]
     N0 = cfg["system"]["N0"]
 
     snr = P / (B * N0)
     return 10.0 * np.log10(snr)
-
-
-# =============================================================================
-# FREE M COMPUTATIONS (PIPELINE-LOCAL)
-# =============================================================================
-
-def _compute_free_M_benchmark_per_sensor(cfg, params):
-    """
-    Compute Benchmark M per sensor WITHOUT constraining M to powers of 2.
-
-    From the multiuser communication budget:
-        sampling_rate * log2(M) <= B_sensor * log2(1 + SNR) / effective_rate_factor
-
-    Therefore:
-        M <= (1 + SNR)^(B_sensor / (effective_rate_factor * sampling_rate))
-
-    We use:
-        M = floor(rhs), with a minimum of 1.
-    """
-
-    benchmark_cfg = cfg.get("benchmark", {})
-    sampling_rate = benchmark_cfg.get("sampling_rate", params.W)
-    effective_rate_factor = benchmark_cfg.get("effective_rate_factor", 1.0)
-
-    M_per_sensor = []
-
-    for s in range(params.S):
-        B_sensor = params.B_per_sensor[s]
-
-        rhs = (1.0 + params.SNR) ** (
-            B_sensor / (effective_rate_factor * sampling_rate)
-        )
-
-        M_s = max(int(np.floor(rhs)), 1)
-        M_per_sensor.append(M_s)
-
-    return np.asarray(M_per_sensor, dtype=int)
-
-
-def _compute_free_M_rbcp_per_sensor(params, N):
-    """
-    Compute RbCP M per sensor WITHOUT constraining M_RbCP to powers of 2.
-
-    From:
-        2N log2(M_RbCP) <= tau * B_sensor * log2(1 + SNR)
-
-    Therefore:
-        M_RbCP <= (1 + SNR)^(tau * B_sensor / (2N))
-
-    We use:
-        M_RbCP = floor(rhs), with a minimum of 1.
-    """
-
-    M_per_sensor = []
-
-    for s in range(params.S):
-        B_sensor = params.B_per_sensor[s]
-
-        rhs = (1.0 + params.SNR) ** (
-            params.tau * B_sensor / (2.0 * N)
-        )
-
-        M_s = max(int(np.floor(rhs)), 1)
-        M_per_sensor.append(M_s)
-
-    return np.asarray(M_per_sensor, dtype=int)
 
 
 # =============================================================================
@@ -598,7 +567,10 @@ def _run_benchmark_branch(cfg, params, M_benchmark_per_sensor):
     Benchmark Approach for Figure 6.
 
     Analytical ABSOLUTE MSE:
+
         MSE_abs = (peak_to_peak^2) / (12 * M^2)
+
+    where M is obtained from the core.
     """
 
     if not cfg["mode"].get("run_benchmark", False):
