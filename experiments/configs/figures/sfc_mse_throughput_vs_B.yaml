@@ -1,24 +1,31 @@
 figure:
-  id: rbcp_mse_vs_B_fixed_power
-  manuscript_figure: 6
-  title: "MSE versus B for RbCP, RbCP_time, SFC, and Benchmark Approach (fixed power)"
+  id: sfc_mse_throughput_vs_B
+  manuscript_figure: 7
+  title: "MSE versus B for RbCP_SFC and RbCP_time, and throughput versus B"
   description: >
-    Reproduction of Figure 6: MSE versus B for the Benchmark Approach,
-    RbCP, RbCP_time, and SFC, under fixed transmit power P and fixed noise
-    parameter N0.
+    Reproduction-oriented experiment for Figure 7:
+      - MSE versus B for the proposed RbCP_SFC
+      - MSE versus B for its theoretical/operational limit RbCP_time
+      - throughput of the proposed RbCP_SFC versus B
+
+    Modeling choices:
+      - RbCP_time is interpreted as the error-free time-model boundary:
+          signal -> ta/tb -> events -> ta/tb -> signal
+      - RbCP_SFC uses the physical SFC channel and semantic-based error detection
+      - throughput is defined as the average rate of signals successfully received
+        per transmission cycle of tau seconds
 
 # ----------------------------------------------------------------------
 # EXPERIMENT MODES
 # ----------------------------------------------------------------------
 mode:
-  run_benchmark: true
-  run_rbcp: true
+  run_benchmark: false
+  run_rbcp: false
   run_rbcp_time: true
   run_sfc: true
 
-  # IMPORTANT:
-  # Figure 6 does NOT use semantic-based error detection.
-  semantic_error_detection: false
+  # Figure 7 relies on semantic-based error detection
+  semantic_error_detection: true
 
 # ----------------------------------------------------------------------
 # SYSTEM PARAMETERS
@@ -28,40 +35,22 @@ system:
   R: 12
   L: 4
 
-  # ------------------------------------------------------------------
-  # FIGURE 6 REGIME
+  # Figure 7 is assumed here to follow the same physical regime used for Figure 6:
+  # fixed P and fixed N0, with SNR varying with B:
   #
-  # Fixed power and fixed noise parameter:
-  #   P = 1
-  #   N0 = 0.007
-  #
-  # SNR must be derived for each B as:
   #   SNR(B) = P / (B * N0)
   #
-  # Therefore, the pipeline should overwrite system.SNR_dB at each B-point
-  # using the derived SNR(B).
-  # ------------------------------------------------------------------
   fixed_power_model: true
   derive_snr_from_fixed_P_and_N0: true
 
-  P: 2.5
+  P: 1.0
   N0: 0.007
 
-  # Placeholder; pipeline should overwrite this at each B-point
-  # using SNR(B) = P / (B * N0)
+  # To be overwritten pointwise by the pipeline
   SNR_dB: null
-
-  # Placeholder; pipeline should overwrite this during the sweep
   B: null
 
-  # ------------------------------------------------------------------
-  # BANDWIDTH SHARING
-  #
-  # If null, the core divides the total bandwidth equally among S sensors.
-  # This affects only communication-budget-based quantities such as:
-  # - M_RbCP
-  # - Benchmark bits per sample
-  # ------------------------------------------------------------------
+  # If null, total bandwidth is split equally among S sensors.
   bandwidth_allocation: null
 
 # ----------------------------------------------------------------------
@@ -72,13 +61,13 @@ signal:
   tau: 1.0
   Tt: 0.01
 
-  # Figure 6 explicitly uses N = 5
+  # Figure-7 style comparison uses fixed N
   N_override: 5
 
   distribution: "uniform"
 
-  # Unless otherwise stated, the manuscript uses peak-to-peak = 4 V
-  peak_to_peak: 12.0
+  # Absolute-MSE convention adopted in the software side
+  peak_to_peak: 2.0
 
   normalize_dft: true
   normalization_target: 3.9
@@ -90,37 +79,13 @@ dc:
   enabled: false
 
 # ----------------------------------------------------------------------
-# BENCHMARK APPROACH
-# ----------------------------------------------------------------------
-benchmark:
-  enabled: true
-
-  # Figure 6 uses Benchmark sampling rate = 10.4
-  sampling_rate: 10.4
-
-  # IMPORTANT:
-  # The pipeline should use the per-sensor bandwidth slice and the
-  # derived SNR(B) for each B-point.
-  use_per_sensor_bandwidth: true
-
-  # If you want to tune the effective benchmark communication budget
-  # for closer visual alignment with the manuscript curve, adjust this.
-  # Keep 1.0 for the strictest direct interpretation.
-  effective_rate_factor: 1.0
-
-# ----------------------------------------------------------------------
-# RBCP_time SETTINGS
+# RbCP_time SETTINGS
 # ----------------------------------------------------------------------
 rbcp_time:
   enabled: true
 
-  # IMPORTANT:
-  # Figure 6 interpretation:
-  # RbCP_time is the error-free time-model boundary:
-  #
+  # RbCP_time acts as the theoretical / operational time-model limit:
   #   signal -> ta/tb -> events -> ta/tb -> signal
-  #
-  # i.e., NO physical channel and NO SFC/MAC layer here.
   use_error_free_time_model: true
 
 # ----------------------------------------------------------------------
@@ -132,30 +97,53 @@ channel:
 
   detection_mode: "threshold"
   threshold_factor: 0.5
-  score_threshold: 4   # default = L
+  score_threshold: 4
+
+# ----------------------------------------------------------------------
+# SEMANTIC-BASED ERROR DETECTION
+# ----------------------------------------------------------------------
+sed:
+  enabled: true
+
+  # Policy used in Figure 7:
+  # invalid periods are discarded before reconstruction/throughput accounting
+  discard_invalid_periods: true
+
+  # Throughput counting policy:
+  #
+  # If one period is valid:
+  #   all S signals of that cycle are considered successfully received.
+  #
+  # If one period is invalid:
+  #   zero signals are counted as successfully received.
+  #
+  # Therefore:
+  #   throughput = (S * num_valid_periods) / (num_periods * tau)
+  #
+  throughput_mode: "valid_periods_times_S_over_tau"
 
 # ----------------------------------------------------------------------
 # SWEEP PARAMETERS
 # ----------------------------------------------------------------------
 sweep:
   B:
-    # Range chosen to match the scale shown in Figure 6.
-    start: 50
-    stop: 5001
-    step: 500
+    start: 500
+    stop: 100001
+    step: 10000
 
 # ----------------------------------------------------------------------
 # MONTE CARLO / AVERAGING
 # ----------------------------------------------------------------------
 monte_carlo:
   seed: 47
-  interactions: 2000
+  interactions: 20
 
 # ----------------------------------------------------------------------
 # METRICS
 # ----------------------------------------------------------------------
 metrics:
   mse: true
+  throughput: true
 
   aggregation:
     mean: true
@@ -165,7 +153,7 @@ metrics:
 # ----------------------------------------------------------------------
 output:
   base_dir: "data/results"
-  figure_dir: "rbcp_mse_vs_B_fixed_power"
+  figure_dir: "sfc_mse_throughput_vs_B"
 
   save_dat: true
   save_plot: true
@@ -183,13 +171,11 @@ data_format:
   columns:
     - B
     - SNR_dB_derived
-    - M_benchmark_mean
-    - M_time
-    - M_rbcp
-    - mse_benchmark
-    - mse_rbcp
-    - mse_rbcp_time
     - mse_sfc
+    - mse_rbcp_time
+    - throughput_sfc
+    - throughput_max
+    - valid_period_fraction
     - num_trials
 
   delimiter: "\t"
@@ -198,20 +184,31 @@ data_format:
 # PLOT SETTINGS
 # ----------------------------------------------------------------------
 plot:
-  x_axis: "B"
-  y_axis: "MSE"
+  panel_layout: "vertical"
 
-  x_scale: "linear"
-  y_scale: "log"
+  mse_panel:
+    x_axis: "B"
+    y_axis: "MSE"
+    x_scale: "linear"
+    y_scale: "log"
+    title: "MSE versus B"
+    show_grid: true
+    legend: true
 
-  show_grid: true
-  legend: true
+  throughput_panel:
+    x_axis: "B"
+    y_axis: "Throughput"
+    x_scale: "linear"
+    y_scale: "linear"
+    title: "Throughput versus B"
+    show_grid: true
+    legend: true
 
   label_map:
-    benchmark: "Benchmark Approach"
-    rbcp: "RbCP"
+    sfc: "RbCP_SFC"
     rbcp_time: "RbCP_time"
-    sfc: "SFC"
+    throughput_sfc: "Throughput (RbCP_SFC)"
+    throughput_max: "Maximum throughput (S / tau)"
 
 # ----------------------------------------------------------------------
 # REPRODUCIBILITY
