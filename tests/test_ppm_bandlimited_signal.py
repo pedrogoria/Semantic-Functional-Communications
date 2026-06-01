@@ -1,5 +1,5 @@
 """
-scripts/test_ppm_bandlimited_signal.py
+tests/test_ppm_bandlimited_signal.py
 
 Quick test for analog-like PPM using a band-limited random signal generated
 with the same filtering logic used by the SFC experiments.

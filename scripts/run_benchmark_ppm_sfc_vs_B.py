@@ -336,3 +336,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_benchmark_ppm_sfc_vs_B import run_benchmark_ppm_sfc_vs_B
+#
+# df_cmp = run_benchmark_ppm_sfc_vs_B(
+#     "experiments/configs/figures/benchmark_ppm_sfc_vs_B.yaml"
+# )

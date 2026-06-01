@@ -1,5 +1,5 @@
 """
-scripts/test_pulse_shaping.py supported pulse families:scripts/test_pulse_shaping.py
+tests/test_pulse_shaping.py supported pulse families:scripts/test_pulse_shaping.py
     * rect
     * rc
     * rrc

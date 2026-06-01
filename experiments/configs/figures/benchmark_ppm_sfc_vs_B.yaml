@@ -94,7 +94,7 @@ system:
   #   set SNR_dB explicitly
   #   N0 is overwritten pointwise by the pipeline
   #
-  SNR_dB: -16.0
+  SNR_dB: -10.0
   N0: 0.007
 
   # If null, total bandwidth is split equally among S sensors
@@ -120,7 +120,7 @@ signal:
   distribution: "uniform"
 
   # Peak-to-peak control after filtering
-  peak_to_peak: 6.0
+  peak_to_peak: 12.0
 
   # Fourier normalization settings used by the native RbCP_time / SFC branches
   normalize_dft: true
@@ -141,7 +141,7 @@ dc:
 # GLOBAL QUANTIZATION POLICY
 # ----------------------------------------------------------------------
 quantization:
-  force_power_of_two: false
+  force_power_of_two: true
   rounding_mode: "floor"
 
 
@@ -215,9 +215,9 @@ channel:
 # ----------------------------------------------------------------------
 sweep:
   B:
-    start: 2500
-    stop: 20001
-    step: 2500
+    start: 500
+    stop: 10001
+    step: 500
 
 
 # ----------------------------------------------------------------------
@@ -225,7 +225,7 @@ sweep:
 # ----------------------------------------------------------------------
 monte_carlo:
   seed: 47
-  interactions: 100
+  interactions: 1000
 
 
 # ----------------------------------------------------------------------
