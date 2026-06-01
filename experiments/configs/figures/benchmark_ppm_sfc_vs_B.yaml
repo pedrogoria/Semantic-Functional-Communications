@@ -1,0 +1,305 @@
+figure:
+  id: benchmark_ppm_sfc_vs_B
+  title: "Fair comparison versus B: Benchmark+FDMA, PPM+FDMA, RbCP_time, SFC, and SFC+SED"
+  description: >
+    Fair comparison of five communication stacks under the same
+    physical communication budget:
+      1. Benchmark + FDMA
+      2. PPM + FDMA
+      3. RbCP_time
+      4. SFC
+      5. SFC + SED
+
+    All five stacks are compared under:
+      - the same total communication bandwidth B
+      - the same number of sensors S
+      - the same average available power per sensor P
+      - the same tau
+      - the same source signals x^(s)(t)
+
+    Reconstruction convention when sample-based reconstruction is applicable
+    (Benchmark + FDMA and PPM + FDMA):
+      periodic_replicas = 10
+
+    This means:
+      - replicas from -10*tau to +10*tau
+      - total of 21 periodic blocks contributing to the truncated sinc sum
+
+    Native SFC branches:
+      - SFC uses the native SFC stack without semantic error detection
+      - SFC + SED uses the same native stack plus semantic-based error detection
+      - invalid periods in SFC + SED are discarded
+      - invalid periods do NOT contribute to mse_sfc_sed
+
+# ----------------------------------------------------------------------
+# EXECUTION MODES
+# ----------------------------------------------------------------------
+mode:
+  run_benchmark: true
+  run_ppm: true
+  run_rbcp_time: true
+  run_sfc: true
+
+  # Needed because the SFC+SED branch uses semantic error detection
+  semantic_error_detection: true
+
+  # Not used here
+  run_rbcp: false
+
+
+# ----------------------------------------------------------------------
+# POWER-MODEL SELECTION
+# ----------------------------------------------------------------------
+power_model:
+  # Supported modes:
+  #
+  # 1) "fixed_P_and_N0"
+  #    - keep P fixed
+  #    - keep N0 fixed
+  #    - derive SNR(B) = P / (B * N0)
+  #
+  # 2) "fixed_P_and_SNR"
+  #    - keep P fixed
+  #    - keep SNR fixed
+  #    - derive N0(B) = P / (B * SNR)
+  #
+  mode: "fixed_P_and_SNR"
+
+
+# ----------------------------------------------------------------------
+# SYSTEM PARAMETERS
+# ----------------------------------------------------------------------
+system:
+  # Number of sensors / signals
+  S: 8
+
+  # Shared physical communication budget
+  # P is the average available transmit power per sensor
+  P: 1.0
+
+  # Total system bandwidth (overwritten by the sweep)
+  B: null
+
+  # Native SFC resource parameters
+  R: 12
+  L: 4
+
+  # Interpretation depends on power_model.mode:
+  #
+  # If mode = "fixed_P_and_N0":
+  #   set N0 explicitly
+  #   SNR_dB is overwritten pointwise by the pipeline
+  #
+  # If mode = "fixed_P_and_SNR":
+  #   set SNR_dB explicitly
+  #   N0 is overwritten pointwise by the pipeline
+  #
+  SNR_dB: -16.0
+  N0: 0.007
+
+  # If null, total bandwidth is split equally among S sensors
+  bandwidth_allocation: null
+
+
+# ----------------------------------------------------------------------
+# SIGNAL PARAMETERS
+# ----------------------------------------------------------------------
+signal:
+  # Source-signal bandwidth / period
+  W: 10.4
+  tau: 1.0
+
+  # High-resolution simulation step used to generate the common source signals
+  Tt: 0.001
+
+  # Fixed harmonic count used to define the source band-limiting logic:
+  #   W_eff = 2N / tau
+  N_override: 5
+
+  # Common source distribution for all five stacks
+  distribution: "uniform"
+
+  # Peak-to-peak control after filtering
+  peak_to_peak: 6.0
+
+  # Fourier normalization settings used by the native RbCP_time / SFC branches
+  normalize_dft: true
+  normalization_target: 3.9
+
+  # Threshold used by PhaseCoefficientCore
+  threshold_harmonics: 0.001
+
+
+# ----------------------------------------------------------------------
+# DC HANDLING
+# ----------------------------------------------------------------------
+dc:
+  enabled: false
+
+
+# ----------------------------------------------------------------------
+# GLOBAL QUANTIZATION POLICY
+# ----------------------------------------------------------------------
+quantization:
+  force_power_of_two: false
+  rounding_mode: "floor"
+
+
+# ----------------------------------------------------------------------
+# BENCHMARK + FDMA SETTINGS
+# ----------------------------------------------------------------------
+benchmark:
+  enabled: true
+  sampling_rate: 11
+  effective_rate_factor: 1.0
+
+
+# ----------------------------------------------------------------------
+# PPM + FDMA SETTINGS
+# ----------------------------------------------------------------------
+ppm:
+  enabled: true
+
+  # Ts = 1 / fs_msg is the transmission / quantization interval of one sample
+  fs_msg: 11
+
+  # Pulse duration Tp
+  pulse_width: 0.01
+
+  # Intended supported values:
+  #   "rect"
+  #   "raised_cosine"
+  pulse_type: "raised_cosine"
+
+  rolloff: 0.99
+  span: 12
+
+  eps_margin: 0.001
+  rec_pulse: 0.0
+  interp_mode: "linear"
+  clip_recovered_to_unit_interval: true
+
+
+# ----------------------------------------------------------------------
+# FDMA SETTINGS
+# ----------------------------------------------------------------------
+fdma:
+  normalize_sensor_power: true
+  frequency_axis_centered_at_zero: true
+
+
+# ----------------------------------------------------------------------
+# SED SETTINGS
+# ----------------------------------------------------------------------
+sed:
+  enabled: true
+
+  # Invalid periods are discarded before MSE aggregation
+  discard_invalid_periods: true
+
+
+# ----------------------------------------------------------------------
+# NATIVE SFC CHANNEL SETTINGS
+# ----------------------------------------------------------------------
+channel:
+  type: "awgn"
+  collision_mode: "sum"
+
+  detection_mode: "threshold"
+  threshold_factor: 0.5
+  score_threshold: 4
+
+
+# ----------------------------------------------------------------------
+# SWEEP PARAMETERS
+# ----------------------------------------------------------------------
+sweep:
+  B:
+    start: 2500
+    stop: 20001
+    step: 2500
+
+
+# ----------------------------------------------------------------------
+# MONTE CARLO
+# ----------------------------------------------------------------------
+monte_carlo:
+  seed: 47
+  interactions: 100
+
+
+# ----------------------------------------------------------------------
+# METRICS
+# ----------------------------------------------------------------------
+metrics:
+  mse: true
+
+  aggregation:
+    mean: true
+
+
+# ----------------------------------------------------------------------
+# OUTPUT
+# ----------------------------------------------------------------------
+output:
+  base_dir: "data/results"
+  figure_dir: "benchmark_ppm_sfc_vs_B"
+
+  save_dat: true
+  save_plot: true
+  save_metadata: true
+  save_config_copy: true
+
+  formats:
+    plot: ["png", "pdf"]
+    data: ["dat"]
+
+
+# ----------------------------------------------------------------------
+# DATA FORMAT
+# ----------------------------------------------------------------------
+data_format:
+  columns:
+    - B
+    - SNR_dB_derived
+    - N0_derived
+    - mse_benchmark_fdma
+    - mse_ppm_fdma
+    - mse_rbcp_time
+    - mse_sfc
+    - mse_sfc_sed
+    - valid_period_fraction_sfc_sed
+    - num_valid_trials_sfc_sed
+    - num_trials
+
+  delimiter: "\t"
+
+
+# ----------------------------------------------------------------------
+# PLOT SETTINGS
+# ----------------------------------------------------------------------
+plot:
+  x_axis: "B"
+  y_axis: "MSE"
+
+  x_scale: "linear"
+  y_scale: "log"
+
+  show_grid: true
+  legend: true
+
+  label_map:
+    benchmark_fdma: "Benchmark + FDMA"
+    ppm_fdma: "PPM + FDMA"
+    rbcp_time: "RbCP_time"
+    sfc: "SFC"
+    sfc_sed: "SFC + SED"
+
+
+# ----------------------------------------------------------------------
+# REPRODUCIBILITY
+# ----------------------------------------------------------------------
+reproducibility:
+  save_git_commit: true
+  save_timestamp: true
+  seed: 47
