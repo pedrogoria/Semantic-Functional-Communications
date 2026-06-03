@@ -7,6 +7,7 @@ choices adopted by the fair comparison pipeline.
 This script:
 - loads the comparison YAML
 - selects one B value
+- resolves the physical budget consistently with the project convention
 - generates one common band-limited source realization with the same SFC-style logic
 - selects one sensor
 - runs the PPM + FDMA branch for that sensor
@@ -18,30 +19,49 @@ This script:
     5. PPM Demod (original domain)
     6. Continuous-Time Reconstruction
 
-Important conventions
----------------------
-1. Ts = 1 / fs_msg is the transmission / quantization interval of one sample.
-2. The pulse duration Tp is independent from Ts, but Tp < Ts.
-3. When the PPM branch reconstructs the continuous-time signal, it uses:
-       periodic_replicas = 10
-   i.e. replicas from -10*tau to +10*tau,
-   total of 21 periodic blocks in the truncated periodic sinc reconstruction.
+Physical convention
+-------------------
+Preferred/default mode:
+    P and N0 are provided in the YAML.
 
-Usage (Python console - PyCharm)
---------------------------------
-from tests.debug_ppm_single_trial import debug_ppm_single_trial
+Then:
+    SNR_total = P / (B * N0)
 
-out = debug_ppm_single_trial(
-    config_path="experiments/configs/figures/benchmark_ppm_sfc_vs_B.yaml",
-    B_value=2500,
-    sensor_idx=0,
-    seed=47,
-    do_plot=True
-)
+For FDMA / PPM per sensor:
+    B_s = alpha_s * B
+    SNR_s = P / (B_s * N0)
 
-Terminal
---------
-python tests/debug_ppm_single_trial.py --config experiments/configs/figures/benchmark_ppm_sfc_vs_B.yaml --B 2500 --sensor 0
+Optional fixed per-sensor SNR mode:
+    If power_model.mode is "fixed_sensor_SNR_and_N0",
+    the YAML SNR_dB is interpreted as SNR_s and P is derived from:
+
+        P = SNR_s * B_s * N0
+
+    With a scalar P shared by all sensors, this mode requires uniform
+    bandwidth allocation.
+
+Important PPM convention
+------------------------
+PPM is an FDMA-style classical method in this comparison. Therefore:
+- channel noise uses B_s and SNR_s;
+- the PPM message/symbol rate is constrained by B_s.
+
+For raised-cosine-like shaping, this script uses the conservative baseband
+Nyquist-style relation:
+
+    fs_msg <= 2 B_s / (1 + rolloff)
+
+unless explicitly disabled by:
+
+    ppm:
+      enforce_bandwidth_from_B_sensor: false
+
+Important visualization convention
+----------------------------------
+PPMCore internally normalizes the message before mapping samples to pulse
+positions. Therefore this script keeps visual domains separate:
+- original-domain signal vs original-domain samples
+- normalized-domain signal vs normalized PPM samples
 """
 
 from __future__ import annotations
@@ -84,6 +104,40 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _snr_linear_from_db(snr_db: float) -> float:
+    return 10.0 ** (float(snr_db) / 10.0)
+
+
+def _snr_db_from_linear(snr: float) -> float:
+    return 10.0 * np.log10(max(float(snr), np.finfo(float).tiny))
+
+
+def _resolve_bandwidth_allocation_from_cfg(cfg: dict) -> np.ndarray:
+    system_cfg = cfg.get("system", {})
+    S = int(system_cfg.get("S", system_cfg.get("sensor_nodes", 1)))
+
+    allocation = system_cfg.get("bandwidth_allocation", None)
+    if allocation is None:
+        return np.ones(S, dtype=float) / S
+
+    allocation = np.asarray(allocation, dtype=float).reshape(-1)
+
+    if len(allocation) != S:
+        raise ValueError(
+            f"bandwidth_allocation length mismatch: len={len(allocation)} but S={S}"
+        )
+
+    if np.any(allocation < 0):
+        raise ValueError("bandwidth_allocation must be nonnegative.")
+
+    if not np.isclose(np.sum(allocation), 1.0):
+        raise ValueError(
+            f"bandwidth_allocation must sum to 1. Current sum={np.sum(allocation)}"
+        )
+
+    return allocation
+
+
 def apply_power_model_inplace(cfg: dict):
     """
     Resolve the selected physical-budget regime in-place.
@@ -91,64 +145,108 @@ def apply_power_model_inplace(cfg: dict):
     Supported modes
     ---------------
     1. fixed_P_and_N0
+       Preferred/default mode.
        - keep P fixed
        - keep N0 fixed
-       - derive SNR_dB(B)
+       - SNR is derived by build_derived_system_parameters(...)
+       - this function only updates system.SNR_dB as total-band metadata
 
-    2. fixed_P_and_SNR
-       - keep P fixed
-       - keep SNR fixed
-       - derive N0(B)
+    2. fixed_sensor_SNR_and_N0
+       Optional mode.
+       - keep per-sensor SNR_dB fixed
+       - keep N0 fixed
+       - derive scalar P from:
+             P = SNR_s * B_s * N0
+
+       This requires uniform bandwidth allocation when using one scalar P.
+
+    Deprecated / unsupported
+    ------------------------
+    fixed_P_and_SNR is intentionally not supported here because the current
+    project convention is:
+    - P and N0 are primary;
+    - SNR is derived;
+    - SNR_dB is used only when deriving P.
     """
+
     mode = cfg.get("power_model", {}).get("mode", "fixed_P_and_N0")
+    system_cfg = cfg.setdefault("system", {})
+
+    B = float(system_cfg["B"])
+    N0 = system_cfg.get("N0", None)
+    P = system_cfg.get("P", None)
 
     if mode == "fixed_P_and_N0":
-        cfg["system"]["SNR_dB"] = derive_snr_db_from_fixed_P_and_N0(cfg)
+        if P is None:
+            raise ValueError(
+                "power_model.mode='fixed_P_and_N0' requires system.P to be provided."
+            )
+        if N0 is None:
+            raise ValueError(
+                "power_model.mode='fixed_P_and_N0' requires system.N0 to be provided."
+            )
+
+        P = float(P)
+        N0 = float(N0)
+
+        snr_total = P / (B * N0)
+        system_cfg["SNR_dB"] = _snr_db_from_linear(snr_total)
+        return
+
+    if mode in {
+        "fixed_sensor_SNR_and_N0",
+        "fixed_SNR_per_sensor_and_N0",
+        "fixed_per_sensor_SNR_and_N0",
+    }:
+        if N0 is None:
+            raise ValueError(
+                f"power_model.mode='{mode}' requires system.N0 to be provided."
+            )
+        if system_cfg.get("SNR_dB", None) is None:
+            raise ValueError(
+                f"power_model.mode='{mode}' requires system.SNR_dB to be provided."
+            )
+
+        allocation = _resolve_bandwidth_allocation_from_cfg(cfg)
+        S = len(allocation)
+        uniform_allocation = np.ones(S, dtype=float) / S
+
+        if not np.allclose(allocation, uniform_allocation):
+            raise ValueError(
+                "Fixed per-sensor SNR with scalar P requires uniform bandwidth allocation. "
+                "For nonuniform allocation, use fixed P,N0 or introduce sensor-dependent P_s."
+            )
+
+        snr_sensor = _snr_linear_from_db(system_cfg["SNR_dB"])
+        B_sensor = B * allocation[0]
+        system_cfg["P"] = snr_sensor * B_sensor * float(N0)
         return
 
     if mode == "fixed_P_and_SNR":
-        cfg["system"]["N0"] = derive_n0_from_fixed_P_and_snr(cfg)
-        return
+        raise ValueError(
+            "power_model.mode='fixed_P_and_SNR' is deprecated in this project convention. "
+            "Use either fixed_P_and_N0 or fixed_sensor_SNR_and_N0."
+        )
 
     raise ValueError(
         f"Unsupported power_model.mode: {mode}. "
-        f"Supported modes are: 'fixed_P_and_N0', 'fixed_P_and_SNR'."
+        "Supported modes are: 'fixed_P_and_N0' and 'fixed_sensor_SNR_and_N0'."
     )
 
 
-def derive_snr_db_from_fixed_P_and_N0(cfg: dict) -> float:
-    """
-    Derive SNR_dB(B) from fixed P and fixed N0 using:
-        SNR(B) = P / (B * N0)
-    """
-    P = cfg["system"]["P"]
-    B = cfg["system"]["B"]
-    N0 = cfg["system"]["N0"]
-
-    snr = P / (B * N0)
-    return 10.0 * np.log10(snr)
-
-
-def derive_n0_from_fixed_P_and_snr(cfg: dict) -> float:
-    """
-    Derive N0(B) from fixed P and fixed SNR using:
-        N0(B) = P / (B * SNR)
-    """
-    P = cfg["system"]["P"]
-    B = cfg["system"]["B"]
-    SNR_dB = cfg["system"]["SNR_dB"]
-
-    snr = 10.0 ** (SNR_dB / 10.0)
-    return P / (B * snr)
-
-
 # =============================================================================
-# COMMON SOURCE GENERATION (SAME LOGIC AS FAIR PIPELINE)
+# COMMON SOURCE GENERATION
 # =============================================================================
 
-def generate_common_bandlimited_signals(cfg: dict, rng: np.random.Generator, params, N: int):
+def generate_common_bandlimited_signals(
+    cfg: dict,
+    rng: np.random.Generator,
+    params,
+    N: int
+):
     """
-    Generate the common source signals using the same logic as the comparison pipeline.
+    Generate the common source signals using the same logic as the comparison
+    pipeline.
 
     Returns
     -------
@@ -216,8 +314,78 @@ def generate_common_bandlimited_signals(cfg: dict, rng: np.random.Generator, par
 
 
 # =============================================================================
-# FDMA-AWARE PER-SENSOR AWGN
+# PPM BANDWIDTH / FDMA HELPERS
 # =============================================================================
+
+def resolve_ppm_timing_from_B_sensor(ppm_cfg: dict, params, B_sensor: float):
+    """
+    Resolve PPM message rate and pulse width consistently with B_sensor.
+
+    Returns
+    -------
+    dict
+        {
+            "fs_msg": ...,
+            "pulse_width": ...,
+            "max_fs_msg_from_B_sensor": ...,
+            "was_fs_msg_clipped": ...,
+        }
+    """
+
+    pulse_type = ppm_cfg.get("pulse_type", "raised_cosine")
+    rolloff = float(ppm_cfg.get("rolloff", 0.99))
+
+    enforce_bandwidth = ppm_cfg.get("enforce_bandwidth_from_B_sensor", True)
+
+    requested_fs_msg = ppm_cfg.get("fs_msg", params.W)
+    if isinstance(requested_fs_msg, str) and requested_fs_msg.lower() == "auto":
+        requested_fs_msg = params.W
+    requested_fs_msg = float(requested_fs_msg)
+
+    if requested_fs_msg <= 0:
+        raise ValueError("ppm.fs_msg must be positive.")
+
+    if B_sensor <= 0:
+        raise ValueError("B_sensor must be positive.")
+
+    pulse_type_lower = str(pulse_type).lower()
+
+    if pulse_type_lower in {"raised_cosine", "root_raised_cosine", "rrc", "rc"}:
+        max_fs_msg = 2.0 * B_sensor / (1.0 + rolloff)
+    else:
+        # Conservative fallback for non-Nyquist pulse families.
+        max_fs_msg = B_sensor
+
+    if enforce_bandwidth:
+        fs_msg = min(requested_fs_msg, max_fs_msg)
+    else:
+        fs_msg = requested_fs_msg
+
+    if fs_msg <= 0:
+        raise ValueError(
+            f"Resolved fs_msg={fs_msg} is invalid. Check B_sensor={B_sensor}."
+        )
+
+    was_clipped = bool(fs_msg < requested_fs_msg)
+
+    if "pulse_width" in ppm_cfg and ppm_cfg["pulse_width"] is not None:
+        pulse_width = float(ppm_cfg["pulse_width"])
+    else:
+        pulse_width_fraction = float(ppm_cfg.get("pulse_width_fraction", 0.1))
+        pulse_width = pulse_width_fraction / fs_msg
+
+    Ts = 1.0 / fs_msg
+    if pulse_width >= Ts:
+        pulse_width = 0.9 * Ts
+
+    return {
+        "fs_msg": fs_msg,
+        "pulse_width": pulse_width,
+        "max_fs_msg_from_B_sensor": max_fs_msg,
+        "was_fs_msg_clipped": was_clipped,
+        "requested_fs_msg": requested_fs_msg,
+    }
+
 
 def add_awgn_single_sensor_fdma(
     x: np.ndarray,
@@ -229,28 +397,22 @@ def add_awgn_single_sensor_fdma(
     """
     Add AWGN to one sensor waveform under the FDMA interpretation.
 
-    Interpretation
-    --------------
     For the chosen sensor:
+
         SNR_s = P_per_sensor / (B_sensor * N0)
 
     The actual noise variance is chosen to be consistent with the measured
     waveform power and the target SNR_s.
-
-    Parameters
-    ----------
-    x : np.ndarray
-        Shape:
-            (time, periods=1, sensors=1)
-
-    Returns
-    -------
-    tuple
-        (y_noisy, snr_sensor_linear)
     """
 
     if B_sensor <= 0:
         raise ValueError("B_sensor must be > 0")
+
+    if P_per_sensor <= 0:
+        raise ValueError("P_per_sensor must be > 0")
+
+    if N0 <= 0:
+        raise ValueError("N0 must be > 0")
 
     snr_s = P_per_sensor / (B_sensor * N0)
 
@@ -271,11 +433,13 @@ def add_awgn_single_sensor_fdma(
 # NORMALIZATION HELPERS
 # =============================================================================
 
-def compute_original_samples(t: np.ndarray, x_ref_sensor: np.ndarray, symbol_times: np.ndarray) -> np.ndarray:
+def compute_original_samples(
+    t: np.ndarray,
+    x_ref_sensor: np.ndarray,
+    symbol_times: np.ndarray
+) -> np.ndarray:
     """
     Compute samples directly from the original-domain signal.
-
-    This is what should be plotted against the original waveform.
     """
     return np.interp(symbol_times, t, x_ref_sensor)
 
@@ -285,8 +449,8 @@ def normalize_original_samples_for_plot(
     normalization_state
 ) -> np.ndarray:
     """
-    Map original-domain samples into the same normalized PPM domain used internally
-    by PPMCore, for visualization purposes only.
+    Map original-domain samples into the same normalized PPM domain used
+    internally by PPMCore, for visualization purposes only.
     """
 
     if normalization_state is None or not normalization_state.enabled:
@@ -296,7 +460,6 @@ def normalize_original_samples_for_plot(
     x_max = np.asarray(normalization_state.metadata["x_max"], dtype=float)
     eps_margin = float(normalization_state.eps_margin)
 
-    # single period / single sensor in this debug script
     xmin = float(x_min[0, 0])
     xmax = float(x_max[0, 0])
 
@@ -353,8 +516,6 @@ def plot_ppm_single_trial(
     """
     Plot the main debug views for one PPM trial.
 
-    Important
-    ---------
     This plotting function keeps domains separate:
     - original signal domain
     - internal normalized PPM domain
@@ -362,9 +523,6 @@ def plot_ppm_single_trial(
 
     fig, axes = plt.subplots(5, 1, figsize=(12, 14), sharex=False)
 
-    # -----------------------------------------------------------------
-    # 1. Message signal (original domain)
-    # -----------------------------------------------------------------
     axes[0].plot(t, x_ref_sensor, linewidth=1.2, label="Original signal")
     axes[0].plot(
         symbol_times,
@@ -377,9 +535,6 @@ def plot_ppm_single_trial(
     axes[0].grid(True)
     axes[0].legend()
 
-    # -----------------------------------------------------------------
-    # 2. Message signal (normalized PPM domain)
-    # -----------------------------------------------------------------
     axes[1].plot(t, x_ref_sensor_norm, linewidth=1.2, label="Normalized signal")
     axes[1].plot(
         symbol_times,
@@ -392,9 +547,6 @@ def plot_ppm_single_trial(
     axes[1].grid(True)
     axes[1].legend()
 
-    # -----------------------------------------------------------------
-    # 3. PPM TX
-    # -----------------------------------------------------------------
     axes[2].plot(t, tx_waveform, linewidth=1.2, label="PPM TX")
     for ts in symbol_times:
         axes[2].axvline(ts, color="red", alpha=0.25, linewidth=1.0)
@@ -409,9 +561,6 @@ def plot_ppm_single_trial(
     axes[2].grid(True)
     axes[2].legend()
 
-    # -----------------------------------------------------------------
-    # 4. PPM RX
-    # -----------------------------------------------------------------
     axes[3].plot(t, rx_waveform, linewidth=1.0, label="PPM RX")
     for ts in symbol_times:
         axes[3].axvline(ts, color="red", alpha=0.25, linewidth=1.0)
@@ -419,9 +568,6 @@ def plot_ppm_single_trial(
     axes[3].grid(True)
     axes[3].legend()
 
-    # -----------------------------------------------------------------
-    # 5. PPM Demod (original domain)
-    # -----------------------------------------------------------------
     axes[4].plot(
         symbol_times,
         original_samples,
@@ -444,9 +590,6 @@ def plot_ppm_single_trial(
     plt.tight_layout()
     plt.show(block=True)
 
-    # -----------------------------------------------------------------
-    # Continuous-time reconstruction
-    # -----------------------------------------------------------------
     plt.figure(figsize=(12, 4))
     plt.plot(t, x_ref_sensor, linewidth=1.3, label="Original")
     plt.plot(t, recovered_continuous, "--", linewidth=1.2, label="Recovered")
@@ -472,28 +615,6 @@ def debug_ppm_single_trial(
 ):
     """
     Run and visualize one PPM trial consistent with the fair-comparison setup.
-
-    Parameters
-    ----------
-    config_path : str
-        Path to the comparison YAML.
-
-    B_value : float
-        Selected B value for the debug run.
-
-    sensor_idx : int, optional
-        Sensor index to visualize.
-
-    seed : int, optional
-        Random seed.
-
-    do_plot : bool, optional
-        If True, show plots.
-
-    Returns
-    -------
-    dict
-        Debug objects and diagnostics.
     """
 
     cfg = load_config(config_path)
@@ -521,17 +642,42 @@ def debug_ppm_single_trial(
     )
 
     t = common["t"]
-    x_ref = common["x_ref"]                 # shape: (time, 1, S)
-    x_sensor = x_ref[:, :, sensor_idx:sensor_idx + 1]   # shape: (time, 1, 1)
+    x_ref = common["x_ref"]  # shape: (time, 1, S)
+    x_sensor = x_ref[:, :, sensor_idx:sensor_idx + 1]  # shape: (time, 1, 1)
 
     # ------------------------------------------------------------
-    # 2) PPM settings
+    # 2) FDMA fairness object
     # ------------------------------------------------------------
     ppm_cfg = cfg_B.get("ppm", {})
     fdma_cfg = cfg_B.get("fdma", {})
 
-    fs_msg = ppm_cfg.get("fs_msg", params.W)
-    pulse_width = ppm_cfg.get("pulse_width", 0.1 / fs_msg)
+    fdma_core = FDMACore(
+        S=params.S,
+        B_total=params.B,
+        P_per_sensor=params.P,
+        tau=params.tau,
+        bandwidth_allocation=params.bandwidth_allocation,
+        normalize_sensor_power=fdma_cfg.get("normalize_sensor_power", True),
+        return_nonorthogonal_sum_preview=False,
+        frequency_axis_centered_at_zero=fdma_cfg.get(
+            "frequency_axis_centered_at_zero",
+            True
+        ),
+    )
+
+    B_sensor = float(fdma_core.get_bandwidth_per_sensor()[sensor_idx])
+
+    # ------------------------------------------------------------
+    # 3) PPM settings constrained by B_sensor
+    # ------------------------------------------------------------
+    ppm_timing = resolve_ppm_timing_from_B_sensor(
+        ppm_cfg=ppm_cfg,
+        params=params,
+        B_sensor=B_sensor
+    )
+
+    fs_msg = ppm_timing["fs_msg"]
+    pulse_width = ppm_timing["pulse_width"]
     pulse_type = ppm_cfg.get("pulse_type", "raised_cosine")
     rolloff = ppm_cfg.get("rolloff", 0.99)
     span = ppm_cfg.get("span", 12)
@@ -554,32 +700,13 @@ def debug_ppm_single_trial(
     )
 
     # ------------------------------------------------------------
-    # 3) FDMA fairness object (single debug sensor uses its B slice)
-    # ------------------------------------------------------------
-    fdma_core = FDMACore(
-        S=params.S,
-        B_total=params.B,
-        P_per_sensor=params.P,
-        tau=params.tau,
-        bandwidth_allocation=params.bandwidth_allocation,
-        normalize_sensor_power=fdma_cfg.get("normalize_sensor_power", True),
-        return_nonorthogonal_sum_preview=False,
-        frequency_axis_centered_at_zero=fdma_cfg.get(
-            "frequency_axis_centered_at_zero",
-            True
-        ),
-    )
-
-    B_sensor = float(fdma_core.get_bandwidth_per_sensor()[sensor_idx])
-
-    # ------------------------------------------------------------
     # 4) PPM modulation
     # ------------------------------------------------------------
     mod_result = ppm_core.modulate(x_sensor, t)
 
     tx = mod_result.tx_waveform  # shape: (time, 1, 1)
 
-    # Optionally normalize waveform power to the per-sensor budget P
+    # Optionally normalize waveform power to the per-sensor budget P.
     if fdma_cfg.get("normalize_sensor_power", True):
         ps = np.mean(tx[:, :, 0] ** 2)
         if not np.isclose(ps, 0.0):
@@ -593,7 +720,7 @@ def debug_ppm_single_trial(
         x=tx,
         P_per_sensor=params.P,
         B_sensor=B_sensor,
-        N0=cfg_B["system"]["N0"],
+        N0=params.N0,
         rng=rng
     )
 
@@ -608,15 +735,13 @@ def debug_ppm_single_trial(
     )
 
     # ------------------------------------------------------------
-    # 7) Build CORRECT debug-domain objects
+    # 7) Build correct debug-domain objects
     # ------------------------------------------------------------
     symbol_times = mod_result.symbol_times
     pulse_positions = mod_result.aux["pulse_positions"][:, 0, 0]
 
-    # These are INTERNAL normalized samples used by the PPM mapping
     sampled_message_norm = mod_result.sampled_message[:, 0, 0]
 
-    # These are ORIGINAL-domain samples, computed consistently from x_ref
     x_ref_sensor = x_sensor[:, 0, 0]
     original_samples = compute_original_samples(
         t=t,
@@ -624,18 +749,14 @@ def debug_ppm_single_trial(
         symbol_times=symbol_times
     )
 
-    # Recovered samples from demodulation are already in the ORIGINAL domain
     recovered_samples = demod_result.recovered_samples[:, 0, 0]
     recovered_continuous = demod_result.recovered_continuous[:, 0, 0]
 
-    # Normalized reference curve (for honest comparison in normalized domain)
     x_ref_sensor_norm = build_normalized_reference_curve(
         x_ref_sensor=x_ref_sensor,
         normalization_state=mod_result.normalization_state
     )
 
-    # Optional: recompute normalized samples directly from original domain
-    # so one can cross-check consistency against mod_result.sampled_message
     original_samples_norm = normalize_original_samples_for_plot(
         original_samples=original_samples,
         normalization_state=mod_result.normalization_state
@@ -655,14 +776,19 @@ def debug_ppm_single_trial(
     print(f"power_model.mode = {cfg_B.get('power_model', {}).get('mode', 'fixed_P_and_N0')}")
     print(f"S = {params.S}")
     print(f"P = {params.P}")
+    print(f"N0 = {params.N0}")
     print(f"B_total = {params.B}")
     print(f"B_sensor = {B_sensor}")
-    print(f"N0_derived = {cfg_B['system']['N0']}")
-    print(f"SNR_dB_derived = {cfg_B['system']['SNR_dB']}")
+    print(f"SNR_total = {params.SNR}")
+    print(f"SNR_total_dB = {params.SNR_dB}")
     print(f"SNR_sensor_linear = {snr_sensor_linear}")
+    print(f"SNR_sensor_dB = {_snr_db_from_linear(snr_sensor_linear)}")
     print(f"tau = {params.tau}")
     print(f"W = {params.W}")
-    print(f"fs_msg = {fs_msg}")
+    print(f"requested_fs_msg = {ppm_timing['requested_fs_msg']}")
+    print(f"max_fs_msg_from_B_sensor = {ppm_timing['max_fs_msg_from_B_sensor']}")
+    print(f"fs_msg_effective = {fs_msg}")
+    print(f"fs_msg_was_clipped_by_B_sensor = {ppm_timing['was_fs_msg_clipped']}")
     print(f"pulse_width = {pulse_width}")
     print(f"pulse_type = {pulse_type}")
     print(f"rolloff = {rolloff}")
@@ -706,6 +832,8 @@ def debug_ppm_single_trial(
         "normalized_sample_consistency": mse_samples_normalized_consistency,
         "B_sensor": B_sensor,
         "SNR_sensor_linear": snr_sensor_linear,
+        "SNR_sensor_dB": _snr_db_from_linear(snr_sensor_linear),
+        "ppm_timing": ppm_timing,
     }
 
 
@@ -732,6 +860,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 # from tests.debug_ppm_single_trial import debug_ppm_single_trial
 #

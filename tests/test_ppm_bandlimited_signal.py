@@ -4,30 +4,66 @@ tests/test_ppm_bandlimited_signal.py
 Quick test for analog-like PPM using a band-limited random signal generated
 with the same filtering logic used by the SFC experiments.
 
-Correct timing interpretation
------------------------------
+This script is a standalone PPM sanity/debug test.
+
+Physical convention
+-------------------
+Preferred project convention:
+
+    P  = average available transmit power per sensor
+    N0 = noise spectral-density / noise parameter
+
+For a PPM/FDMA-style single-sensor branch:
+
+    B_sensor = alpha_s * B
+    SNR_s = P / (B_sensor * N0)
+
+This script supports two physical regimes:
+
+1. fixed_P_and_N0
+   - P fixed
+   - N0 fixed
+   - B_sensor fixed
+   - SNR_s is derived as:
+         SNR_s = P / (B_sensor * N0)
+
+2. fixed_sensor_SNR_and_N0
+   - SNR_s fixed
+   - N0 fixed
+   - B_sensor fixed
+   - P is derived as:
+         P = SNR_s * B_sensor * N0
+
+Correct PPM timing interpretation
+---------------------------------
 - The message is sampled at fs_msg.
 - Each sample occupies exactly one transmission interval / slot:
+
       Ts = 1 / fs_msg
+
 - Ts is therefore the quantization / transmission interval of one sample.
 - The pulse itself has its own duration:
+
       Tp < Ts
+
 - The sample value is mapped to the pulse position inside the slot.
 
 Test chain
 ----------
 1. Generate a random signal.
-2. Band-limit it using sfc.core.filters.filter_periodic(...)
+2. Band-limit it using sfc.core.filters.filter_periodic(...).
 3. Optionally adjust peak-to-peak.
 4. Sample the band-limited signal at fs_msg.
 5. Define one transmission interval per sample:
        Ts = 1 / fs_msg
-6. Map each sampled amplitude to a pulse position inside its slot (PPM).
-7. Add AWGN.
-8. Demodulate by detecting the pulse position inside each slot.
-9. Recover the sampled amplitudes.
-10. Reconstruct the continuous-time signal by interpolation.
-11. Plot:
+6. Map each sampled amplitude to a pulse position inside its slot.
+7. Normalize TX waveform power to P.
+8. Add AWGN using:
+       SNR_s = P / (B_sensor * N0)
+9. Demodulate by detecting the pulse position inside each slot.
+10. Recover the sampled amplitudes.
+11. Reconstruct the continuous-time signal by interpolation.
+12. Plot:
     - message signal
     - PPM modulated signal
     - PPM received signal
@@ -38,12 +74,14 @@ Test chain
 Usage
 -----
 Python console:
-    from scripts.test_ppm_bandlimited_signal import run_test_ppm_bandlimited_signal
+    from tests.test_ppm_bandlimited_signal import run_test_ppm_bandlimited_signal
     out = run_test_ppm_bandlimited_signal()
 
 Terminal:
-    python scripts/test_ppm_bandlimited_signal.py
+    python tests/test_ppm_bandlimited_signal.py
 """
+
+from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -62,20 +100,120 @@ from sfc.core.filters import filter_periodic
 
 
 # =============================================================================
+# PHYSICAL HELPERS
+# =============================================================================
+
+def snr_linear_from_db(snr_db: float) -> float:
+    """
+    Convert SNR from dB to linear scale.
+    """
+    return 10.0 ** (float(snr_db) / 10.0)
+
+
+def snr_db_from_linear(snr_linear: float) -> float:
+    """
+    Convert SNR from linear scale to dB.
+    """
+    return 10.0 * np.log10(max(float(snr_linear), np.finfo(float).tiny))
+
+
+def resolve_power_noise_model(
+    power_model: str,
+    P: float | None,
+    N0: float,
+    B_sensor: float,
+    snr_sensor_db: float | None,
+) -> tuple[float, float, float, float]:
+    """
+    Resolve (P, N0, SNR_sensor_linear, SNR_sensor_dB).
+
+    Parameters
+    ----------
+    power_model : str
+        Supported values:
+        - "fixed_P_and_N0"
+        - "fixed_sensor_SNR_and_N0"
+
+    P : float | None
+        Per-sensor transmit power.
+
+    N0 : float
+        Noise spectral-density / noise parameter.
+
+    B_sensor : float
+        Sensor bandwidth slice.
+
+    snr_sensor_db : float | None
+        Per-sensor SNR in dB, used only in fixed_sensor_SNR_and_N0 mode.
+
+    Returns
+    -------
+    tuple
+        (P_resolved, N0_resolved, SNR_sensor_linear, SNR_sensor_dB)
+    """
+
+    if B_sensor <= 0:
+        raise ValueError("B_sensor must be positive.")
+
+    if N0 <= 0:
+        raise ValueError("N0 must be positive.")
+
+    if power_model == "fixed_P_and_N0":
+        if P is None:
+            raise ValueError("power_model='fixed_P_and_N0' requires P.")
+
+        if P <= 0:
+            raise ValueError("P must be positive.")
+
+        snr_sensor_linear = P / (B_sensor * N0)
+        snr_sensor_db_resolved = snr_db_from_linear(snr_sensor_linear)
+
+        return float(P), float(N0), float(snr_sensor_linear), float(snr_sensor_db_resolved)
+
+    if power_model in {
+        "fixed_sensor_SNR_and_N0",
+        "fixed_SNR_per_sensor_and_N0",
+        "fixed_per_sensor_SNR_and_N0",
+    }:
+        if snr_sensor_db is None:
+            raise ValueError(
+                f"power_model='{power_model}' requires snr_sensor_db."
+            )
+
+        snr_sensor_linear = snr_linear_from_db(snr_sensor_db)
+        P_resolved = snr_sensor_linear * B_sensor * N0
+
+        return float(P_resolved), float(N0), float(snr_sensor_linear), float(snr_sensor_db)
+
+    raise ValueError(
+        f"Unsupported power_model='{power_model}'. "
+        "Use 'fixed_P_and_N0' or 'fixed_sensor_SNR_and_N0'."
+    )
+
+
+# =============================================================================
 # BASIC HELPERS
 # =============================================================================
 
-def awgn(signal, snr_db, rng):
+def awgn_from_physical_snr(
+    signal: np.ndarray,
+    snr_sensor_linear: float,
+    rng: np.random.Generator
+) -> np.ndarray:
     """
-    Add AWGN to a real-valued signal for a target SNR (power-based).
+    Add AWGN to a real-valued signal using the target per-sensor SNR.
+
+    The actual noise variance is chosen relative to the measured waveform power:
+
+        noise_power = signal_power / SNR_s
 
     Parameters
     ----------
     signal : np.ndarray
         Real-valued waveform.
 
-    snr_db : float
-        Target SNR in dB.
+    snr_sensor_linear : float
+        Target per-sensor SNR in linear scale.
 
     rng : np.random.Generator
         Random generator.
@@ -85,14 +223,54 @@ def awgn(signal, snr_db, rng):
     np.ndarray
         Noisy waveform.
     """
+
     signal = np.asarray(signal, dtype=float)
 
-    power_signal = np.mean(signal ** 2)
-    snr_linear = 10 ** (snr_db / 10.0)
-    power_noise = power_signal / snr_linear
+    if snr_sensor_linear <= 0:
+        raise ValueError("snr_sensor_linear must be positive.")
 
+    power_signal = np.mean(signal ** 2)
+
+    if np.isclose(power_signal, 0.0):
+        return np.array(signal, copy=True)
+
+    power_noise = power_signal / snr_sensor_linear
     noise = rng.normal(0.0, np.sqrt(power_noise), size=signal.shape)
+
     return signal + noise
+
+
+def normalize_waveform_power(
+    x: np.ndarray,
+    target_power: float
+) -> np.ndarray:
+    """
+    Normalize waveform average power to target_power.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Input waveform.
+
+    target_power : float
+        Desired average power.
+
+    Returns
+    -------
+    np.ndarray
+        Power-normalized waveform.
+    """
+
+    if target_power <= 0:
+        raise ValueError("target_power must be positive.")
+
+    x = np.asarray(x, dtype=float)
+    current_power = np.mean(x ** 2)
+
+    if np.isclose(current_power, 0.0):
+        return np.array(x, copy=True)
+
+    return x * np.sqrt(target_power / current_power)
 
 
 def periodogram_psd(x, fs):
@@ -112,6 +290,7 @@ def periodogram_psd(x, fs):
     tuple
         (f, Pxx_dB)
     """
+
     x = np.asarray(x, dtype=float)
     n = len(x)
 
@@ -131,18 +310,8 @@ def periodogram_psd(x, fs):
     return f, Pxx_dB
 
 
-def moving_sum(x, width):
-    """
-    Sliding-window sum with 'same' output length.
-
-    Useful as a matched detector for rectangular PPM pulses.
-    """
-    kernel = np.ones(int(width), dtype=float)
-    return np.convolve(x, kernel, mode="same")
-
-
 # =============================================================================
-# BAND-LIMITED SIGNAL GENERATION (SAME LOGIC AS SFC)
+# BAND-LIMITED SIGNAL GENERATION
 # =============================================================================
 
 def generate_bandlimited_random_signal(
@@ -186,6 +355,7 @@ def generate_bandlimited_random_signal(
     tuple
         (t, x_raw, x_filtered)
     """
+
     rng = np.random.default_rng(seed)
 
     t = np.arange(0.0, duration, Tt)
@@ -234,11 +404,17 @@ def sample_signal_uniform(t, x, fs_msg):
     tuple
         (t_samp, x_samp, Ts)
     """
+
+    if fs_msg <= 0:
+        raise ValueError("fs_msg must be positive.")
+
     Ts = 1.0 / fs_msg
+
     t_samp = np.arange(0.0, t[-1] + (t[1] - t[0]) / 2.0, Ts)
     t_samp = t_samp[t_samp <= t[-1] + 1e-12]
 
     x_samp = np.interp(t_samp, t, x)
+
     return t_samp, x_samp, Ts
 
 
@@ -261,49 +437,27 @@ def ppm_modulate_samples(
 
     Timing interpretation
     ---------------------
-    One sample -> one slot
+    One sample -> one slot.
+
     Slot duration:
+
         Ts = 1 / fs_msg
 
     The pulse width is independent of Ts, but must satisfy:
+
         0 < Tp < Ts
 
-    If pulse_width is None, then:
+    If pulse_width is None:
+
         Tp = pulse_width_ratio * Ts
 
     The sample is normalized to [0, 1] using:
+
         a = (x - x_min_ref) / (x_max_ref - x_min_ref)
 
     Then mapped to pulse delay:
-        tau = a * (Ts - Tp)
 
-    Parameters
-    ----------
-    x_samp : np.ndarray
-        Sample values to be encoded.
-
-    fs_msg : float
-        Message sampling rate (defines slot duration).
-
-    fs_tx : float
-        Transmission waveform sampling frequency.
-
-    pulse_width : float | None
-        Pulse width in seconds. If None, pulse_width_ratio is used.
-
-    pulse_width_ratio : float
-        Pulse width as a fraction of Ts, used only if pulse_width is None.
-
-    x_min_ref : float | None
-        Minimum reference amplitude for normalization.
-        If None, use min(x_samp).
-
-    x_max_ref : float | None
-        Maximum reference amplitude for normalization.
-        If None, use max(x_samp).
-
-    pulse_amplitude : float
-        Pulse amplitude.
+        delay = a * (Ts - Tp)
 
     Returns
     -------
@@ -321,7 +475,14 @@ def ppm_modulate_samples(
             "pw_samp": ...
         }
     """
+
     x_samp = np.asarray(x_samp, dtype=float)
+
+    if fs_msg <= 0:
+        raise ValueError("fs_msg must be positive.")
+
+    if fs_tx <= 0:
+        raise ValueError("fs_tx must be positive.")
 
     Ts = 1.0 / fs_msg
 
@@ -337,12 +498,25 @@ def ppm_modulate_samples(
     sps_slot = int(round(Ts * fs_tx))
     pw_samp = max(1, int(round(pulse_width * fs_tx)))
 
+    if sps_slot < 2:
+        raise ValueError(
+            "fs_tx is too small relative to fs_msg. "
+            "Need at least two samples per PPM slot."
+        )
+
+    if pw_samp >= sps_slot:
+        raise ValueError(
+            "pulse_width is too large after discretization. "
+            "Need pw_samp < sps_slot."
+        )
+
     n_slots = len(x_samp)
     x_len = n_slots * sps_slot
     x_ppm = np.zeros(x_len, dtype=float)
 
     if x_min_ref is None:
         x_min_ref = float(np.min(x_samp))
+
     if x_max_ref is None:
         x_max_ref = float(np.max(x_samp))
 
@@ -356,9 +530,9 @@ def ppm_modulate_samples(
     max_delay = Ts - pulse_width
     delays = a_norm * max_delay
 
-    for k, tau_k in enumerate(delays):
+    for k, delay_k in enumerate(delays):
         start_slot = k * sps_slot
-        delay_samp = int(round(tau_k * fs_tx))
+        delay_samp = int(round(delay_k * fs_tx))
 
         start_pulse = start_slot + delay_samp
         end_pulse = min(start_pulse + pw_samp, start_slot + sps_slot)
@@ -391,35 +565,14 @@ def ppm_demodulate_samples(
     x_max_ref
 ):
     """
-    Demodulate PPM by estimating the pulse position inside each slot.
+    Demodulate PPM by estimating the pulse start position inside each slot.
 
     Detection rule
     --------------
     For each slot:
-    - apply a short matched detector for a rectangular pulse of width Tp
-      using a moving sum
-    - find the peak position
-    - map that peak delay back to amplitude
-
-    Parameters
-    ----------
-    y_rx : np.ndarray
-        Received PPM waveform.
-
-    fs_msg : float
-        Message sampling frequency.
-
-    fs_tx : float
-        Transmission waveform sampling frequency.
-
-    pulse_width : float
-        Pulse width in seconds.
-
-    x_min_ref : float
-        Minimum reference amplitude used during modulation.
-
-    x_max_ref : float
-        Maximum reference amplitude used during modulation.
+    - apply a rectangular matched detector using a valid moving sum
+    - find the pulse-start index that maximizes the detector output
+    - map the estimated delay back to amplitude
 
     Returns
     -------
@@ -430,12 +583,25 @@ def ppm_demodulate_samples(
             "slot_peak_values": ...
         }
     """
+
     y_rx = np.asarray(y_rx, dtype=float)
+
+    if fs_msg <= 0:
+        raise ValueError("fs_msg must be positive.")
+
+    if fs_tx <= 0:
+        raise ValueError("fs_tx must be positive.")
 
     Ts = 1.0 / fs_msg
     sps_slot = int(round(Ts * fs_tx))
     pw_samp = max(1, int(round(pulse_width * fs_tx)))
     max_delay = Ts - pulse_width
+
+    if sps_slot < 2:
+        raise ValueError("Invalid sps_slot. Increase fs_tx or decrease fs_msg.")
+
+    if pw_samp >= sps_slot:
+        raise ValueError("Invalid pw_samp. Pulse width is too large.")
 
     n_slots = len(y_rx) // sps_slot
 
@@ -443,27 +609,31 @@ def ppm_demodulate_samples(
     delay_hat = np.zeros(n_slots, dtype=float)
     slot_peak_values = np.zeros(n_slots, dtype=float)
 
+    kernel = np.ones(pw_samp, dtype=float)
+
     for k in range(n_slots):
         start = k * sps_slot
         stop = start + sps_slot
 
         slot = y_rx[start:stop]
 
-        # Matched detection for rectangular pulse
-        metric = moving_sum(slot, pw_samp)
+        # Valid matched-filter output. Index corresponds to pulse start.
+        metric = np.convolve(slot, kernel, mode="valid")
 
         idx_peak = int(np.argmax(metric))
         slot_peak_values[k] = metric[idx_peak]
 
-        tau_hat = idx_peak / fs_tx
-        tau_hat = np.clip(tau_hat, 0.0, max_delay)
-        delay_hat[k] = tau_hat
+        delay = idx_peak / fs_tx
+        delay = np.clip(delay, 0.0, max_delay)
+
+        delay_hat[k] = delay
 
         if np.isclose(max_delay, 0.0):
             a_hat = 0.0
         else:
-            a_hat = tau_hat / max_delay
+            a_hat = delay / max_delay
 
+        a_hat = np.clip(a_hat, 0.0, 1.0)
         x_hat[k] = x_min_ref + a_hat * (x_max_ref - x_min_ref)
 
     return {
@@ -480,22 +650,6 @@ def ppm_demodulate_samples(
 def reconstruct_from_samples(t_ref, t_samp, x_samp_hat):
     """
     Reconstruct a dense waveform from sample values using linear interpolation.
-
-    Parameters
-    ----------
-    t_ref : np.ndarray
-        Dense target time grid.
-
-    t_samp : np.ndarray
-        Sample times.
-
-    x_samp_hat : np.ndarray
-        Recovered sample values.
-
-    Returns
-    -------
-    np.ndarray
-        Reconstructed waveform on t_ref.
     """
     return np.interp(t_ref, t_samp, x_samp_hat)
 
@@ -522,18 +676,12 @@ def plot_time_domain_chain(
 
     fig, axes = plt.subplots(4, 1, figsize=(16, 9), sharex=False)
 
-    # -----------------------------------------------------------------
-    # 1. Message Signal
-    # -----------------------------------------------------------------
     axes[0].plot(t, x, linewidth=1.0)
     axes[0].plot(t_samp, x_samp, "x", markersize=4)
     axes[0].set_title("Message Signal")
     axes[0].set_xlim(time_xlim if time_xlim is not None else (t[0], t[-1]))
     axes[0].grid(True)
 
-    # -----------------------------------------------------------------
-    # 2. PPM Modulated Signal
-    # -----------------------------------------------------------------
     axes[1].plot(t_tx, x_ppm, linewidth=1.0)
     for edge in slot_edges[:-1]:
         axes[1].axvline(edge, color="red", alpha=0.35, linewidth=1.2)
@@ -541,9 +689,6 @@ def plot_time_domain_chain(
     axes[1].set_xlim(time_xlim if time_xlim is not None else (t_tx[0], t_tx[-1]))
     axes[1].grid(True)
 
-    # -----------------------------------------------------------------
-    # 3. PPM Received Signal
-    # -----------------------------------------------------------------
     axes[2].plot(t_tx, y_rx, linewidth=1.0)
     for edge in slot_edges[:-1]:
         axes[2].axvline(edge, color="red", alpha=0.35, linewidth=1.2)
@@ -551,9 +696,6 @@ def plot_time_domain_chain(
     axes[2].set_xlim(time_xlim if time_xlim is not None else (t_tx[0], t_tx[-1]))
     axes[2].grid(True)
 
-    # -----------------------------------------------------------------
-    # 4. PPM Demod
-    # -----------------------------------------------------------------
     axes[3].plot(
         t_samp,
         x_samp,
@@ -589,14 +731,14 @@ def plot_psd(tx, rx, fs_tx, fmax=None):
     fig, axes = plt.subplots(2, 1, figsize=(16, 9), sharex=True)
 
     axes[0].plot(f_tx, Ptx, linewidth=1.0)
-    axes[0].set_title("Densidade Espectral de Potência (PSD) - Sinal PPM")
-    axes[0].set_ylabel("Potência / Frequência (dB/Hz)")
+    axes[0].set_title("Power Spectral Density (PSD) - PPM TX")
+    axes[0].set_ylabel("Power / Frequency (dB/Hz)")
     axes[0].grid(True)
 
     axes[1].plot(f_rx, Prx, color="red", linewidth=1.0)
-    axes[1].set_title("Densidade Espectral de Potência (PSD) - Received Sinal PPM")
-    axes[1].set_xlabel("Frequência (Hz)")
-    axes[1].set_ylabel("Potência / Frequência (dB/Hz)")
+    axes[1].set_title("Power Spectral Density (PSD) - PPM RX")
+    axes[1].set_xlabel("Frequency (Hz)")
+    axes[1].set_ylabel("Power / Frequency (dB/Hz)")
     axes[1].grid(True)
 
     if fmax is not None:
@@ -615,7 +757,7 @@ def plot_reconstruction(t, x, x_hat, time_xlim=None):
     plt.figure(figsize=(16, 7))
     plt.plot(t, x, linewidth=1.5, label="Original")
     plt.plot(t, x_hat, "--", linewidth=1.2, label="Recovered")
-    plt.title("Reconstrução")
+    plt.title("Reconstruction")
     plt.xlabel("Time")
     plt.ylabel("Amplitude")
     plt.xlim(time_xlim if time_xlim is not None else (t[0], t[-1]))
@@ -632,7 +774,7 @@ def plot_reconstruction(t, x, x_hat, time_xlim=None):
 def run_test_ppm_bandlimited_signal(
     duration=1.0,
     Tt=0.001,
-    W=10,
+    W=10.0,
     distribution="gaussian",
     peak_to_peak=12.0,
     remove_dc=False,
@@ -640,8 +782,12 @@ def run_test_ppm_bandlimited_signal(
     fs_tx=1000.0,
     pulse_width=None,
     pulse_width_ratio=0.15,
-    pulse_amplitude=0.38,
-    snr_db=20.0,
+    pulse_amplitude=1.0,
+    power_model="fixed_P_and_N0",
+    P=1.0,
+    N0=1e-3,
+    B_sensor=1000.0,
+    snr_sensor_db=20.0,
     seed=47,
     plot_fmax=500.0
 ):
@@ -684,10 +830,22 @@ def run_test_ppm_bandlimited_signal(
             Tp = pulse_width_ratio * Ts
 
     pulse_amplitude : float
-        PPM pulse amplitude.
+        PPM pulse amplitude before power normalization.
 
-    snr_db : float
-        AWGN SNR applied to the transmitted PPM waveform.
+    power_model : str
+        "fixed_P_and_N0" or "fixed_sensor_SNR_and_N0".
+
+    P : float | None
+        Per-sensor power. Required for fixed_P_and_N0.
+
+    N0 : float
+        Noise parameter.
+
+    B_sensor : float
+        Sensor bandwidth slice.
+
+    snr_sensor_db : float
+        Per-sensor SNR in dB. Used for fixed_sensor_SNR_and_N0.
 
     seed : int
         Random seed.
@@ -704,7 +862,20 @@ def run_test_ppm_bandlimited_signal(
     rng = np.random.default_rng(seed)
 
     # -----------------------------------------------------------------
-    # 1. Generate band-limited random signal (same logic as SFC)
+    # 0. Resolve physical budget
+    # -----------------------------------------------------------------
+    P_resolved, N0_resolved, snr_sensor_linear, snr_sensor_db_resolved = (
+        resolve_power_noise_model(
+            power_model=power_model,
+            P=P,
+            N0=N0,
+            B_sensor=B_sensor,
+            snr_sensor_db=snr_sensor_db
+        )
+    )
+
+    # -----------------------------------------------------------------
+    # 1. Generate band-limited random signal
     # -----------------------------------------------------------------
     t, x_raw, x = generate_bandlimited_random_signal(
         duration=duration,
@@ -740,17 +911,31 @@ def run_test_ppm_bandlimited_signal(
     )
 
     t_tx = ppm_tx["t_tx"]
-    x_ppm = ppm_tx["x_ppm"]
+    x_ppm_raw = ppm_tx["x_ppm"]
     slot_edges = ppm_tx["slot_edges"]
     Tp = ppm_tx["Tp"]
 
     # -----------------------------------------------------------------
-    # 4. Channel
+    # 4. Normalize TX waveform power to P
     # -----------------------------------------------------------------
-    y_rx = awgn(x_ppm, snr_db=snr_db, rng=rng)
+    x_ppm = normalize_waveform_power(
+        x=x_ppm_raw,
+        target_power=P_resolved
+    )
+
+    tx_power = float(np.mean(x_ppm ** 2))
 
     # -----------------------------------------------------------------
-    # 5. Demodulation
+    # 5. AWGN using per-sensor SNR
+    # -----------------------------------------------------------------
+    y_rx = awgn_from_physical_snr(
+        signal=x_ppm,
+        snr_sensor_linear=snr_sensor_linear,
+        rng=rng
+    )
+
+    # -----------------------------------------------------------------
+    # 6. Demodulation
     # -----------------------------------------------------------------
     ppm_rx = ppm_demodulate_samples(
         y_rx=y_rx,
@@ -764,7 +949,7 @@ def run_test_ppm_bandlimited_signal(
     x_samp_hat = ppm_rx["x_hat"]
 
     # -----------------------------------------------------------------
-    # 6. Dense-time reconstruction
+    # 7. Dense-time reconstruction
     # -----------------------------------------------------------------
     x_hat = reconstruct_from_samples(
         t_ref=t,
@@ -773,10 +958,10 @@ def run_test_ppm_bandlimited_signal(
     )
 
     # -----------------------------------------------------------------
-    # 7. Diagnostics
+    # 8. Diagnostics
     # -----------------------------------------------------------------
-    mse_samples = np.mean((x_samp[:len(x_samp_hat)] - x_samp_hat) ** 2)
-    mse_reconstruction = np.mean((x - x_hat) ** 2)
+    mse_samples = float(np.mean((x_samp[:len(x_samp_hat)] - x_samp_hat) ** 2))
+    mse_reconstruction = float(np.mean((x - x_hat) ** 2))
 
     print("\n============================================================")
     print("[PPM TEST]")
@@ -791,14 +976,20 @@ def run_test_ppm_bandlimited_signal(
     print(f"Ts = {Ts}")
     print(f"Tp = {Tp}")
     print(f"pulse_width_ratio = {Tp / Ts:.6f}")
-    print(f"pulse_amplitude = {pulse_amplitude}")
-    print(f"snr_db = {snr_db}")
+    print(f"pulse_amplitude_raw = {pulse_amplitude}")
+    print(f"power_model = {power_model}")
+    print(f"P_resolved = {P_resolved:.8e}")
+    print(f"N0_resolved = {N0_resolved:.8e}")
+    print(f"B_sensor = {B_sensor:.8e}")
+    print(f"SNR_sensor_linear = {snr_sensor_linear:.8e}")
+    print(f"SNR_sensor_dB = {snr_sensor_db_resolved:.8f}")
+    print(f"tx_power_after_normalization = {tx_power:.8e}")
     print(f"num_message_samples = {len(x_samp)}")
     print(f"mse_samples = {mse_samples:.8e}")
     print(f"mse_reconstruction = {mse_reconstruction:.8e}")
 
     # -----------------------------------------------------------------
-    # 8. Plots
+    # 9. Plots
     # -----------------------------------------------------------------
     time_xlim = (0.0, duration)
 
@@ -836,6 +1027,7 @@ def run_test_ppm_bandlimited_signal(
         "t_samp": t_samp,
         "x_samp": x_samp,
         "t_tx": t_tx,
+        "x_ppm_raw": x_ppm_raw,
         "x_ppm": x_ppm,
         "y_rx": y_rx,
         "x_samp_hat": x_samp_hat,
@@ -845,6 +1037,14 @@ def run_test_ppm_bandlimited_signal(
         "slot_edges": slot_edges,
         "mse_samples": mse_samples,
         "mse_reconstruction": mse_reconstruction,
+        "P": P_resolved,
+        "N0": N0_resolved,
+        "B_sensor": B_sensor,
+        "SNR_sensor_linear": snr_sensor_linear,
+        "SNR_sensor_dB": snr_sensor_db_resolved,
+        "tx_power": tx_power,
+        "ppm_tx": ppm_tx,
+        "ppm_rx": ppm_rx,
     }
 
 

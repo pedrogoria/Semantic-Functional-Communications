@@ -260,7 +260,7 @@ dc:
 # GLOBAL QUANTIZATION POLICY (CORE-LEVEL)
 # -----------------------------------------------------------------------------
 quantization:
-  # Whether M / M_RbCP are constrained to powers of 2.
+  # Whether M / M_RbCP are constrained to power of 2.
   # type: bool
   # default in current aligned core: false
   # behavior:

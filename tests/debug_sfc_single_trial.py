@@ -7,6 +7,7 @@ choices adopted by the fair comparison pipeline.
 This script:
 - loads the comparison YAML
 - selects one B value
+- resolves the physical budget consistently with the project convention
 - generates one common band-limited source realization with the same SFC-style logic
 - computes the native SFC chain
 - optionally computes the SFC + SED chain
@@ -16,11 +17,33 @@ Main debug views
 ----------------
 1. Message Signal
 2. SFC Reconstruction
-3. SFC + SED Reconstruction (optional)
+3. SFC + SED Reconstruction, optional
 4. Compact diagnostics for event-domain processing
 
-Usage (Python console - PyCharm)
---------------------------------
+Physical convention
+-------------------
+Preferred/default mode:
+
+    P and N0 are provided in the YAML.
+
+Then:
+
+    SNR_total = P / (B * N0)
+
+SFC uses the total bandwidth B, not per-sensor bandwidth B_s.
+
+Optional fixed per-sensor SNR mode:
+
+    If power_model.mode is "fixed_sensor_SNR_and_N0",
+    the YAML SNR_dB is interpreted as SNR_s and P is derived from:
+
+        P = SNR_s * B_s * N0
+
+    With a scalar P shared by all sensors, this mode requires uniform
+    bandwidth allocation.
+
+Usage, Python console / PyCharm
+-------------------------------
 from tests.debug_sfc_single_trial import debug_sfc_single_trial
 
 out = debug_sfc_single_trial(
@@ -69,8 +92,57 @@ from sfc.core.semantic_error_detection import detect_semantic_errors
 # =============================================================================
 
 def load_config(path: str) -> dict:
+    """
+    Load YAML configuration file.
+    """
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def _snr_linear_from_db(snr_db: float) -> float:
+    """
+    Convert SNR from dB to linear scale.
+    """
+    return 10.0 ** (float(snr_db) / 10.0)
+
+
+def _snr_db_from_linear(snr: float) -> float:
+    """
+    Convert SNR from linear scale to dB.
+    """
+    return 10.0 * np.log10(max(float(snr), np.finfo(float).tiny))
+
+
+def _resolve_bandwidth_allocation_from_cfg(cfg: dict) -> np.ndarray:
+    """
+    Resolve and validate bandwidth allocation from cfg["system"].
+
+    If no bandwidth allocation is provided, an equal split among S sensors is used.
+    """
+    system_cfg = cfg.get("system", {})
+    S = int(system_cfg.get("S", system_cfg.get("sensor_nodes", 1)))
+
+    allocation = system_cfg.get("bandwidth_allocation", None)
+
+    if allocation is None:
+        return np.ones(S, dtype=float) / S
+
+    allocation = np.asarray(allocation, dtype=float).reshape(-1)
+
+    if len(allocation) != S:
+        raise ValueError(
+            f"bandwidth_allocation length mismatch: len={len(allocation)} but S={S}"
+        )
+
+    if np.any(allocation < 0):
+        raise ValueError("bandwidth_allocation must be nonnegative.")
+
+    if not np.isclose(np.sum(allocation), 1.0):
+        raise ValueError(
+            f"bandwidth_allocation must sum to 1. Current sum={np.sum(allocation)}"
+        )
+
+    return allocation
 
 
 def apply_power_model_inplace(cfg: dict):
@@ -80,64 +152,109 @@ def apply_power_model_inplace(cfg: dict):
     Supported modes
     ---------------
     1. fixed_P_and_N0
+       Preferred/default mode.
        - keep P fixed
        - keep N0 fixed
-       - derive SNR_dB(B)
+       - SNR is derived by build_derived_system_parameters(...)
+       - this function only updates system.SNR_dB as total-band metadata
 
-    2. fixed_P_and_SNR
-       - keep P fixed
-       - keep SNR fixed
-       - derive N0(B)
+    2. fixed_sensor_SNR_and_N0
+       Optional mode.
+       - keep per-sensor SNR_dB fixed
+       - keep N0 fixed
+       - derive scalar P from:
+             P = SNR_s * B_s * N0
+
+       This requires uniform bandwidth allocation when using one scalar P.
+
+    Deprecated / unsupported
+    ------------------------
+    fixed_P_and_SNR is intentionally not supported here because the current
+    project convention is:
+    - P and N0 are primary;
+    - SNR is derived;
+    - SNR_dB is used only when deriving P.
     """
+
     mode = cfg.get("power_model", {}).get("mode", "fixed_P_and_N0")
+    system_cfg = cfg.setdefault("system", {})
+
+    B = float(system_cfg["B"])
+    P = system_cfg.get("P", None)
+    N0 = system_cfg.get("N0", None)
 
     if mode == "fixed_P_and_N0":
-        cfg["system"]["SNR_dB"] = derive_snr_db_from_fixed_P_and_N0(cfg)
+        if P is None:
+            raise ValueError(
+                "power_model.mode='fixed_P_and_N0' requires system.P to be provided."
+            )
+        if N0 is None:
+            raise ValueError(
+                "power_model.mode='fixed_P_and_N0' requires system.N0 to be provided."
+            )
+
+        P = float(P)
+        N0 = float(N0)
+
+        snr_total = P / (B * N0)
+        system_cfg["SNR_dB"] = _snr_db_from_linear(snr_total)
+        return
+
+    if mode in {
+        "fixed_sensor_SNR_and_N0",
+        "fixed_SNR_per_sensor_and_N0",
+        "fixed_per_sensor_SNR_and_N0",
+    }:
+        if N0 is None:
+            raise ValueError(
+                f"power_model.mode='{mode}' requires system.N0 to be provided."
+            )
+
+        if system_cfg.get("SNR_dB", None) is None:
+            raise ValueError(
+                f"power_model.mode='{mode}' requires system.SNR_dB to be provided."
+            )
+
+        allocation = _resolve_bandwidth_allocation_from_cfg(cfg)
+        S = len(allocation)
+        uniform_allocation = np.ones(S, dtype=float) / S
+
+        if not np.allclose(allocation, uniform_allocation):
+            raise ValueError(
+                "Fixed per-sensor SNR with scalar P requires uniform bandwidth allocation. "
+                "For nonuniform allocation, use fixed P,N0 or introduce sensor-dependent P_s."
+            )
+
+        snr_sensor = _snr_linear_from_db(system_cfg["SNR_dB"])
+        B_sensor = B * allocation[0]
+        system_cfg["P"] = snr_sensor * B_sensor * float(N0)
         return
 
     if mode == "fixed_P_and_SNR":
-        cfg["system"]["N0"] = derive_n0_from_fixed_P_and_snr(cfg)
-        return
+        raise ValueError(
+            "power_model.mode='fixed_P_and_SNR' is deprecated in this project convention. "
+            "Use either fixed_P_and_N0 or fixed_sensor_SNR_and_N0."
+        )
 
     raise ValueError(
         f"Unsupported power_model.mode: {mode}. "
-        f"Supported modes are: 'fixed_P_and_N0', 'fixed_P_and_SNR'."
+        "Supported modes are: 'fixed_P_and_N0' and 'fixed_sensor_SNR_and_N0'."
     )
 
 
-def derive_snr_db_from_fixed_P_and_N0(cfg: dict) -> float:
-    """
-    Derive SNR_dB(B) from fixed P and fixed N0 using:
-        SNR(B) = P / (B * N0)
-    """
-    P = cfg["system"]["P"]
-    B = cfg["system"]["B"]
-    N0 = cfg["system"]["N0"]
-
-    snr = P / (B * N0)
-    return 10.0 * np.log10(snr)
-
-
-def derive_n0_from_fixed_P_and_snr(cfg: dict) -> float:
-    """
-    Derive N0(B) from fixed P and fixed SNR using:
-        N0(B) = P / (B * SNR)
-    """
-    P = cfg["system"]["P"]
-    B = cfg["system"]["B"]
-    SNR_dB = cfg["system"]["SNR_dB"]
-
-    snr = 10.0 ** (SNR_dB / 10.0)
-    return P / (B * snr)
-
-
 # =============================================================================
-# COMMON SOURCE GENERATION (SAME LOGIC AS FAIR PIPELINE)
+# COMMON SOURCE GENERATION
 # =============================================================================
 
-def generate_common_bandlimited_signals(cfg: dict, rng: np.random.Generator, params, N: int):
+def generate_common_bandlimited_signals(
+    cfg: dict,
+    rng: np.random.Generator,
+    params,
+    N: int
+):
     """
-    Generate the common source signals using the same logic as the comparison pipeline.
+    Generate the common source signals using the same logic as the comparison
+    pipeline.
 
     Returns
     -------
@@ -179,6 +296,7 @@ def generate_common_bandlimited_signals(cfg: dict, rng: np.random.Generator, par
             )
 
     peak_to_peak = cfg["signal"]["peak_to_peak"]
+
     if peak_to_peak != 0:
         for p in range(n_periods):
             for s in range(S):
@@ -205,7 +323,7 @@ def generate_common_bandlimited_signals(cfg: dict, rng: np.random.Generator, par
 
 
 # =============================================================================
-# SHARED FOURIER / ta-tb HELPERS
+# SHARED FOURIER / PHASE HELPERS
 # =============================================================================
 
 def compute_ta_tb_from_reference(cfg, params, x_ref, Tt, N):
@@ -241,6 +359,26 @@ def compute_ta_tb_from_reference(cfg, params, x_ref, Tt, N):
     ta, tb = phase_core.calc_ta_tb(an, bn)
 
     return np.real(ta), np.real(tb), phase_core
+
+
+def build_sensor_x_event(S, N):
+    """
+    Build the sensor-event association matrix.
+
+    Event ordering:
+    for each sensor s:
+        [ta events for N harmonics][tb events for N harmonics]
+    """
+
+    num_event_ids = 2 * N * S
+    sensor_x_event = np.zeros((S, num_event_ids))
+
+    for s in range(S):
+        start = 2 * s * N
+        stop = 2 * (s + 1) * N
+        sensor_x_event[s, start:stop] = 1.0
+
+    return sensor_x_event
 
 
 def build_sfc_channel_for_B(cfg_B, N, S):
@@ -282,24 +420,10 @@ def build_sfc_channel_for_B(cfg_B, N, S):
     return SFCChannel(cfg_sfc)
 
 
-def build_sensor_x_event(S, N):
-    """
-    Build the sensor-event association matrix.
-    """
-    num_event_ids = 2 * N * S
-    sensor_x_event = np.zeros((S, num_event_ids))
-
-    for s in range(S):
-        start = 2 * s * N
-        stop = 2 * (s + 1) * N
-        sensor_x_event[s, start:stop] = 1.0
-
-    return sensor_x_event
-
-
 def extract_sed_outputs(sed_result):
     """
     Extract (corrected_events_est, period_valid_mask) from the SED result.
+
     Supports dict-like or dataclass-like objects.
     """
 
@@ -328,15 +452,18 @@ def plot_sfc_single_trial(
     corrected_events_est: np.ndarray | None,
     sensor_idx: int,
     valid_sfc_sed_trial: bool,
+    use_sed: bool,
 ):
     """
     Plot the main debug views for one SFC trial.
     """
 
-    if x_rec_sfc_sed_sensor is None:
-        fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=False)
-    else:
+    show_sed_panel = use_sed
+
+    if show_sed_panel:
         fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=False)
+    else:
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=False)
 
     # -----------------------------------------------------------------
     # 1. Message / SFC reconstruction
@@ -348,15 +475,26 @@ def plot_sfc_single_trial(
     axes[0].legend()
 
     # -----------------------------------------------------------------
-    # 2. SFC + SED reconstruction (optional)
+    # 2. SFC + SED reconstruction, optional
     # -----------------------------------------------------------------
     offset = 1
-    if x_rec_sfc_sed_sensor is not None:
+
+    if show_sed_panel:
         axes[1].plot(t, x_ref_sensor, linewidth=1.2, label="Original")
-        axes[1].plot(t, x_rec_sfc_sed_sensor, "--", linewidth=1.2, label="SFC + SED reconstruction")
+
+        if x_rec_sfc_sed_sensor is not None:
+            axes[1].plot(
+                t,
+                x_rec_sfc_sed_sensor,
+                "--",
+                linewidth=1.2,
+                label="SFC + SED reconstruction"
+            )
+
         title = f"SFC + SED Reconstruction (sensor {sensor_idx})"
         if not valid_sfc_sed_trial:
             title += " [INVALID / DISCARDED]"
+
         axes[1].set_title(title)
         axes[1].grid(True)
         axes[1].legend()
@@ -378,18 +516,14 @@ def plot_sfc_single_trial(
     # -----------------------------------------------------------------
     # 4. Events received / corrected
     # -----------------------------------------------------------------
-    if x_rec_sfc_sed_sensor is None:
-        ax_last = axes[offset + 1]
+    ax_last = axes[offset + 1]
+
+    if show_sed_panel and corrected_events_est is not None:
+        img = corrected_events_est
+        title = "Event matrix after SED"
+    else:
         img = events_est
         title = "Event matrix (received)"
-    else:
-        ax_last = axes[offset + 1]
-        if corrected_events_est is not None:
-            img = corrected_events_est
-            title = "Event matrix after SED"
-        else:
-            img = events_est
-            title = "Event matrix (received)"
 
     ax_last.imshow(
         img.T,
@@ -419,31 +553,6 @@ def debug_sfc_single_trial(
 ):
     """
     Run and visualize one SFC trial consistent with the fair-comparison setup.
-
-    Parameters
-    ----------
-    config_path : str
-        Path to the comparison YAML.
-
-    B_value : float
-        Selected B value for the debug run.
-
-    sensor_idx : int, optional
-        Sensor index to visualize.
-
-    seed : int, optional
-        Random seed.
-
-    use_sed : bool, optional
-        If True, also run and visualize the SFC + SED branch.
-
-    do_plot : bool, optional
-        If True, show plots.
-
-    Returns
-    -------
-    dict
-        Debug objects and diagnostics.
     """
 
     cfg = load_config(config_path)
@@ -472,7 +581,7 @@ def debug_sfc_single_trial(
 
     t = common["t"]
     Tt = common["Tt"]
-    x_ref = common["x_ref"]                 # shape: (time, 1, S)
+    x_ref = common["x_ref"]  # shape: (time, 1, S)
 
     # ------------------------------------------------------------
     # 2) Shared Fourier / ta-tb
@@ -495,7 +604,7 @@ def debug_sfc_single_trial(
     events_est = out["events_est"] if isinstance(out, dict) else out
 
     # ------------------------------------------------------------
-    # 4) Native SFC (without SED)
+    # 4) Native SFC without SED
     # ------------------------------------------------------------
     ta_rec, tb_rec = phase_core.event_to_ta_tb(events_est)
     ta_rec = np.real(ta_rec)
@@ -512,16 +621,19 @@ def debug_sfc_single_trial(
             w0
         )
 
-    mse_sfc = float(np.mean((x_ref[:, 0, sensor_idx] - x_rec_sfc[:, 0, sensor_idx]) ** 2))
+    mse_sfc = float(
+        np.mean((x_ref[:, 0, sensor_idx] - x_rec_sfc[:, 0, sensor_idx]) ** 2)
+    )
 
     # ------------------------------------------------------------
-    # 5) Native SFC + SED (optional)
+    # 5) Native SFC + SED, optional
     # ------------------------------------------------------------
     x_rec_sfc_sed = None
     mse_sfc_sed = np.nan
     valid_fraction_sfc_sed = np.nan
     is_valid_sfc_sed_trial = False
     corrected_events_est = None
+    period_valid_mask = None
 
     if use_sed:
         period_slots = events_est.shape[0]
@@ -570,9 +682,12 @@ def debug_sfc_single_trial(
     print(f"power_model.mode = {cfg_B.get('power_model', {}).get('mode', 'fixed_P_and_N0')}")
     print(f"S = {params.S}")
     print(f"P = {params.P}")
+    print(f"N0 = {params.N0}")
     print(f"B_total = {params.B}")
-    print(f"SNR_dB_derived = {cfg_B['system']['SNR_dB']}")
-    print(f"N0_derived = {cfg_B['system']['N0']}")
+    print(f"SNR_total = {params.SNR}")
+    print(f"SNR_total_dB = {params.SNR_dB}")
+    print(f"SNR_per_sensor = {params.SNR_per_sensor}")
+    print(f"SNR_per_sensor_dB = {params.SNR_per_sensor_dB}")
     print(f"tau = {params.tau}")
     print(f"W = {params.W}")
     print(f"N = {N}")
@@ -587,6 +702,7 @@ def debug_sfc_single_trial(
             print(f"mse_sfc_sed = {mse_sfc_sed:.8e}")
         print(f"valid_fraction_sfc_sed = {valid_fraction_sfc_sed}")
         print(f"is_valid_sfc_sed_trial = {is_valid_sfc_sed_trial}")
+        print(f"period_valid_mask = {period_valid_mask}")
 
     if do_plot:
         plot_sfc_single_trial(
@@ -599,15 +715,20 @@ def debug_sfc_single_trial(
             corrected_events_est=corrected_events_est,
             sensor_idx=sensor_idx,
             valid_sfc_sed_trial=is_valid_sfc_sed_trial,
+            use_sed=use_sed,
         )
 
     return {
         "config": cfg_B,
+        "params": params,
         "t": t,
         "x_ref": x_ref,
+        "ta": ta,
+        "tb": tb,
         "events": events,
         "events_est": events_est,
         "corrected_events_est": corrected_events_est,
+        "period_valid_mask": period_valid_mask,
         "x_rec_sfc": x_rec_sfc,
         "x_rec_sfc_sed": x_rec_sfc_sed,
         "mse_sfc": mse_sfc,
@@ -642,6 +763,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 # from tests.debug_sfc_single_trial import debug_sfc_single_trial
 #

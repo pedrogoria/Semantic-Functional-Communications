@@ -1,39 +1,7 @@
 """
 sfc/pipelines/rbcp_mse_vs_B_fixed_power.py
 
-Pipeline for reproducing manuscript Figure 6:
-
-    MSE versus B for:
-    - Benchmark Approach
-    - RbCP
-    - RbCP_time
-    - SFC
-
-Figure 6 regime
----------------
-- P is fixed
-- N0 is fixed
-- SNR varies with B according to:
-      SNR(B) = P / (B * N0)
-
-Important modeling choices
---------------------------
-1. Bandwidth sharing:
-   Communication-budget-based quantities use the per-sensor bandwidth slice
-   derived centrally through build_derived_system_parameters(cfg).
-
-2. RbCP_time:
-   Interpreted as the error-free time-model boundary:
-       signal -> ta/tb -> events -> ta/tb -> signal
-   i.e., NO physical channel and NO SFC/MAC layer here.
-
-3. No semantic-based error detection:
-   Figure 6 does NOT use semantic error detection.
-
-4. Quantization policy:
-   This pipeline relies on the defaults already implemented in the core:
-   - M and M_RbCP are free integers by default
-   - no power-of-two restriction unless explicitly requested in cfg
+Pipeline in cfgPipeline for reproducing manuscript Figure 6:
 """
 
 import copy
@@ -46,6 +14,7 @@ from sfc.core.phase_cof import PhaseCoefficientCore
 from sfc.core.quantization import quantize_ta_tb
 from sfc.core.reconstruction import recover_signal
 from sfc.core.channel.SFCChannel import SFCChannel
+
 from sfc.core.system_parameters import (
     build_derived_system_parameters,
     compute_benchmark_M_per_sensor,
@@ -71,6 +40,7 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
         DataFrame with columns:
         - B
         - SNR_dB_derived
+        - SNR_sensor_dB_derived
         - M_benchmark_min
         - M_benchmark_mean
         - M_benchmark_max
@@ -104,7 +74,14 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
         cfg_B["system"]["B"] = float(B)
 
         # ---------------------------------------------------------------------
-        # Figure 6 regime: P fixed, N0 fixed, derive SNR(B)
+        # Figure 6 regime:
+        # P fixed, N0 fixed.
+        #
+        # build_derived_system_parameters(...) will compute:
+        #   SNR_total = P / (B * N0)
+        #   SNR_s     = P / (B_s * N0)
+        #
+        # We still store SNR_dB in cfg_B for metadata/logging compatibility.
         # ---------------------------------------------------------------------
         cfg_B["system"]["SNR_dB"] = _derive_snr_db_from_fixed_P_and_N0(cfg_B)
 
@@ -120,22 +97,28 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
         sampling_rate = benchmark_cfg.get("sampling_rate", params.W)
         effective_rate_factor = benchmark_cfg.get("effective_rate_factor", 1.0)
 
-        # We preserve the historical role of effective_rate_factor by applying
-        # it as an equivalent scaling of the sampling rate.
+        # Benchmark uses per-sensor B_s and per-sensor SNR_s internally:
+        #
+        #   B_s = alpha_s * B
+        #   SNR_s = P / (B_s * N0)
+        #
+        # through compute_benchmark_M_per_sensor(..., P, N0, ...).
         M_benchmark_per_sensor = compute_benchmark_M_per_sensor(
             S=params.S,
             tau=params.tau,
             B=params.B,
-            SNR=params.SNR,
+            P=params.P,
+            N0=params.N0,
             sampling_rate=effective_rate_factor * sampling_rate,
             bandwidth_allocation=params.bandwidth_allocation,
             force_power_of_two=params.quantization_force_power_of_two,
-            rounding_mode=params.quantization_rounding_mode
+            rounding_mode=params.quantization_rounding_mode,
         )
 
         M_benchmark_min = float(np.min(M_benchmark_per_sensor))
         M_benchmark_mean = float(np.mean(M_benchmark_per_sensor))
         M_benchmark_max = float(np.max(M_benchmark_per_sensor))
+
         M_time = int(params.M_time)
         M_rbcp = int(params.M_rbcp)
 
@@ -143,8 +126,14 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
         print(f"[INFO] B = {B:.1f} Hz")
         print(f"[INFO] P = {cfg_B['system']['P']:.6e} (fixed)")
         print(f"[INFO] N0 = {cfg_B['system']['N0']:.6e} (fixed)")
-        print(f"[INFO] SNR_dB(B) = {cfg_B['system']['SNR_dB']:.6f}")
-        print(f"[INFO] SNR(B) = {params.SNR:.6e}")
+        print(
+            f"[INFO] SNR_total_dB(B) = {params.SNR_dB:.6f} | "
+            f"SNR_total(B) = {params.SNR:.6e}"
+        )
+        print(
+            f"[INFO] SNR_sensor_dB(B) = {params.SNR_per_sensor_dB[0]:.6f} | "
+            f"SNR_sensor(B) = {params.SNR_per_sensor[0]:.6e}"
+        )
         print(
             f"[INFO] S = {params.S} | R = {params.R} | L = {params.L} | "
             f"tau = {params.tau:.3f} s | W = {params.W:.3f} Hz | N = {N}"
@@ -178,7 +167,7 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
         )
 
         # ---------------------------------------------------------------------
-        # Monte Carlo for the other branches
+        # Monte Carlo for RbCP, RbCP_time, and SFC
         # ---------------------------------------------------------------------
         mse_rbcp_sum = 0.0
         mse_rbcp_time_sum = 0.0
@@ -186,9 +175,9 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
 
         for i in range(n_trials):
             trial = _run_one_trial(
-                cfg_B,
-                rng,
-                N,
+                cfg=cfg_B,
+                rng=rng,
+                N=N,
                 M_rbcp=M_rbcp,
                 sfc_channel=sfc_channel
             )
@@ -211,7 +200,8 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
 
         results.append({
             "B": B,
-            "SNR_dB_derived": cfg_B["system"]["SNR_dB"],
+            "SNR_dB_derived": params.SNR_dB,
+            "SNR_sensor_dB_derived": float(params.SNR_per_sensor_dB[0]),
             "M_benchmark_min": M_benchmark_min,
             "M_benchmark_mean": M_benchmark_mean,
             "M_benchmark_max": M_benchmark_max,
@@ -233,9 +223,16 @@ def generate_rbcp_mse_vs_B_fixed_power_data(cfg):
 
 def _derive_snr_db_from_fixed_P_and_N0(cfg):
     """
-    Derive SNR_dB(B) from fixed P and fixed N0 using:
+    Derive total-band SNR_dB(B) from fixed P and fixed N0 using:
 
-        SNR(B) = P / (B * N0)
+        SNR_total(B) = P / (B * N0)
+
+    Note
+    ----
+    This helper returns the total-band reference SNR. For per-sensor methods,
+    the relevant value is computed by the system-parameter builder as:
+
+        SNR_s(B) = P / (B_s * N0)
     """
 
     P = cfg["system"]["P"]
@@ -332,7 +329,9 @@ def _run_one_trial(cfg, rng, N, M_rbcp, sfc_channel=None):
     t = np.arange(0, tau, Tt)
     n_time = len(t)
 
+    # -------------------------------------------------------------------------
     # 1. Generate random signals
+    # -------------------------------------------------------------------------
     x_raw = _generate_signals(
         cfg=cfg,
         rng=rng,
@@ -341,16 +340,22 @@ def _run_one_trial(cfg, rng, N, M_rbcp, sfc_channel=None):
         S=params.S
     )
 
+    # -------------------------------------------------------------------------
     # 2. Band-limit
+    # -------------------------------------------------------------------------
     x_filtered = _filter_signals(x_raw, N, tau, Tt)
 
+    # -------------------------------------------------------------------------
     # 3. Peak-to-peak control
+    # -------------------------------------------------------------------------
     x_filtered = _apply_peak_to_peak_control(
         x_filtered,
         cfg["signal"]["peak_to_peak"]
     )
 
+    # -------------------------------------------------------------------------
     # 4. DC handling
+    # -------------------------------------------------------------------------
     x_zero_mean = _apply_dc_handling(
         x_filtered=x_filtered,
         tau=tau,
@@ -358,7 +363,9 @@ def _run_one_trial(cfg, rng, N, M_rbcp, sfc_channel=None):
         dc_enabled=cfg.get("dc", {}).get("enabled", False)
     )
 
+    # -------------------------------------------------------------------------
     # 5. Fourier coefficients
+    # -------------------------------------------------------------------------
     an, bn, _ = _compute_fourier_coefficients(
         x_zero_mean=x_zero_mean,
         tau=tau,
@@ -369,7 +376,9 @@ def _run_one_trial(cfg, rng, N, M_rbcp, sfc_channel=None):
         normalization_target=cfg["signal"]["normalization_target"]
     )
 
+    # -------------------------------------------------------------------------
     # 6. ta/tb
+    # -------------------------------------------------------------------------
     ta, tb = _compute_phase_coefficients(
         an=an,
         bn=bn,
@@ -381,7 +390,9 @@ def _run_one_trial(cfg, rng, N, M_rbcp, sfc_channel=None):
         n_periods=n_periods
     )
 
+    # -------------------------------------------------------------------------
     # 7. RbCP
+    # -------------------------------------------------------------------------
     mse_rbcp = _run_rbcp_branch(
         ta=ta,
         tb=tb,
@@ -391,7 +402,9 @@ def _run_one_trial(cfg, rng, N, M_rbcp, sfc_channel=None):
         M_rbcp=M_rbcp
     )
 
+    # -------------------------------------------------------------------------
     # 8. RbCP_time
+    # -------------------------------------------------------------------------
     mse_rbcp_time = _run_rbcp_time_branch(
         ta=ta,
         tb=tb,
@@ -403,7 +416,9 @@ def _run_one_trial(cfg, rng, N, M_rbcp, sfc_channel=None):
         n_periods=n_periods
     )
 
+    # -------------------------------------------------------------------------
     # 9. SFC
+    # -------------------------------------------------------------------------
     mse_sfc = _run_sfc_branch(
         ta=ta,
         tb=tb,
@@ -511,8 +526,15 @@ def _apply_dc_handling(x_filtered, tau, Tt, dc_enabled):
 # FOURIER / PHASE
 # =============================================================================
 
-def _compute_fourier_coefficients(x_zero_mean, tau, N, S, Tt,
-                                  normalize_dft, normalization_target):
+def _compute_fourier_coefficients(
+    x_zero_mean,
+    tau,
+    N,
+    S,
+    Tt,
+    normalize_dft,
+    normalization_target
+):
     """
     Compute Fourier coefficients for all periods/sensors.
     """
@@ -566,11 +588,11 @@ def _run_benchmark_branch(cfg, params, M_benchmark_per_sensor):
     """
     Benchmark Approach for Figure 6.
 
-    Analytical ABSOLUTE MSE:
+    Analytical absolute MSE:
 
         MSE_abs = (peak_to_peak^2) / (12 * M^2)
 
-    where M is obtained from the core.
+    where M is obtained from the per-sensor physical budget.
     """
 
     if not cfg["mode"].get("run_benchmark", False):

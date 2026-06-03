@@ -12,25 +12,52 @@ Pipeline for reproducing manuscript Figure 5:
 Important modeling choices
 --------------------------
 1. Bandwidth sharing:
-   Communication-budget-based quantities use the per-sensor bandwidth slice
-   derived centrally through build_derived_system_parameters(cfg).
+   Benchmark and RbCP are communication-budget-based methods. They use the
+   per-sensor bandwidth slice:
+
+       B_s = alpha_s * B
+
+   and the corresponding per-sensor SNR:
+
+       SNR_s = P / (B_s * N0)
+
+   The feasible M values are computed centrally through:
+       sfc.core.system_parameters / sfc.core.theory
 
 2. RbCP_time:
    Interpreted as the error-free time-model boundary:
-       signal -> ta/tb -> events -> ta/tb -> signal
-   i.e., NO physical channel and NO SFC/MAC layer here.
 
-3. No semantic-based error detection:
+       signal -> ta/tb -> events -> ta/tb -> signal
+
+   It uses the SFC time model and total B, not B_s.
+   It has no physical channel and no SFCChannel.
+
+3. SFC:
+   Uses the native SFC channel and total B, because SFC is its own access /
+   time-event transmission mechanism and does not split the band by sensor.
+
+4. No semantic-based error detection:
    Figure 5 does NOT use semantic error detection.
 
-4. Manuscript-faithful power model:
-   Keep SNR_dB fixed and N0 fixed, and derive P(B) from:
-       SNR = P / (B * N0)
+5. Manuscript-faithful power model:
+   This pipeline keeps per-sensor SNR_dB fixed and N0 fixed, and derives P(B)
+   from:
+
+       SNR_s = P / (B_s * N0)
 
    Therefore:
-       P(B) = SNR * B * N0
 
-5. Quantization policy:
+       P(B) = SNR_s * B_s * N0
+
+   For uniform bandwidth allocation:
+
+       B_s = B / S
+
+   With a scalar P shared by all sensors, fixed per-sensor SNR requires uniform
+   bandwidth allocation. For nonuniform allocation, use fixed P,N0 or allow
+   sensor-dependent powers P_s.
+
+6. Quantization policy:
    This pipeline relies on the defaults already implemented in the core:
    - M and M_RbCP are free integers by default
    - no power-of-two restriction unless explicitly requested in cfg
@@ -51,6 +78,7 @@ from sfc.core.system_parameters import (
     build_derived_system_parameters,
     compute_benchmark_M_per_sensor,
 )
+
 from sfc.core.theory import compute_snr_linear
 
 
@@ -91,9 +119,6 @@ def generate_rbcp_mse_vs_B_data(cfg):
     )
     print(f"[INFO] Trials per B = {cfg['monte_carlo']['interactions']}")
 
-    # -------------------------------------------------------------------------
-    # Sweep values of B
-    # -------------------------------------------------------------------------
     b_cfg = cfg["sweep"]["B"]
     b_values = np.arange(b_cfg["start"], b_cfg["stop"], b_cfg["step"])
 
@@ -104,10 +129,10 @@ def generate_rbcp_mse_vs_B_data(cfg):
 
         # ---------------------------------------------------------------------
         # Manuscript-faithful power model:
-        # keep SNR fixed and N0 fixed, derive P(B)
+        # keep per-sensor SNR fixed and N0 fixed, derive P(B)
         # ---------------------------------------------------------------------
         cfg_B["system"]["B"] = float(B)
-        cfg_B["system"]["P"] = _derive_power_from_fixed_snr_and_n0(cfg_B)
+        cfg_B["system"]["P"] = _derive_power_from_fixed_sensor_snr_and_n0(cfg_B)
 
         params = build_derived_system_parameters(cfg_B)
 
@@ -121,10 +146,17 @@ def generate_rbcp_mse_vs_B_data(cfg):
             f"[INFO] S = {params.S} | R = {params.R} | L = {params.L} | "
             f"tau = {params.tau:.3f} s | W = {params.W:.3f} Hz | N = {N}"
         )
-        print(f"[INFO] SNR_dB = {params.SNR_dB:.1f} | SNR = {params.SNR:.4e}")
         print(f"[INFO] N0 = {cfg_B['system']['N0']:.6e}")
         print(f"[INFO] bandwidth_allocation = {params.bandwidth_allocation}")
         print(f"[INFO] B_per_sensor = {params.B_per_sensor}")
+        print(
+            f"[INFO] SNR_total_dB = {params.SNR_dB:.3f} | "
+            f"SNR_total = {params.SNR:.6e}"
+        )
+        print(
+            f"[INFO] SNR_sensor_dB = {params.SNR_per_sensor_dB[0]:.3f} | "
+            f"SNR_sensor = {params.SNR_per_sensor[0]:.6e}"
+        )
         print(f"[INFO] M_RbCP = {params.M_rbcp}")
         print(f"[INFO] M_RbCP per sensor = {params.M_rbcp_per_sensor}")
         print(f"[INFO] quantization_force_power_of_two = {params.quantization_force_power_of_two}")
@@ -183,21 +215,64 @@ def generate_rbcp_mse_vs_B_data(cfg):
 # MANUSCRIPT-FAITHFUL POWER MODEL
 # =============================================================================
 
-def _derive_power_from_fixed_snr_and_n0(cfg):
+def _derive_power_from_fixed_sensor_snr_and_n0(cfg):
     """
-    Derive P(B) from fixed SNR and fixed N0 using:
+    Derive P(B) from fixed per-sensor SNR and fixed N0.
 
-        SNR = P / (B * N0)
+    The SNR configured in the YAML is interpreted as the SNR of each sensor
+    channel:
+
+        SNR_s = P / (B_s * N0)
 
     Therefore:
-        P = SNR * B * N0
+
+        P = SNR_s * B_s * N0
+
+    Notes
+    -----
+    This helper assumes a scalar P shared by all sensors.
+
+    If bandwidth allocation is uniform, all sensors have the same B_s and the
+    same SNR_s.
+
+    If bandwidth allocation is nonuniform, a single scalar P cannot keep the
+    same SNR_s for all sensors. In that case this helper raises an error.
     """
 
-    SNR = compute_snr_linear(cfg["system"]["SNR_dB"])
+    SNR_s = compute_snr_linear(cfg["system"]["SNR_dB"])
     B = cfg["system"]["B"]
     N0 = cfg["system"]["N0"]
+    S = cfg["system"]["S"]
 
-    return SNR * B * N0
+    allocation = cfg["system"].get("bandwidth_allocation", None)
+
+    if allocation is None:
+        B_sensor = B / S
+        return SNR_s * B_sensor * N0
+
+    allocation = np.asarray(allocation, dtype=float).reshape(-1)
+
+    if len(allocation) != S:
+        raise ValueError(
+            f"bandwidth_allocation length mismatch: len={len(allocation)} but S={S}"
+        )
+
+    if np.any(allocation < 0):
+        raise ValueError("bandwidth_allocation must be nonnegative")
+
+    if not np.isclose(np.sum(allocation), 1.0):
+        raise ValueError(
+            f"bandwidth_allocation must sum to 1. Current sum={np.sum(allocation)}"
+        )
+
+    if not np.allclose(allocation, np.ones(S) / S):
+        raise ValueError(
+            "fixed per-sensor SNR with scalar P requires uniform bandwidth allocation. "
+            "For nonuniform allocation, use fixed P,N0 or allow sensor-dependent P_s."
+        )
+
+    B_sensor = B * allocation[0]
+    return SNR_s * B_sensor * N0
 
 
 # =============================================================================
@@ -563,13 +638,15 @@ def _run_benchmark_branch(cfg, params):
     """
     Benchmark Approach for Figure 5.
 
-    IMPORTANT
-    ---------
     This branch is treated analytically, not through Monte Carlo reconstruction.
 
-    The benchmark uses the feasible number of bins M produced by the core
-    (free integer by default, floor-rounded, unless the cfg explicitly requests
-    otherwise), and computes the ABSOLUTE MSE:
+    The Benchmark uses the feasible number of bins M computed from the
+    per-sensor channel budget:
+
+        B_s = alpha_s * B
+        SNR_s = P / (B_s * N0)
+
+    and computes the absolute MSE:
 
         MSE = (peak_to_peak^2) / (12 * M^2)
     """
@@ -582,18 +659,16 @@ def _run_benchmark_branch(cfg, params):
     effective_rate_factor = benchmark_cfg.get("effective_rate_factor", 2.0)
     peak_to_peak = cfg["signal"]["peak_to_peak"]
 
-    # The core now handles the quantization policy.
-    # To preserve the historical effect of effective_rate_factor, we apply it
-    # as an equivalent scaling of the sampling rate.
     M_vec = compute_benchmark_M_per_sensor(
         S=params.S,
         tau=params.tau,
         B=params.B,
-        SNR=params.SNR,
+        P=params.P,
+        N0=params.N0,
         sampling_rate=effective_rate_factor * sampling_rate,
         bandwidth_allocation=params.bandwidth_allocation,
         force_power_of_two=params.quantization_force_power_of_two,
-        rounding_mode=params.quantization_rounding_mode
+        rounding_mode=params.quantization_rounding_mode,
     )
 
     mse_sum = 0.0

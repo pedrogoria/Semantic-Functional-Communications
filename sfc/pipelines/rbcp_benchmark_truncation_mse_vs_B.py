@@ -19,10 +19,17 @@ Important simplifications
    - no semantic error detection
 
 2. Figure-5-style power model:
-   Keep SNR_dB fixed and N0 fixed, derive P(B) from:
-       SNR = P / (B * N0)
+   Keep per-sensor SNR_dB fixed and N0 fixed, derive P(B) from:
+       SNR_s = P / (B_s * N0)
    Therefore:
-       P(B) = SNR * B * N0
+       P(B) = SNR_s * B_s * N0
+
+   For uniform bandwidth allocation:
+       B_s = B / S
+
+   With a scalar P shared by all sensors, fixed per-sensor SNR requires
+   uniform bandwidth allocation. For nonuniform allocation, use fixed P,N0
+   or allow sensor-dependent powers P_s.
 
 3. Benchmark:
    Treated analytically in absolute MSE:
@@ -61,10 +68,13 @@ from sfc.core.quantization import quantize_ta_tb
 from sfc.core.reconstruction import recover_signal
 from sfc.core.system_parameters import (
     build_derived_system_parameters,
+)
+
+from sfc.core.theory import (
+    compute_snr_linear,
     compute_benchmark_M_per_sensor,
     compute_M_rbcp,
 )
-from sfc.core.theory import compute_snr_linear
 
 
 # =============================================================================
@@ -121,7 +131,7 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         # keep SNR fixed and N0 fixed, derive P(B)
         # ---------------------------------------------------------------------
         cfg_B["system"]["B"] = float(B)
-        cfg_B["system"]["P"] = _derive_power_from_fixed_snr_and_n0(cfg_B)
+        cfg_B["system"]["P"] = _derive_power_from_fixed_sensor_snr_and_n0(cfg_B)
 
         params = build_derived_system_parameters(cfg_B)
 
@@ -144,26 +154,31 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         sampling_rate = benchmark_cfg.get("sampling_rate", params.W)
         effective_rate_factor = benchmark_cfg.get("effective_rate_factor", 1.0)
 
+        # ---------------------------------------------------------------------
+        # Benchmark M per sensor (CORRECTED: use per-sensor SNR)
+        # ---------------------------------------------------------------------
         M_benchmark_free_vec = compute_benchmark_M_per_sensor(
             S=params.S,
             tau=params.tau,
             B=params.B,
-            SNR=params.SNR,
+            P=params.P,
+            N0=cfg_B["system"]["N0"],
             sampling_rate=effective_rate_factor * sampling_rate,
             bandwidth_allocation=params.bandwidth_allocation,
             force_power_of_two=bench_free_cfg["force_power_of_two"],
-            rounding_mode=bench_free_cfg["rounding_mode"]
+            rounding_mode=bench_free_cfg["rounding_mode"],
         )
 
         M_benchmark_pow2_vec = compute_benchmark_M_per_sensor(
             S=params.S,
             tau=params.tau,
             B=params.B,
-            SNR=params.SNR,
+            P=params.P,
+            N0=cfg_B["system"]["N0"],
             sampling_rate=effective_rate_factor * sampling_rate,
             bandwidth_allocation=params.bandwidth_allocation,
             force_power_of_two=bench_pow2_cfg["force_power_of_two"],
-            rounding_mode=bench_pow2_cfg["rounding_mode"]
+            rounding_mode=bench_pow2_cfg["rounding_mode"],
         )
 
         # Store one scalar diagnostic value for each policy.
@@ -179,10 +194,11 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
             W=params.W,
             tau=params.tau,
             B=params.B,
-            SNR=params.SNR,
+            P=params.P,
+            N0=cfg_B["system"]["N0"],
             bandwidth_allocation=params.bandwidth_allocation,
             force_power_of_two=rbcp_free_cfg["force_power_of_two"],
-            rounding_mode=rbcp_free_cfg["rounding_mode"]
+            rounding_mode=rbcp_free_cfg["rounding_mode"],
         )
 
         M_rbcp_pow2 = compute_M_rbcp(
@@ -190,10 +206,11 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
             W=params.W,
             tau=params.tau,
             B=params.B,
-            SNR=params.SNR,
+            P=params.P,
+            N0=cfg_B["system"]["N0"],
             bandwidth_allocation=params.bandwidth_allocation,
             force_power_of_two=rbcp_pow2_cfg["force_power_of_two"],
-            rounding_mode=rbcp_pow2_cfg["rounding_mode"]
+            rounding_mode=rbcp_pow2_cfg["rounding_mode"],
         )
 
         print("\n[INFO] ------------------------------------------------------------")
@@ -276,21 +293,65 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
 # FIGURE-5-STYLE POWER MODEL
 # =============================================================================
 
-def _derive_power_from_fixed_snr_and_n0(cfg):
+def _derive_power_from_fixed_sensor_snr_and_n0(cfg):
     """
-    Derive P(B) from fixed SNR and fixed N0 using:
+    Derive P(B) from fixed per-sensor SNR and fixed N0.
 
-        SNR = P / (B * N0)
+    The SNR configured in the YAML is interpreted as the SNR of each sensor
+    channel:
+
+        SNR_s = P / (B_s * N0)
 
     Therefore:
-        P = SNR * B * N0
+
+        P = SNR_s * B_s * N0
+
+    Notes
+    -----
+    This helper assumes a scalar P shared by all sensors.
+
+    If bandwidth allocation is uniform, all sensors have the same B_s and the
+    same SNR_s.
+
+    If bandwidth allocation is nonuniform, a single scalar P cannot keep the
+    same SNR for all sensors. In that case this helper raises an error.
     """
 
-    SNR = compute_snr_linear(cfg["system"]["SNR_dB"])
+    SNR_s = compute_snr_linear(cfg["system"]["SNR_dB"])
     B = cfg["system"]["B"]
     N0 = cfg["system"]["N0"]
+    S = cfg["system"]["S"]
 
-    return SNR * B * N0
+    allocation = cfg["system"].get("bandwidth_allocation", None)
+
+    if allocation is None:
+        alpha = 1.0 / S
+        B_sensor = alpha * B
+        return SNR_s * B_sensor * N0
+
+    allocation = np.asarray(allocation, dtype=float).reshape(-1)
+
+    if len(allocation) != S:
+        raise ValueError(
+            f"bandwidth_allocation length mismatch: len={len(allocation)} but S={S}"
+        )
+
+    if np.any(allocation < 0):
+        raise ValueError("bandwidth_allocation must be nonnegative")
+
+    if not np.isclose(np.sum(allocation), 1.0):
+        raise ValueError(
+            f"bandwidth_allocation must sum to 1. Current sum={np.sum(allocation)}"
+        )
+
+    if not np.allclose(allocation, np.ones(S) / S):
+        raise ValueError(
+            "fixed per-sensor SNR with a scalar P requires uniform bandwidth allocation. "
+            "For nonuniform allocation, either allow sensor-dependent P_s or use fixed P,N0."
+        )
+
+    B_sensor = B * allocation[0]
+    return SNR_s * B_sensor * N0
 
 
 # =============================================================================

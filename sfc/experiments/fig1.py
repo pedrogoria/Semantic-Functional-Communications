@@ -17,7 +17,11 @@ Author: SFC Project
 """
 
 import numpy as np
-from core.rbcp import compute_Q, mse_upper_bound, mse_star
+from sfc.core.theory import (
+    compute_q,
+    rbcp_mse_upper_bound,
+    rbcp_mse_star,
+)
 
 
 def run(cfg):
@@ -56,12 +60,12 @@ def run(cfg):
     # ------------------------------------------------------
 
     for M in M_list:
-        Q = compute_Q(M)
+        Q = compute_q(M)
 
         for N in N_list:
             # --- Theoretical results ---
-            mse_upper = mse_upper_bound(N, Q)
-            mse_star_val = mse_star(N, Q)
+            mse_upper = rbcp_mse_upper_bound(N, Q)
+            mse_star_val = rbcp_mse_star(N, Q)
 
             # --- Monte Carlo estimation ---
             mse_mc = monte_carlo_rbcp(N, M, trials)
@@ -109,7 +113,7 @@ def monte_carlo_rbcp(N, M, trials):
         Estimated MSE
     """
 
-    Q = compute_Q(M)
+    Q = compute_q(M)
 
     values = []
 

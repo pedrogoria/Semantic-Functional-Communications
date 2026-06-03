@@ -127,10 +127,7 @@ class MapDetector:
         # ------------------------------------------------------------------
         self.threshold_factor = det_cfg.get("threshold_factor", 0.5)
 
-        self.params = build_derived_system_parameters(
-            cfg,
-            threshold_factor=self.threshold_factor
-        )
+        self.params = build_derived_system_parameters(cfg)
 
         # ------------------------------------------------------------------
         # Threshold configuration
