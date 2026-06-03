@@ -1,0 +1,136 @@
+# experiments/configs/figures/fair_methods_comparison_vs_B.yaml
+
+description: "Fair comparison versus total bandwidth B: CS+FDMA, PPM+FDMA, RbCP, RbCP_time, SFC, SFC+SED"
+
+monte_carlo:
+  seed: 47
+  interactions: 30
+
+sweep:
+  B:
+    start: 5000.0
+    stop: 30000.0
+    step: 5000.0
+    include_stop: true
+
+mode:
+  run_cs_fdma: true
+  run_ppm_fdma: true
+  run_rbcp: true
+  run_rbcp_time: true
+  run_sfc: true
+  run_sfc_sed: true
+
+system:
+  S: 8
+
+  # Total system bandwidth.
+  # This value is overwritten by sweep.B.
+  B: 5000.0
+
+  # Project convention:
+  # P  = average transmit power per sensor
+  # N0 = universal noise parameter
+  P: 1.0
+  N0: 0.07
+
+  # SFC resource-grid parameters.
+  R: 12
+  L: 4
+
+  # null means uniform allocation:
+  # B_s = B / S
+  bandwidth_allocation: null
+
+signal:
+  tau: 1.0
+  Tt: 0.001
+
+  W: 10.4
+  N_override: 5
+
+  n_periods: 1
+
+  distribution: gaussian
+  peak_to_peak: 8.0
+
+  normalize_dft: true
+  normalization_target: 3.99
+  threshold_harmonics: 0.001
+
+dc:
+  enabled: false
+
+quantization:
+  force_power_of_two: false
+  rounding_mode: floor
+
+cs:
+  bits_per_measurement: 8.0
+  sparsity: 5
+  basis: dct
+  sensing_matrix: gaussian
+  random_state: null
+  normalize_dictionary_columns: true
+  store_true_representation: false
+
+ppm:
+  fs_msg: 1000.0
+
+  enforce_bandwidth_from_B_sensor: true
+
+  # Numerical-grid constraint:
+  # fs_msg <= 1 / (min_samples_per_symbol * Tt)
+  # With Tt=0.001 and min_samples_per_symbol=8:
+  # fs_msg <= 125 Hz.
+  min_samples_per_symbol: 8
+
+  pulse_type: raised_cosine
+  rolloff: 0.99
+  span: 12
+
+  pulse_width: null
+  pulse_width_fraction: 0.1
+
+  rec_pulse: 0.0
+  eps_margin: 0.001
+  interp_mode: linear
+  periodic_replicas: 10
+  clip_recovered_to_unit_interval: true
+
+  normalize_sensor_power: true
+
+channel:
+  type: awgn
+  collision_mode: sum
+  detection_mode: threshold
+  threshold_factor: 0.5
+  score_threshold: 4
+
+sed:
+  discard_invalid_periods: true
+
+
+# =============================================================================
+# Benchmark + FDMA
+# =============================================================================
+
+benchmark:
+  # Benchmark sampling rate.
+  #
+  # If omitted in the pipeline, params.W is used.
+  # Here we set it explicitly to match signal.W.
+  sampling_rate: 12
+
+  # Effective sampling-rate multiplier used in the communication budget.
+  #
+  # Use:
+  #   1.0 for fs = W
+  #   2.0 for Nyquist-like fs = 2W
+  #
+  # Keep this consistent with the intended benchmark convention.
+  effective_rate_factor: 1.0
+
+
+reproducibility:
+  seed: 47

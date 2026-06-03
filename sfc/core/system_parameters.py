@@ -81,6 +81,10 @@ from sfc.core.theory import (
     compute_slots_per_period as theory_compute_slots_per_period,
     compute_event_slots_total as theory_compute_event_slots_total,
     compute_rx_slots_total as theory_compute_rx_slots_total,
+    compute_total_energy as theory_compute_total_energy,
+    compute_symbol_energy as theory_compute_symbol_energy,
+    compute_signal_level as theory_compute_signal_level,
+    compute_default_detection_threshold as theory_compute_default_detection_threshold,
 )
 
 
@@ -98,6 +102,11 @@ class DerivedSystemParameters:
     B: float
     P: float
     N0: float
+
+    E_tot: float
+    E_s: float
+    signal_level: float
+    default_threshold: float
 
     SNR: float
     SNR_dB: float
@@ -475,7 +484,15 @@ def build_derived_system_parameters(cfg: Dict[str, Any]) -> DerivedSystemParamet
     R = int(system_cfg.get("R", 1))
     L = int(system_cfg.get("L", 1))
 
-    n_periods = int(system_cfg.get("n_periods", cfg.get("simulation", {}).get("n_periods", 1)))
+    n_periods = int(
+        signal_cfg.get(
+            "n_periods",
+            system_cfg.get(
+                "n_periods",
+                cfg.get("simulation", {}).get("n_periods", 1)
+            )
+        )
+    )
 
     # -------------------------------------------------------------------------
     # Bandwidth allocation
@@ -506,6 +523,37 @@ def build_derived_system_parameters(cfg: Dict[str, Any]) -> DerivedSystemParamet
 
     SNR_per_sensor = P / (B_per_sensor * N0)
     SNR_per_sensor_dB = _safe_log10(SNR_per_sensor)
+
+    # -------------------------------------------------------------------------
+    # Energy / amplitude quantities used by SFC physical channel and detector
+    # -------------------------------------------------------------------------
+    threshold_factor = float(
+        cfg.get("channel", {}).get("threshold_factor", 0.5)
+    )
+
+    E_tot = theory_compute_total_energy(
+        P=P,
+        tau=tau,
+    )
+
+    E_s = theory_compute_symbol_energy(
+        P=P,
+        tau=tau,
+        L=L,
+    )
+
+    signal_level = theory_compute_signal_level(
+        P=P,
+        tau=tau,
+        L=L,
+    )
+
+    default_threshold = theory_compute_default_detection_threshold(
+        P=P,
+        tau=tau,
+        L=L,
+        threshold_factor=threshold_factor,
+    )
 
     # -------------------------------------------------------------------------
     # Harmonics
@@ -565,6 +613,10 @@ def build_derived_system_parameters(cfg: Dict[str, Any]) -> DerivedSystemParamet
         B=B,
         P=P,
         N0=N0,
+        E_tot=E_tot,
+        E_s=E_s,
+        signal_level=signal_level,
+        default_threshold=default_threshold,
         SNR=SNR_total,
         SNR_dB=SNR_total_dB,
         SNR_per_sensor=SNR_per_sensor,

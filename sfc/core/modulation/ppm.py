@@ -6,7 +6,7 @@ Pulse-Position Modulation (PPM) core.
 Purpose
 -------
 This module implements a reusable, MAC-agnostic PPM modem that is compatible
-with the new modulation-layer architecture:
+with the modulation-layer architecture:
 
     sfc/core/modulation/
 
@@ -21,44 +21,22 @@ Design principles
 3. MAC-agnostic:
    This module generates one waveform per sensor and per period, but it does
    NOT decide how multiple sensors share the medium. MAC-layer combination
-   belongs elsewhere (e.g. SFC / TDMA / FDMA / OFDM).
+   belongs elsewhere.
 
 4. Pulse-shaping ready:
    The transmit pulse is obtained through:
-       sfc.core.modulation.pulse_shaping
 
-   so that pulse-shaping choices (e.g. rectangular, raised cosine) can be
-   reused by other modulation schemes and even by future SFC PHY variants.
+       sfc.core.modulation.pulse_shaping
 
 Tensor conventions
 ------------------
-Continuous-time signal tensors use the canonical shape:
+Continuous-time signal tensors use:
 
     (time, periods, sensors)
 
 Symbol-domain quantities use:
 
     (symbols, periods, sensors)
-
-MATLAB-reference correspondence
--------------------------------
-This implementation follows the same conceptual steps as the provided MATLAB
-reference, while generalizing them to:
-- multiple sensors
-- multiple periods
-- tensorized handling
-- separation between modulation and MAC
-- reusable pulse-shaping
-
-Current assumptions
--------------------
-- The time grid t corresponds to ONE signal period, typically [0, tau).
-- The same time grid is reused for all periods in the tensor.
-- The PPM message is normalized into the open interval:
-      [eps_margin, 1 - eps_margin]
-  before modulation.
-- Demodulation returns recovered normalized samples and, when possible,
-  denormalized samples and continuous-time reconstruction.
 
 Notes
 -----
@@ -69,7 +47,6 @@ Notes
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -102,40 +79,32 @@ class PPMCore(ModulationCoreBase):
         Effective pulse width in seconds.
 
     rec_pulse : float, optional
-        Recovery / guard parameter following the MATLAB reference.
-        Default is 0.
+        Recovery / guard parameter.
 
     pulse_type : str, optional
         Pulse-shaping type.
-        Supported values depend on pulse_shaping.py, but the intended main
-        options are:
-            - "rect"
-            - "raised_cosine"
 
     rolloff : float, optional
-        Raised-cosine rolloff factor, typically in [0, 1].
-        Used when pulse_type = "raised_cosine".
+        Raised-cosine rolloff factor.
 
     span : int, optional
         Raised-cosine span in symbols.
-        Used when pulse_type = "raised_cosine".
 
     eps_margin : float, optional
-        Margin used when normalizing the message into the open interval:
+        Margin used when normalizing the message into:
+
             [eps_margin, 1 - eps_margin]
 
     interp_mode : str, optional
         Sampling interpolation mode.
-        Current implementation uses linear interpolation through numpy.
 
     periodic_replicas : int, optional
-        Number of period replicas used on each side when reconstructing the
-        continuous-time waveform through periodic sinc reconstruction.
+        Number of period replicas used during periodic sinc reconstruction.
 
     clip_recovered_to_unit_interval : bool, optional
         Whether to clip recovered normalized samples into:
+
             [eps_margin, 1 - eps_margin]
-        Default is True.
     """
 
     def __init__(
@@ -180,6 +149,12 @@ class PPMCore(ModulationCoreBase):
         self.pulse_width = float(pulse_width)
         self.rec_pulse = float(rec_pulse)
 
+        if self.Tc - (1.0 + self.rec_pulse) * self.pulse_width <= 0:
+            raise ValueError(
+                "Invalid PPM geometry: "
+                "Tc - (1 + rec_pulse) * pulse_width must be positive."
+            )
+
         self.pulse_type = str(pulse_type)
         self.rolloff = float(rolloff)
         self.span = int(span)
@@ -202,23 +177,6 @@ class PPMCore(ModulationCoreBase):
         Normalize each (period, sensor) waveform into:
 
             [eps_margin, 1 - eps_margin]
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Signal tensor with shape:
-                (time, periods, sensors)
-
-        Returns
-        -------
-        tuple
-            (x_normalized, normalization_state)
-
-        Notes
-        -----
-        The normalization is performed independently for each (period, sensor)
-        pair, preserving the MATLAB-reference spirit while extending naturally
-        to multiple sensors and periods.
         """
 
         _ = kwargs
@@ -227,8 +185,8 @@ class PPMCore(ModulationCoreBase):
 
         _, n_periods, n_sensors = x.shape
 
-        x_min = np.min(x, axis=0)  # shape: (periods, sensors)
-        x_max = np.max(x, axis=0)  # shape: (periods, sensors)
+        x_min = np.min(x, axis=0)
+        x_max = np.max(x, axis=0)
         denom = x_max - x_min
 
         x_norm = np.empty_like(x, dtype=float)
@@ -236,7 +194,6 @@ class PPMCore(ModulationCoreBase):
         for p in range(n_periods):
             for s in range(n_sensors):
                 if np.isclose(denom[p, s], 0.0):
-                    # Degenerate constant signal: place it at the center
                     x_norm[:, p, s] = 0.5
                 else:
                     x_01 = (x[:, p, s] - x_min[p, s]) / denom[p, s]
@@ -264,21 +221,6 @@ class PPMCore(ModulationCoreBase):
     ) -> np.ndarray:
         """
         Invert the normalization defined in normalize_message(...).
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Normalized samples with shape:
-                (symbols, periods, sensors)
-            or another tensor compatible with the same (period, sensor) metadata.
-
-        normalization_state : NormalizationState
-            State produced by normalize_message(...)
-
-        Returns
-        -------
-        np.ndarray
-            Denormalized tensor.
         """
 
         _ = kwargs
@@ -290,8 +232,6 @@ class PPMCore(ModulationCoreBase):
         x_min = np.asarray(normalization_state.metadata["x_min"], dtype=float)
         x_max = np.asarray(normalization_state.metadata["x_max"], dtype=float)
 
-        # Broadcast over the first axis (symbols or time)
-        # x_min/x_max have shape (periods, sensors)
         x_denorm = np.empty_like(x, dtype=float)
 
         denom = 1.0 - 2.0 * normalization_state.eps_margin
@@ -319,26 +259,6 @@ class PPMCore(ModulationCoreBase):
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Sample the normalized continuous-time message at the symbol rate fc.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Input tensor with shape:
-                (time, periods, sensors)
-
-        t : np.ndarray
-            Continuous-time grid for one period.
-
-        Returns
-        -------
-        tuple
-            (x_sampled, symbol_times)
-
-            x_sampled shape:
-                (symbols, periods, sensors)
-
-            symbol_times shape:
-                (symbols,)
         """
 
         _ = kwargs
@@ -351,6 +271,13 @@ class PPMCore(ModulationCoreBase):
         tau = _infer_tau(t, dt)
 
         symbol_times = np.arange(0.0, tau, self.Tc, dtype=float)
+
+        # Numerical guard:
+        # Keep only symbols that are not clearly beyond the available grid.
+        # This avoids edge symbols caused by floating point roundoff when
+        # self.Tc does not divide tau exactly.
+        symbol_times = symbol_times[symbol_times < tau - 0.5 * dt + self.Tc]
+
         n_symbols = len(symbol_times)
         _, n_periods, n_sensors = x.shape
 
@@ -381,22 +308,6 @@ class PPMCore(ModulationCoreBase):
 
             t_pulse = t0 + pulse_width/2
                       + x_sampled * (Tc - (1 + rec_pulse) * pulse_width)
-
-        Parameters
-        ----------
-        x_sampled : np.ndarray
-            Normalized symbol-domain message with shape:
-                (symbols, periods, sensors)
-
-        symbol_times : np.ndarray
-            Symbol reference times (typically symbol starts), shape:
-                (symbols,)
-
-        Returns
-        -------
-        np.ndarray
-            Pulse positions with shape:
-                (symbols, periods, sensors)
         """
 
         _ = kwargs
@@ -413,7 +324,8 @@ class PPMCore(ModulationCoreBase):
         displacement_scale = self.Tc - (1.0 + self.rec_pulse) * self.pulse_width
         if displacement_scale <= 0:
             raise ValueError(
-                "Invalid PPM geometry: Tc - (1 + rec_pulse) * pulse_width must be positive."
+                "Invalid PPM geometry: "
+                "Tc - (1 + rec_pulse) * pulse_width must be positive."
             )
 
         pulse_positions = (
@@ -436,43 +348,8 @@ class PPMCore(ModulationCoreBase):
     ) -> ModulationResult:
         """
         Modulate a continuous-time message tensor into a PPM waveform tensor.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Input continuous-time signal.
-            Supported shapes:
-                (time,)
-                (time, periods)
-                (time, periods, sensors)
-
-        t : np.ndarray
-            Time grid for one period.
-
-        Returns
-        -------
-        ModulationResult
-            Structured modulation outputs.
-
-        Main outputs
-        ------------
-        - tx_waveform:
-            (time, periods, sensors)
-
-        - sampled_message:
-            (symbols, periods, sensors)
-
-        - symbol_times:
-            (symbols,)
-
-        - aux["pulse_positions"]:
-            (symbols, periods, sensors)
-
-        - aux["tx_pulse"]:
-            1D pulse-shaping filter
         """
 
-        # Convert to canonical tensor form
         x = ensure_3d_signal_tensor(x).astype(float, copy=False)
         t = ensure_1d_time_vector(t)
         validate_time_axis_length(x, t)
@@ -480,16 +357,10 @@ class PPMCore(ModulationCoreBase):
         dt = _infer_dt(t)
         tau = _infer_tau(t, dt)
 
-        # 1) Normalize message into the admissible PPM interval
         x_norm, norm_state = self.normalize_message(x)
-
-        # 2) Sample message at fc
         x_sampled, symbol_times = self.sample_message(x_norm, t)
-
-        # 3) Compute pulse positions
         pulse_positions = self.compute_pulse_positions(x_sampled, symbol_times)
 
-        # 4) Build transmit pulse
         tx_pulse = build_tx_pulse(
             pulse_type=self.pulse_type,
             pulse_width=self.pulse_width,
@@ -499,7 +370,6 @@ class PPMCore(ModulationCoreBase):
             normalize_energy=True,
         )
 
-        # 5) Build waveform per (period, sensor)
         tx_waveform = self._build_ppm_waveform_tensor(
             pulse_positions=pulse_positions,
             tx_pulse=tx_pulse,
@@ -532,24 +402,6 @@ class PPMCore(ModulationCoreBase):
     ) -> np.ndarray:
         """
         Build the continuous-time PPM waveform tensor from pulse positions.
-
-        Parameters
-        ----------
-        pulse_positions : np.ndarray
-            Shape:
-                (symbols, periods, sensors)
-
-        tx_pulse : np.ndarray
-            1D transmit pulse.
-
-        t : np.ndarray
-            Time grid for one period.
-
-        Returns
-        -------
-        np.ndarray
-            Waveform tensor with shape:
-                (time, periods, sensors)
         """
 
         t = np.asarray(t, dtype=float)
@@ -567,7 +419,6 @@ class PPMCore(ModulationCoreBase):
                 for k in range(n_symbols):
                     t_pulse = pulse_positions[k, p, s]
 
-                    # Place a discrete impulse at the closest time-grid index
                     idx = int(np.argmin(np.abs(t - t_pulse)))
 
                     temp = np.zeros(n_time, dtype=float)
@@ -593,36 +444,11 @@ class PPMCore(ModulationCoreBase):
         """
         Demodulate a received PPM waveform tensor.
 
-        Parameters
-        ----------
-        y : np.ndarray
-            Received waveform tensor.
-            Supported shapes:
-                (time,)
-                (time, periods)
-                (time, periods, sensors)
-
-        t : np.ndarray
-            Time grid for one period.
-
-        modulation_result : ModulationResult, optional
-            Optional transmitter-side metadata.
-            If supplied, it is used to:
-            - recover symbol_times
-            - recover pulse-shaping parameters
-            - invert normalization
-            - optionally reconstruct the continuous-time signal
-
-        Keyword arguments
-        -----------------
-        reconstruct_continuous : bool, optional
-            If True and modulation_result is available, also reconstruct the
-            continuous-time signal. Default is True.
-
-        Returns
-        -------
-        DemodulationResult
-            Structured demodulation outputs.
+        Robustness note
+        ---------------
+        If a symbol interval is empty because of floating-point/grid mismatch
+        at the edge of the period, the demodulator falls back to the nearest
+        available time-grid sample instead of failing immediately.
         """
 
         reconstruct_cont = kwargs.get("reconstruct_continuous", True)
@@ -634,7 +460,6 @@ class PPMCore(ModulationCoreBase):
         dt = _infer_dt(t)
         tau = _infer_tau(t, dt)
 
-        # Obtain pulse/matched filter and symbol times
         if modulation_result is not None and modulation_result.aux.get("tx_pulse") is not None:
             tx_pulse = np.asarray(modulation_result.aux["tx_pulse"], dtype=float)
         else:
@@ -653,6 +478,7 @@ class PPMCore(ModulationCoreBase):
             symbol_times = np.asarray(modulation_result.symbol_times, dtype=float)
         else:
             symbol_times = np.arange(0.0, tau, self.Tc, dtype=float)
+            symbol_times = symbol_times[symbol_times < tau - 0.5 * dt + self.Tc]
 
         n_symbols = len(symbol_times)
         _, n_periods, n_sensors = y.shape
@@ -664,7 +490,8 @@ class PPMCore(ModulationCoreBase):
         displacement_scale = self.Tc - (1.0 + self.rec_pulse) * self.pulse_width
         if displacement_scale <= 0:
             raise ValueError(
-                "Invalid PPM geometry: Tc - (1 + rec_pulse) * pulse_width must be positive."
+                "Invalid PPM geometry: "
+                "Tc - (1 + rec_pulse) * pulse_width must be positive."
             )
 
         for p in range(n_periods):
@@ -676,12 +503,21 @@ class PPMCore(ModulationCoreBase):
                     idx_seg = (t >= t0) & (t < t0 + self.Tc)
 
                     if not np.any(idx_seg):
-                        raise ValueError(
-                            f"Empty symbol interval during demodulation for symbol k={k}."
-                        )
+                        # Robust fallback for edge symbols affected by
+                        # floating-point/grid mismatch.
+                        idx_nearest = int(np.argmin(np.abs(t - t0)))
+                        idx_nearest = max(0, min(idx_nearest, len(t) - 1))
+
+                        idx_seg = np.zeros_like(t, dtype=bool)
+                        idx_seg[idx_nearest] = True
 
                     z_seg = z[idx_seg]
                     t_seg = t[idx_seg]
+
+                    if z_seg.size == 0:
+                        raise ValueError(
+                            f"Empty symbol interval during demodulation for symbol k={k}."
+                        )
 
                     imax = int(np.argmax(z_seg))
                     t_peak = t_seg[imax]
@@ -698,7 +534,6 @@ class PPMCore(ModulationCoreBase):
 
                     recovered_norm[k, p, s] = xk
 
-        # Denormalize recovered samples if possible
         if modulation_result is not None:
             recovered_samples = self.denormalize_message(
                 recovered_norm,
@@ -745,35 +580,8 @@ class PPMCore(ModulationCoreBase):
         **kwargs
     ) -> np.ndarray:
         """
-        Reconstruct a continuous-time waveform from recovered symbol-domain samples
-        using periodic sinc reconstruction.
-
-        Parameters
-        ----------
-        recovered_samples : np.ndarray
-            Denormalized recovered symbol-domain samples with shape:
-                (symbols, periods, sensors)
-
-        t : np.ndarray
-            Target time grid for one period.
-
-        modulation_result : ModulationResult, optional
-            Used to recover symbol_times if available.
-
-        Returns
-        -------
-        np.ndarray
-            Continuous-time reconstruction with shape:
-                (time, periods, sensors)
-
-        Notes
-        -----
-        This follows the same conceptual reconstruction as the MATLAB reference,
-        but in a simpler and more reusable tensor form:
-
-            x_rec(t) ≈ sum_m sum_k x[k] sinc((t - (t_k + m*tau)) / Tc)
-
-        where m spans a finite number of period replicas.
+        Reconstruct a continuous-time waveform from recovered symbol-domain
+        samples using periodic sinc reconstruction.
         """
 
         _ = kwargs
@@ -792,6 +600,7 @@ class PPMCore(ModulationCoreBase):
             symbol_times = np.asarray(modulation_result.symbol_times, dtype=float)
         else:
             symbol_times = np.arange(0.0, tau, self.Tc, dtype=float)
+            symbol_times = symbol_times[symbol_times < tau - 0.5 * dt + self.Tc]
 
         n_symbols, n_periods, n_sensors = recovered_samples.shape
         if len(symbol_times) != n_symbols:
@@ -849,9 +658,11 @@ def _infer_tau(t: np.ndarray, dt: float) -> float:
     Infer the signal period from a one-period grid.
 
     If the grid is:
+
         t = [0, dt, 2dt, ..., tau-dt]
 
     then:
+
         tau = t[-1] + dt
     """
 

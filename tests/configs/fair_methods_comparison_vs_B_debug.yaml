@@ -1,0 +1,108 @@
+# experiments/configs/debug/fair_methods_comparison_vs_B_debug.yaml# experiments/configs/debug/fair_methods_comparisondescription: "Debug config for fair comparison: CS+FDMA vs PPM+FDMA vs SFC over B"
+
+monte_carlo:
+  seed: 47
+  interactions: 3
+
+sweep:
+  B:
+    start: 1000.0
+    stop: 3000.0
+    step: 1000.0
+    include_stop: true
+
+mode:
+  run_cs_fdma: true
+  run_ppm_fdma: true
+  run_sfc: true
+  semantic_error_detection: false
+
+system:
+  S: 2
+
+  # Total system bandwidth. Overwritten by sweep.B.
+  B: 1000.0
+
+  # Project convention:
+  # P = average transmit power per sensor
+  # N0 = universal noise parameter
+  P: 1.0
+  N0: 0.001
+
+  # SFC grid parameters
+  R: 12
+  L: 4
+
+  # null means uniform allocation:
+  # B_s = B / S
+  bandwidth_allocation: null
+
+signal:
+  tau: 1.0
+  Tt: 0.001
+  W: 10.0
+
+  # Optional fixed N for faster/debuggable behavior.
+  # If null/absent, N = compute_N(W, tau)
+  N_override: 5
+
+  n_periods: 1
+
+  distribution: gaussian
+  peak_to_peak: 8.0
+
+  normalize_dft: true
+  normalization_target: 3.99
+  threshold_harmonics: 0.001
+
+dc:
+  enabled: false
+
+quantization:
+  force_power_of_two: false
+  rounding_mode: floor
+
+cs:
+  bits_per_measurement: 8.0
+  sparsity: 5
+  basis: dct
+  sensing_matrix: gaussian
+
+  # If null, the pipeline derives deterministic per-trial random states
+  # from monte_carlo.seed.
+  random_state: null
+
+  normalize_dictionary_columns: true
+  store_true_representation: false
+
+ppm:
+  # Can be a number or "auto".
+  # The pipeline clips this according to B_s:
+  # fs_msg <= 2 B_s / (1 + rolloff) for raised-cosine-like pulses.
+  fs_msg: 1000.0
+
+  enforce_bandwidth_from_B_sensor: true
+
+  pulse_type: raised_cosine
+  rolloff: 0.99
+  span: 12
+
+  # If pulse_width is null, pulse_width = pulse_width_fraction / fs_msg.
+  pulse_width: null
+  pulse_width_fraction: 0.1
+
+  rec_pulse: 0.0
+  eps_margin: 0.001
+  interp_mode: linear
+  periodic_replicas: 10
+  clip_recovered_to_unit_interval: true
+
+  normalize_sensor_power: true
+
+channel:
+  type: awgn
+  collision_mode: sum
+  detection_mode: threshold
+  threshold_factor: 0.5
+  score_threshold: 4
+

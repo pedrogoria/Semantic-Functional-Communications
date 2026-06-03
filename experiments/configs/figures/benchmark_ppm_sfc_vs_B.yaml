@@ -58,12 +58,12 @@ power_model:
   #    - keep N0 fixed
   #    - derive SNR(B) = P / (B * N0)
   #
-  # 2) "fixed_P_and_SNR"
+  # 2) "fixed_sensor_SNR_and_N0"
   #    - keep P fixed
   #    - keep SNR fixed
   #    - derive N0(B) = P / (B * SNR)
   #
-  mode: "fixed_P_and_SNR"
+  mode: "fixed_sensor_SNR_and_N0"
 
 
 # ----------------------------------------------------------------------

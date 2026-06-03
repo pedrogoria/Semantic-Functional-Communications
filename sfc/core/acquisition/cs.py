@@ -56,7 +56,7 @@ before later extending to other stacks if desired.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -123,8 +123,15 @@ class CSAcquisitionCore(AcquisitionCoreBase):
 
         if n_measurements < 1:
             raise ValueError("n_measurements must be >= 1.")
+
         if sparsity < 1:
             raise ValueError("sparsity must be >= 1.")
+
+        if sparsity > n_measurements:
+            raise ValueError(
+                "sparsity must be <= n_measurements for stable OMP reconstruction. "
+                f"Got sparsity={sparsity}, n_measurements={n_measurements}."
+            )
 
         self.n_measurements = int(n_measurements)
         self.sparsity = int(sparsity)
@@ -401,21 +408,23 @@ def _omp(
     A: np.ndarray,
     y: np.ndarray,
     sparsity: int,
-    normalize_columns: bool = True
+    normalize_columns: bool = True,
+    tolerance: float = 1e-12
 ):
     """
     Orthogonal Matching Pursuit.
 
     Solves approximately:
+
         y = A * alpha
 
     Parameters
     ----------
     A : np.ndarray
-        Dictionary matrix of shape (M, N)
+        Dictionary matrix of shape (M, N).
 
     y : np.ndarray
-        Measurement vector of shape (M,)
+        Measurement vector of shape (M,).
 
     sparsity : int
         Max number of selected atoms.
@@ -423,6 +432,9 @@ def _omp(
     normalize_columns : bool
         If True, normalize dictionary columns for atom selection. The least-squares
         fit is still performed on the original selected columns.
+
+    tolerance : float
+        Stopping tolerance for residual norm and maximum correlation.
 
     Returns
     -------
@@ -434,8 +446,18 @@ def _omp(
     y = np.asarray(y, dtype=float).reshape(-1)
 
     M, N = A.shape
+
     if y.shape[0] != M:
         raise ValueError(f"OMP mismatch: A.shape[0]={M}, len(y)={len(y)}")
+
+    if sparsity < 1:
+        raise ValueError("sparsity must be >= 1.")
+
+    if sparsity > M:
+        raise ValueError(
+            "sparsity must be <= number of measurements for stable OMP. "
+            f"Got sparsity={sparsity}, measurements={M}."
+        )
 
     support: List[int] = []
     residual = y.copy()
@@ -445,15 +467,23 @@ def _omp(
         col_norms[col_norms == 0.0] = 1.0
         A_sel = A / col_norms
     else:
-        col_norms = np.ones(N, dtype=float)
         A_sel = A
 
     for _ in range(min(sparsity, N)):
+        residual_norm = np.linalg.norm(residual)
+
+        if residual_norm < tolerance:
+            break
+
         correlations = np.abs(A_sel.T @ residual)
 
-        # avoid re-selecting an already selected atom
         if support:
             correlations[np.array(support, dtype=int)] = -np.inf
+
+        max_corr = np.max(correlations)
+
+        if not np.isfinite(max_corr) or max_corr < tolerance:
+            break
 
         j = int(np.argmax(correlations))
 
@@ -466,9 +496,6 @@ def _omp(
         coeffs, _, _, _ = np.linalg.lstsq(As, y, rcond=None)
         residual = y - As @ coeffs
 
-        if np.linalg.norm(residual) < 1e-12:
-            break
-
     alpha_hat = np.zeros(N, dtype=float)
 
     if support:
@@ -477,6 +504,7 @@ def _omp(
         alpha_hat[np.array(support, dtype=int)] = coeffs
 
     residual_norm = float(np.linalg.norm(y - A @ alpha_hat))
+
     return alpha_hat, support, residual_norm
 
 

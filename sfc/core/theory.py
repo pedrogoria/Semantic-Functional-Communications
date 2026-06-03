@@ -382,7 +382,7 @@ def compute_M_rbcp_per_sensor(
     )
 
     return np.array([
-        compute_M_rbcp_single_sensor(
+        int(compute_M_rbcp_single_sensor(
             W=W,
             tau=tau,
             B_sensor=B_s,
@@ -390,9 +390,9 @@ def compute_M_rbcp_per_sensor(
             N0=N0,
             force_power_of_two=force_power_of_two,
             rounding_mode=rounding_mode,
-        )
+        ))
         for B_s in B_per_sensor
-    ], dtype=int)
+    ], dtype=object)
 
 
 def compute_M_rbcp(
@@ -497,7 +497,7 @@ def compute_benchmark_M_per_sensor(
     )
 
     return np.array([
-        compute_benchmark_M_single_sensor(
+        int(compute_benchmark_M_single_sensor(
             tau=tau,
             B_sensor=B_s,
             P=P,
@@ -505,9 +505,9 @@ def compute_benchmark_M_per_sensor(
             sampling_rate=sampling_rate,
             force_power_of_two=force_power_of_two,
             rounding_mode=rounding_mode,
-        )
+        ))
         for B_s in B_per_sensor
-    ], dtype=int)
+    ], dtype=object)
 
 
 def compute_benchmark_bits_per_sample_single_sensor(

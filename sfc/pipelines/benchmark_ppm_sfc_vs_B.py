@@ -488,15 +488,27 @@ def _generate_common_bandlimited_signals(cfg, rng, params, N):
     else:
         raise ValueError("Invalid distribution")
 
-    # Use the same periodic low-pass logic used in the rest of the project
-    W_eff = 2.0 * N / tau
+    # Use the configured source bandwidth W.
+    # IMPORTANT:
+    #   W is a signal/source parameter from the YAML.
+    #   Do NOT redefine W from N.
+    #
+    # The relation between W and N should be handled when deriving N, e.g.:
+    #   N = floor(W * tau / 2)
+    #
+    # But once W is configured, filtering must use W directly.
+    W_filter = float(cfg["signal"].get("W", params.W))
+
+    if W_filter <= 0:
+        raise ValueError("signal.W must be positive.")
+
     x_filtered = np.zeros_like(x_raw)
 
     for p in range(n_periods):
         for s in range(S):
             x_filtered[:, p, s] = filter_periodic(
                 x_raw[:, p, s],
-                W_eff,
+                W_filter,
                 Tt,
                 tau
             )

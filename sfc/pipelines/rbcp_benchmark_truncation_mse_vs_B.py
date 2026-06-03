@@ -20,11 +20,15 @@ Important simplifications
 
 2. Figure-5-style power model:
    Keep per-sensor SNR_dB fixed and N0 fixed, derive P(B) from:
+
        SNR_s = P / (B_s * N0)
+
    Therefore:
+
        P(B) = SNR_s * B_s * N0
 
    For uniform bandwidth allocation:
+
        B_s = B / S
 
    With a scalar P shared by all sensors, fixed per-sensor SNR requires
@@ -33,13 +37,16 @@ Important simplifications
 
 3. Benchmark:
    Treated analytically in absolute MSE:
+
        MSE = (peak_to_peak^2) / (12 * M^2)
 
 4. RbCP:
    Evaluated by Monte Carlo signal generation and reconstruction using:
-       ta/tb -> quantization -> signal reconstruction
+
+       signal -> ta/tb -> quantization -> signal reconstruction
 
 5. Truncation policies are compared explicitly using the YAML block:
+
    comparison:
      benchmark:
        free_integer:
@@ -55,9 +62,24 @@ Important simplifications
        power_of_two:
          force_power_of_two: true
          rounding_mode: "floor"
+
+6. IMPORTANT SOURCE-BANDWIDTH CONVENTION:
+   The source signal is filtered using the configured source bandwidth:
+
+       signal.W
+
+   The pipeline must NOT redefine the filtering bandwidth from N using:
+
+       W_eff = 2 * N / tau
+
+   The role of N is to define the number of representation harmonics. The role
+   of W is to define the source-signal bandwidth used by the signal filter.
 """
 
+from __future__ import annotations
+
 import copy
+
 import numpy as np
 import pandas as pd
 
@@ -68,13 +90,10 @@ from sfc.core.quantization import quantize_ta_tb
 from sfc.core.reconstruction import recover_signal
 from sfc.core.system_parameters import (
     build_derived_system_parameters,
-)
-
-from sfc.core.theory import (
-    compute_snr_linear,
     compute_benchmark_M_per_sensor,
     compute_M_rbcp,
 )
+from sfc.core.theory import compute_snr_linear
 
 
 # =============================================================================
@@ -96,6 +115,8 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         DataFrame with columns:
         - B
         - P_derived
+        - SNR_total_dB_derived
+        - SNR_sensor_dB_target
         - M_benchmark_free
         - M_benchmark_pow2
         - M_rbcp_free
@@ -119,7 +140,15 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
     print(f"[INFO] Trials per B = {cfg['monte_carlo']['interactions']}")
 
     b_cfg = cfg["sweep"]["B"]
-    b_values = np.arange(b_cfg["start"], b_cfg["stop"], b_cfg["step"])
+    b_start = float(b_cfg["start"])
+    b_stop = float(b_cfg["stop"])
+    b_step = float(b_cfg["step"])
+    include_stop = bool(b_cfg.get("include_stop", True))
+
+    if include_stop:
+        b_values = np.arange(b_start, b_stop + 0.5 * b_step, b_step)
+    else:
+        b_values = np.arange(b_start, b_stop, b_step)
 
     results = []
 
@@ -128,18 +157,18 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
 
         # ---------------------------------------------------------------------
         # Figure-5-style power model:
-        # keep SNR fixed and N0 fixed, derive P(B)
+        # keep per-sensor SNR fixed and N0 fixed, derive P(B).
         # ---------------------------------------------------------------------
         cfg_B["system"]["B"] = float(B)
         cfg_B["system"]["P"] = _derive_power_from_fixed_sensor_snr_and_n0(cfg_B)
 
         params = build_derived_system_parameters(cfg_B)
 
-        N = cfg_B["signal"].get("N_override", params.N)
-        n_trials = cfg_B["monte_carlo"]["interactions"]
+        N = int(cfg_B["signal"].get("N_override", params.N))
+        n_trials = int(cfg_B["monte_carlo"]["interactions"])
 
         # ---------------------------------------------------------------------
-        # Comparison policies
+        # Comparison policies.
         # ---------------------------------------------------------------------
         bench_free_cfg = cfg_B["comparison"]["benchmark"]["free_integer"]
         bench_pow2_cfg = cfg_B["comparison"]["benchmark"]["power_of_two"]
@@ -148,22 +177,20 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         rbcp_pow2_cfg = cfg_B["comparison"]["rbcp"]["power_of_two"]
 
         # ---------------------------------------------------------------------
-        # Benchmark M per sensor (from core)
+        # Benchmark M per sensor.
         # ---------------------------------------------------------------------
         benchmark_cfg = cfg_B.get("benchmark", {})
-        sampling_rate = benchmark_cfg.get("sampling_rate", params.W)
-        effective_rate_factor = benchmark_cfg.get("effective_rate_factor", 1.0)
+        sampling_rate = float(benchmark_cfg.get("sampling_rate", params.W))
+        effective_rate_factor = float(benchmark_cfg.get("effective_rate_factor", 1.0))
+        effective_sampling_rate = effective_rate_factor * sampling_rate
 
-        # ---------------------------------------------------------------------
-        # Benchmark M per sensor (CORRECTED: use per-sensor SNR)
-        # ---------------------------------------------------------------------
         M_benchmark_free_vec = compute_benchmark_M_per_sensor(
             S=params.S,
             tau=params.tau,
             B=params.B,
             P=params.P,
-            N0=cfg_B["system"]["N0"],
-            sampling_rate=effective_rate_factor * sampling_rate,
+            N0=params.N0,
+            sampling_rate=effective_sampling_rate,
             bandwidth_allocation=params.bandwidth_allocation,
             force_power_of_two=bench_free_cfg["force_power_of_two"],
             rounding_mode=bench_free_cfg["rounding_mode"],
@@ -174,20 +201,18 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
             tau=params.tau,
             B=params.B,
             P=params.P,
-            N0=cfg_B["system"]["N0"],
-            sampling_rate=effective_rate_factor * sampling_rate,
+            N0=params.N0,
+            sampling_rate=effective_sampling_rate,
             bandwidth_allocation=params.bandwidth_allocation,
             force_power_of_two=bench_pow2_cfg["force_power_of_two"],
             rounding_mode=bench_pow2_cfg["rounding_mode"],
         )
 
-        # Store one scalar diagnostic value for each policy.
-        # If bandwidth allocation is equal, min = mean = max anyway.
-        M_benchmark_free = int(np.min(M_benchmark_free_vec))
-        M_benchmark_pow2 = int(np.min(M_benchmark_pow2_vec))
+        M_benchmark_free = _safe_min_int(M_benchmark_free_vec)
+        M_benchmark_pow2 = _safe_min_int(M_benchmark_pow2_vec)
 
         # ---------------------------------------------------------------------
-        # RbCP M (from core)
+        # RbCP M.
         # ---------------------------------------------------------------------
         M_rbcp_free = compute_M_rbcp(
             S=params.S,
@@ -195,7 +220,7 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
             tau=params.tau,
             B=params.B,
             P=params.P,
-            N0=cfg_B["system"]["N0"],
+            N0=params.N0,
             bandwidth_allocation=params.bandwidth_allocation,
             force_power_of_two=rbcp_free_cfg["force_power_of_two"],
             rounding_mode=rbcp_free_cfg["rounding_mode"],
@@ -207,7 +232,7 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
             tau=params.tau,
             B=params.B,
             P=params.P,
-            N0=cfg_B["system"]["N0"],
+            N0=params.N0,
             bandwidth_allocation=params.bandwidth_allocation,
             force_power_of_two=rbcp_pow2_cfg["force_power_of_two"],
             rounding_mode=rbcp_pow2_cfg["rounding_mode"],
@@ -215,15 +240,17 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
 
         print("\n[INFO] ------------------------------------------------------------")
         print(f"[INFO] B = {B:.1f} Hz")
-        print(f"[INFO] P(B) = {cfg_B['system']['P']:.6e}")
+        print(f"[INFO] P(B) = {params.P:.6e}")
         print(
             f"[INFO] S = {params.S} | R = {params.R} | L = {params.L} | "
             f"tau = {params.tau:.3f} s | W = {params.W:.3f} Hz | N = {N}"
         )
-        print(f"[INFO] SNR_dB = {params.SNR_dB:.1f} | SNR = {params.SNR:.4e}")
-        print(f"[INFO] N0 = {cfg_B['system']['N0']:.6e}")
+        print(f"[INFO] SNR_total_dB = {params.SNR_dB:.6f}")
+        print(f"[INFO] SNR_per_sensor_dB = {params.SNR_per_sensor_dB}")
+        print(f"[INFO] N0 = {params.N0:.6e}")
         print(f"[INFO] bandwidth_allocation = {params.bandwidth_allocation}")
         print(f"[INFO] B_per_sensor = {params.B_per_sensor}")
+        print(f"[INFO] effective_sampling_rate = {effective_sampling_rate:.6e}")
 
         print(f"[INFO] M_benchmark_free_vec = {M_benchmark_free_vec}")
         print(f"[INFO] M_benchmark_pow2_vec = {M_benchmark_pow2_vec}")
@@ -231,7 +258,7 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         print(f"[INFO] M_rbcp_pow2 = {M_rbcp_pow2}")
 
         # ---------------------------------------------------------------------
-        # Benchmark MSEs (analytical, once per B)
+        # Benchmark MSEs: analytical, once per B.
         # ---------------------------------------------------------------------
         mse_benchmark_free = _run_benchmark_branch(
             cfg=cfg_B,
@@ -244,7 +271,7 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         )
 
         # ---------------------------------------------------------------------
-        # Monte Carlo for RbCP only
+        # Monte Carlo for RbCP.
         # ---------------------------------------------------------------------
         mse_rbcp_free_sum = 0.0
         mse_rbcp_pow2_sum = 0.0
@@ -273,12 +300,14 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         print(f"[INFO] mse_rbcp_pow2 = {mse_rbcp_pow2:.6e}")
 
         results.append({
-            "B": B,
-            "P_derived": cfg_B["system"]["P"],
-            "M_benchmark_free": M_benchmark_free,
-            "M_benchmark_pow2": M_benchmark_pow2,
-            "M_rbcp_free": M_rbcp_free,
-            "M_rbcp_pow2": M_rbcp_pow2,
+            "B": float(B),
+            "P_derived": float(params.P),
+            "SNR_total_dB_derived": float(params.SNR_dB),
+            "SNR_sensor_dB_target": float(cfg_B["system"]["SNR_dB"]),
+            "M_benchmark_free": _safe_table_value(M_benchmark_free),
+            "M_benchmark_pow2": _safe_table_value(M_benchmark_pow2),
+            "M_rbcp_free": _safe_table_value(M_rbcp_free),
+            "M_rbcp_pow2": _safe_table_value(M_rbcp_pow2),
             "mse_benchmark_free": mse_benchmark_free,
             "mse_benchmark_pow2": mse_benchmark_pow2,
             "mse_rbcp_free": mse_rbcp_free,
@@ -318,16 +347,16 @@ def _derive_power_from_fixed_sensor_snr_and_n0(cfg):
     """
 
     SNR_s = compute_snr_linear(cfg["system"]["SNR_dB"])
-    B = cfg["system"]["B"]
-    N0 = cfg["system"]["N0"]
-    S = cfg["system"]["S"]
+    B = float(cfg["system"]["B"])
+    N0 = float(cfg["system"]["N0"])
+    S = int(cfg["system"]["S"])
 
     allocation = cfg["system"].get("bandwidth_allocation", None)
 
     if allocation is None:
         alpha = 1.0 / S
         B_sensor = alpha * B
-        return SNR_s * B_sensor * N0
+        return float(SNR_s * B_sensor * N0)
 
     allocation = np.asarray(allocation, dtype=float).reshape(-1)
 
@@ -351,7 +380,7 @@ def _derive_power_from_fixed_sensor_snr_and_n0(cfg):
         )
 
     B_sensor = B * allocation[0]
-    return SNR_s * B_sensor * N0
+    return float(SNR_s * B_sensor * N0)
 
 
 # =============================================================================
@@ -373,8 +402,13 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
 
     params = build_derived_system_parameters(cfg)
 
-    # One period per trial
-    n_periods = 1
+    n_periods = int(
+        cfg.get("signal", {}).get(
+            "n_periods",
+            cfg.get("simulation", {}).get("n_periods", 1)
+        )
+    )
+
     tau = params.tau
     Tt = cfg["signal"]["Tt"]
 
@@ -382,7 +416,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
     n_time = len(t)
 
     # -------------------------------------------------------------------------
-    # 1. Generate S random signals
+    # 1. Generate S random signals.
     # -------------------------------------------------------------------------
     x_raw = _generate_signals(
         cfg=cfg,
@@ -393,20 +427,26 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
     )
 
     # -------------------------------------------------------------------------
-    # 2. Band-limit
+    # 2. Band-limit using configured signal.W.
     # -------------------------------------------------------------------------
-    x_filtered = _filter_signals(x_raw, N, tau, Tt)
-
-    # -------------------------------------------------------------------------
-    # 3. Peak-to-peak control
-    # -------------------------------------------------------------------------
-    x_filtered = _apply_peak_to_peak_control(
-        x_filtered,
-        cfg["signal"]["peak_to_peak"]
+    x_filtered = _filter_signals(
+        x_raw=x_raw,
+        cfg=cfg,
+        params=params,
+        tau=tau,
+        Tt=Tt
     )
 
     # -------------------------------------------------------------------------
-    # 4. DC handling
+    # 3. Peak-to-peak control.
+    # -------------------------------------------------------------------------
+    x_filtered = _apply_peak_to_peak_control(
+        x_filtered,
+        cfg["signal"].get("peak_to_peak", 0.0)
+    )
+
+    # -------------------------------------------------------------------------
+    # 4. DC handling.
     # -------------------------------------------------------------------------
     x_zero_mean = _apply_dc_handling(
         x_filtered=x_filtered,
@@ -416,7 +456,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
     )
 
     # -------------------------------------------------------------------------
-    # 5. Fourier coefficients
+    # 5. Fourier coefficients.
     # -------------------------------------------------------------------------
     an, bn, _ = _compute_fourier_coefficients(
         x_zero_mean=x_zero_mean,
@@ -424,12 +464,12 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
         N=N,
         S=params.S,
         Tt=Tt,
-        normalize_dft=cfg["signal"]["normalize_dft"],
-        normalization_target=cfg["signal"]["normalization_target"]
+        normalize_dft=cfg["signal"].get("normalize_dft", True),
+        normalization_target=cfg["signal"].get("normalization_target", 3.99)
     )
 
     # -------------------------------------------------------------------------
-    # 6. ta/tb
+    # 6. ta/tb.
     # -------------------------------------------------------------------------
     ta, tb = _compute_phase_coefficients(
         an=an,
@@ -443,7 +483,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
     )
 
     # -------------------------------------------------------------------------
-    # 7. RbCP free
+    # 7. RbCP free integer.
     # -------------------------------------------------------------------------
     mse_rbcp_free = _run_rbcp_branch(
         ta=ta,
@@ -455,7 +495,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
     )
 
     # -------------------------------------------------------------------------
-    # 8. RbCP power-of-two
+    # 8. RbCP power-of-two.
     # -------------------------------------------------------------------------
     mse_rbcp_pow2 = _run_rbcp_branch(
         ta=ta,
@@ -492,15 +532,32 @@ def _generate_signals(cfg, rng, num_time_samples, n_periods, S):
     if dist == "gaussian":
         return rng.normal(0, 1, size=(num_time_samples, n_periods, S))
 
-    raise ValueError("Invalid distribution")
+    raise ValueError("Invalid distribution. Use 'uniform' or 'gaussian'.")
 
 
-def _filter_signals(x_raw, N, tau, Tt):
+def _filter_signals(x_raw, cfg, params, tau, Tt):
     """
-    Band-limit each signal using W_eff = 2N / tau.
+    Band-limit each signal using configured signal.W.
+
+    IMPORTANT:
+    ---------
+    The source filter bandwidth must come from:
+
+        signal.W
+
+    It must NOT be redefined from N as:
+
+        W_eff = 2 * N / tau
+
+    N controls the number of representation harmonics. W controls the
+    source-signal bandwidth.
     """
 
-    W_eff = 2 * N / tau
+    W_filter = float(cfg["signal"].get("W", params.W))
+
+    if W_filter <= 0:
+        raise ValueError("signal.W must be positive.")
+
     x_filtered = np.zeros_like(x_raw)
 
     _, n_periods, S = x_raw.shape
@@ -509,7 +566,7 @@ def _filter_signals(x_raw, N, tau, Tt):
         for s in range(S):
             x_filtered[:, p, s] = filter_periodic(
                 x_raw[:, p, s],
-                W_eff,
+                W_filter,
                 Tt,
                 tau
             )
@@ -630,13 +687,28 @@ def _run_benchmark_branch(cfg, M_per_sensor):
     if not cfg["mode"].get("run_benchmark", False):
         return np.nan
 
-    peak_to_peak = cfg["signal"]["peak_to_peak"]
+    peak_to_peak = float(cfg["signal"]["peak_to_peak"])
 
     mse_sum = 0.0
-    for M in M_per_sensor:
-        mse_sum += (peak_to_peak ** 2) / (12.0 * (float(M) ** 2))
+    count = 0
 
-    return mse_sum / len(M_per_sensor)
+    for M in M_per_sensor:
+        M_int = int(M)
+
+        if M_int < 2:
+            continue
+
+        try:
+            mse_sum += (peak_to_peak ** 2) / (12.0 * (float(M_int) ** 2))
+        except OverflowError:
+            mse_sum += 0.0
+
+        count += 1
+
+    if count == 0:
+        return np.nan
+
+    return mse_sum / count
 
 
 # =============================================================================
@@ -648,11 +720,18 @@ def _run_rbcp_branch(ta, tb, x_ref, t, tau, M_rbcp):
     Run direct RbCP and return average MSE over sensors/periods.
     """
 
-    ta_q, tb_q = quantize_ta_tb(
-        ta,
-        tb,
-        2 * np.pi / tau,
-        M_rbcp
+    M_rbcp = int(M_rbcp)
+
+    if M_rbcp < 2:
+        return np.nan
+
+    w0 = 2 * np.pi / tau
+
+    ta_q, tb_q = _quantize_ta_tb_tensor(
+        ta=ta,
+        tb=tb,
+        w0=w0,
+        M=M_rbcp
     )
 
     _, n_periods, S = x_ref.shape
@@ -665,13 +744,93 @@ def _run_rbcp_branch(ta, tb, x_ref, t, tau, M_rbcp):
                 ta_q[p, :, s],
                 tb_q[p, :, s],
                 t,
-                2 * np.pi / tau
+                w0
             )
 
             mse_sum += np.mean((x_ref[:, p, s] - x_rec) ** 2)
             count += 1
 
     return mse_sum / count
+
+
+def _quantize_ta_tb_tensor(ta, tb, w0, M):
+    """
+    Quantize ta/tb tensors period-by-period and sensor-by-sensor.
+
+    Input shape:
+        (periods, N, sensors)
+
+    Output shape:
+        (periods, N, sensors)
+    """
+
+    ta = np.asarray(ta, dtype=float)
+    tb = np.asarray(tb, dtype=float)
+
+    if ta.shape != tb.shape:
+        raise ValueError("ta and tb must have the same shape.")
+
+    if ta.ndim != 3:
+        raise ValueError("ta and tb must have shape (periods, N, sensors).")
+
+    n_periods, _, S = ta.shape
+
+    ta_q = np.zeros_like(ta, dtype=float)
+    tb_q = np.zeros_like(tb, dtype=float)
+
+    for p in range(n_periods):
+        for s in range(S):
+            ta_q[p, :, s], tb_q[p, :, s] = quantize_ta_tb(
+                ta[p, :, s],
+                tb[p, :, s],
+                w0,
+                M
+            )
+
+    return ta_q, tb_q
+
+
+# =============================================================================
+# SAFE VALUE HELPERS
+# =============================================================================
+
+def _safe_min_int(values):
+    """
+    Return the minimum of an array/list of integer-like values as Python int.
+    """
+
+    values = list(values)
+
+    if len(values) == 0:
+        raise ValueError("Cannot compute minimum of an empty list.")
+
+    return int(min(int(v) for v in values))
+
+
+def _fits_int64(value) -> bool:
+    """
+    Return True if value fits signed int64.
+    """
+
+    try:
+        v = int(value)
+    except Exception:
+        return False
+
+    return -(2**63) <= v <= 2**63 - 1
+
+
+def _safe_table_value(value):
+    """
+    Return value as int if it fits int64, otherwise as string.
+
+    This avoids pandas/numpy integer overflow for very large M values.
+    """
+
+    if _fits_int64(value):
+        return int(value)
+
+    return str(value)
 
 
 # =============================================================================
@@ -689,3 +848,9 @@ def save_dat_file(df, path, delimiter="\t"):
         index=False,
         float_format="%.8e"
     )
+
+
+__all__ = [
+    "generate_rbcp_benchmark_truncation_mse_vs_B_data",
+    "save_dat_file",
+]

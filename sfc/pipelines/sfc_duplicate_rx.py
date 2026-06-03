@@ -319,18 +319,30 @@ def _trial_random_signals(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
     # -------------------------------------------------------------------------
     # 2. Band-limit
     # -------------------------------------------------------------------------
-    # Use W_eff consistent with chosen N:
-    #   N = floor(W_eff * tau / 2)
-    W_eff = 2 * N / tau
+    # Use the configured source bandwidth W.
+    # IMPORTANT:
+    #   W is a signal/source parameter from the YAML.
+    #   Do NOT redefine W from N.
+    #
+    # The relation between W and N should be handled when deriving N, e.g.:
+    #   N = floor(W * tau / 2)
+    #
+    # But once W is configured, filtering must use W directly.
+    W_filter = float(cfg["signal"].get("W", params.W))
+
+    if W_filter <= 0:
+        raise ValueError("signal.W must be positive.")
+
     x_filtered = np.zeros_like(x_raw)
 
-    for s in range(S):
-        x_filtered[:, 0, s] = filter_periodic(
-            x_raw[:, 0, s],
-            W_eff,
-            Tt,
-            tau
-        )
+    for p in range(n_periods):
+        for s in range(S):
+            x_filtered[:, p, s] = filter_periodic(
+                x_raw[:, p, s],
+                W_filter,
+                Tt,
+                tau
+            )
 
     # -------------------------------------------------------------------------
     # 3. Peak-to-peak control (optional)

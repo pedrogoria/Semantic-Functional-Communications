@@ -5,74 +5,57 @@ Ideal / budget-aware FDMA MAC core.
 
 Purpose
 -------
-This module implements a first FDMA MAC layer consistent with the new
-architecture:
+This module implements an FDMA MAC/resource-allocation layer consistent with
+the current SFC project convention:
 
-    sfc/core/mac/
+    P  = average transmit power per sensor
+    B  = total system bandwidth
+    N0 = universal noise spectral-density / noise parameter
 
-and with the intended fair-comparison stacks:
+The FDMA layer derives per-sensor bandwidth slices:
 
-    - Benchmark + FDMA
-    - PPM + FDMA
-    - SFC
+    B_s = alpha_s * B_total
+
+and, when N0 is provided, also derives per-sensor SNR values:
+
+    SNR_s = P_per_sensor / (B_s * N0)
 
 Design philosophy
 -----------------
-This first FDMA implementation is intentionally "ideal" at the MAC/resource
-level:
+This FDMA implementation is intentionally "ideal" at the MAC/resource level.
 
-1. It explicitly splits the total communication bandwidth B_total into per-sensor
-   slices B_s according to a bandwidth-allocation vector.
+It explicitly provides:
+1. bandwidth allocation across sensors;
+2. optional per-sensor waveform power normalization to P_per_sensor;
+3. budget metadata for Benchmark + FDMA and PPM + FDMA comparisons.
 
-2. It optionally rescales each sensor waveform so that the average power per
-   sensor matches the configured budget P_per_sensor.
-
-3. It does NOT yet enforce a full spectral subband synthesis/demultiplexing
-   chain in the waveform domain.
+It does NOT yet implement a full explicit spectral FDMA waveform chain:
+- no frequency shifting;
+- no practical subband filtering;
+- no demultiplexing filter bank.
 
 Instead, this class currently acts as:
-- a fairness-enforcing resource allocator,
-- a clean integration point for Benchmark + FDMA and PPM + FDMA,
+- a fairness-enforcing resource allocator;
+- a clean integration point for Benchmark + FDMA and PPM + FDMA;
 - a carrier/subband metadata provider for future explicit spectral FDMA.
-
-Why this is still useful
-------------------------
-At the current comparison-design stage, the most important requirement is to
-make explicit that:
-
-- the total bandwidth is B_total,
-- each sensor gets a slice B_s,
-- each sensor keeps the same average power budget P_per_sensor,
-
-while leaving the comparison stacks clear and consistent.
-
-Future evolution
-----------------
-A later version may extend this class to:
-- explicitly frequency-shift each sensor waveform to its subband,
-- aggregate all sensor waveforms in a shared composite waveform,
-- demultiplex by ideal or practical bandpass filtering.
 
 Current tensor convention
 -------------------------
-Sensor-wise waveforms are expected to use:
+Sensor-wise waveforms use:
 
     (time, periods, sensors)
 
-Main capabilities
------------------
-- resolve FDMA bandwidth slices
-- describe subband edges and centers
-- optionally normalize waveform power per sensor
-- return per-sensor allocated waveforms
-- provide a reversible identity-style demultiplexing contract for ideal FDMA
+Important separation of responsibilities
+----------------------------------------
+FDMACore knows the FDMA resource budget:
 
-IMPORTANT
----------
-This class is modulation-agnostic:
-- it can receive waveforms produced by Benchmark-like sample communication
-- it can receive waveforms produced by PPM
-- it does not inspect the internal modulation structure
+    B_total, B_s, P_per_sensor, optionally N0 and SNR_s.
+
+The modulation core, e.g. PPMCore, remains MAC-agnostic and does not know
+P, B, B_s, or N0.
+
+The physical channel or pipeline is responsible for adding AWGN. This FDMA
+class can provide the relevant derived SNR_s when N0 is available.
 """
 
 from __future__ import annotations
@@ -86,7 +69,6 @@ from sfc.core.mac.base import (
     MACInput,
     MACMultiplexResult,
     MACDemultiplexResult,
-    ensure_2d_aggregated_waveform,
     ensure_3d_waveform_tensor,
     validate_sensor_dimension,
     validate_time_dimension,
@@ -103,10 +85,10 @@ class FDMACore(MACCoreBase):
         Number of sensors.
 
     B_total : float
-        Total communication bandwidth.
+        Total system bandwidth.
 
     P_per_sensor : float
-        Average available power per sensor.
+        Average available transmit power per sensor.
 
     tau : float
         Period / frame duration.
@@ -115,24 +97,32 @@ class FDMACore(MACCoreBase):
         Allocation fractions across sensors.
         If None, equal split is assumed.
 
+    N0 : float or None, optional
+        Universal noise parameter. If provided, this class can derive:
+
+            SNR_s = P_per_sensor / (B_s * N0)
+
+        If None, SNR diagnostics are returned as None.
+
     normalize_sensor_power : bool, optional
         If True, rescale each sensor waveform so that its average power equals
-        P_per_sensor. Default is False.
+        P_per_sensor. Default is True, consistent with the physical convention.
 
     return_nonorthogonal_sum_preview : bool, optional
         If True, also return a simple sum across sensors as a preview waveform.
-        IMPORTANT:
+
+        Important:
         this preview is NOT a physically correct explicit FDMA superposition,
         because no spectral translation is applied.
-        It is provided only as a diagnostic convenience.
-        Default is False.
 
     frequency_axis_centered_at_zero : bool, optional
-        If True, subband edges are reported over a total band:
+        If True, subband edges are reported over:
+
             [-B_total/2, +B_total/2]
+
         Otherwise:
+
             [0, B_total]
-        Default is True.
     """
 
     def __init__(
@@ -142,7 +132,8 @@ class FDMACore(MACCoreBase):
         P_per_sensor: float,
         tau: float,
         bandwidth_allocation: Optional[np.ndarray] = None,
-        normalize_sensor_power: bool = False,
+        N0: Optional[float] = None,
+        normalize_sensor_power: bool = True,
         return_nonorthogonal_sum_preview: bool = False,
         frequency_axis_centered_at_zero: bool = True,
         **kwargs
@@ -158,6 +149,22 @@ class FDMACore(MACCoreBase):
             frequency_axis_centered_at_zero=frequency_axis_centered_at_zero,
             **kwargs,
         )
+
+        if self.S <= 0:
+            raise ValueError("S must be positive.")
+
+        if self.B_total <= 0:
+            raise ValueError("B_total must be positive.")
+
+        if self.P_per_sensor <= 0:
+            raise ValueError("P_per_sensor must be positive.")
+
+        if self.tau <= 0:
+            raise ValueError("tau must be positive.")
+
+        self.N0 = None if N0 is None else float(N0)
+        if self.N0 is not None and self.N0 <= 0:
+            raise ValueError("N0 must be positive when provided.")
 
         self.normalize_sensor_power = bool(normalize_sensor_power)
         self.return_nonorthogonal_sum_preview = bool(return_nonorthogonal_sum_preview)
@@ -175,9 +182,11 @@ class FDMACore(MACCoreBase):
         -------
         np.ndarray
             Shape:
+
                 (S, 2)
 
             where each row is:
+
                 [f_low, f_high]
         """
 
@@ -194,8 +203,10 @@ class FDMACore(MACCoreBase):
         for s in range(self.S):
             f_low = cursor
             f_high = cursor + widths[s]
+
             edges[s, 0] = f_low
             edges[s, 1] = f_high
+
             cursor = f_high
 
         return edges
@@ -208,27 +219,119 @@ class FDMACore(MACCoreBase):
         -------
         np.ndarray
             Shape:
+
                 (S,)
         """
 
         edges = self.get_subband_edges()
         return np.mean(edges, axis=1)
 
+    def get_snr_per_sensor(self, N0: Optional[float] = None) -> Optional[np.ndarray]:
+        """
+        Return per-sensor SNR values when N0 is available.
+
+        Formula
+        -------
+        For each sensor s:
+
+            SNR_s = P_per_sensor / (B_s * N0)
+
+        Parameters
+        ----------
+        N0 : float or None, optional
+            If provided, overrides self.N0 for this computation.
+
+        Returns
+        -------
+        np.ndarray or None
+            Per-sensor SNR values with shape (S,), or None if N0 is not
+            available.
+        """
+
+        N0_eff = self.N0 if N0 is None else float(N0)
+
+        if N0_eff is None:
+            return None
+
+        if N0_eff <= 0:
+            raise ValueError("N0 must be positive.")
+
+        B_per_sensor = self.get_bandwidth_per_sensor()
+
+        if np.any(B_per_sensor <= 0):
+            raise ValueError("All per-sensor bandwidths must be positive.")
+
+        return self.P_per_sensor / (B_per_sensor * N0_eff)
+
+    def get_snr_per_sensor_db(self, N0: Optional[float] = None) -> Optional[np.ndarray]:
+        """
+        Return per-sensor SNR values in dB when N0 is available.
+        """
+
+        snr = self.get_snr_per_sensor(N0=N0)
+
+        if snr is None:
+            return None
+
+        return 10.0 * np.log10(np.maximum(snr, np.finfo(float).tiny))
+
+    def get_capacity_per_sensor(self, N0: Optional[float] = None) -> Optional[np.ndarray]:
+        """
+        Return per-sensor Shannon capacities when N0 is available.
+
+        Formula
+        -------
+        For each sensor s:
+
+            C_s = B_s * log2(1 + SNR_s)
+
+        with:
+
+            SNR_s = P_per_sensor / (B_s * N0)
+
+        Returns
+        -------
+        np.ndarray or None
+            Per-sensor capacities in bit/s, or None if N0 is not available.
+        """
+
+        snr = self.get_snr_per_sensor(N0=N0)
+
+        if snr is None:
+            return None
+
+        B_per_sensor = self.get_bandwidth_per_sensor()
+
+        return B_per_sensor * np.log2(1.0 + snr)
+
     def describe_budget(self) -> Dict[str, Any]:
         """
         Return the FDMA resource budget summary.
 
-        Extends the base class summary with FDMA-specific subband descriptors.
+        Extends the base class summary with:
+        - subband descriptors;
+        - optional SNR diagnostics;
+        - optional capacity diagnostics.
         """
 
         summary = super().describe_budget()
+
+        snr_per_sensor = self.get_snr_per_sensor()
+        snr_per_sensor_db = self.get_snr_per_sensor_db()
+        capacity_per_sensor = self.get_capacity_per_sensor()
+
         summary.update({
             "subband_edges": self.get_subband_edges(),
             "subband_centers": self.get_subband_centers(),
             "normalize_sensor_power": self.normalize_sensor_power,
             "return_nonorthogonal_sum_preview": self.return_nonorthogonal_sum_preview,
             "frequency_axis_centered_at_zero": self.frequency_axis_centered_at_zero,
+            "N0": self.N0,
+            "SNR_per_sensor": snr_per_sensor,
+            "SNR_per_sensor_dB": snr_per_sensor_db,
+            "capacity_per_sensor": capacity_per_sensor,
         })
+
         return summary
 
     # =========================================================================
@@ -247,7 +350,12 @@ class FDMACore(MACCoreBase):
         ----------
         mac_input : MACInput
             Expected main field:
+
                 tx_waveform_per_sensor
+
+            with shape:
+
+                (time, periods, sensors)
 
         Keyword arguments
         -----------------
@@ -261,8 +369,8 @@ class FDMACore(MACCoreBase):
         -------
         MACMultiplexResult
             In this ideal FDMA version:
-            - per_sensor_allocated_waveform is the main output
-            - multiplexed_waveform is returned only if the preview sum is enabled
+            - per_sensor_allocated_waveform is the main output;
+            - multiplexed_waveform is returned only if the preview sum is enabled.
         """
 
         if mac_input.tx_waveform_per_sensor is None:
@@ -281,6 +389,7 @@ class FDMACore(MACCoreBase):
             "normalize_sensor_power",
             self.normalize_sensor_power
         )
+
         return_nonorthogonal_sum_preview = kwargs.get(
             "return_nonorthogonal_sum_preview",
             self.return_nonorthogonal_sum_preview
@@ -294,16 +403,27 @@ class FDMACore(MACCoreBase):
                 target_power=self.P_per_sensor
             )
 
+        average_power_per_sensor = self._average_power_per_sensor(x_alloc)
+
+        snr_per_sensor = self.get_snr_per_sensor()
+        snr_per_sensor_db = self.get_snr_per_sensor_db()
+        capacity_per_sensor = self.get_capacity_per_sensor()
+
         allocation_metadata = {
             "mac_type": "fdma",
             "S": self.S,
             "B_total": self.B_total,
             "P_per_sensor": self.P_per_sensor,
             "tau": self.tau,
+            "N0": self.N0,
             "bandwidth_allocation": np.array(self.bandwidth_allocation, dtype=float),
             "B_per_sensor": self.get_bandwidth_per_sensor(),
             "subband_edges": self.get_subband_edges(),
             "subband_centers": self.get_subband_centers(),
+            "SNR_per_sensor": snr_per_sensor,
+            "SNR_per_sensor_dB": snr_per_sensor_db,
+            "capacity_per_sensor": capacity_per_sensor,
+            "average_power_per_sensor": average_power_per_sensor,
             "normalize_sensor_power": bool(normalize_sensor_power),
             "ideal_fdma": True,
             "explicit_spectral_synthesis": False,
@@ -346,13 +466,16 @@ class FDMACore(MACCoreBase):
         ----------
         received_signal : Any
             Preferred accepted forms in this first implementation:
+
             1. np.ndarray with shape (time, periods, sensors)
-               -> interpreted as already separated sensor-wise waveforms
+               -> interpreted as already separated sensor-wise waveforms.
+
             2. dict containing:
                    {"recovered_waveform_per_sensor": ...}
+
             3. None, together with multiplex_result containing
                per_sensor_allocated_waveform
-               -> useful for fully ideal/self-contained tests
+               -> useful for fully ideal/self-contained tests.
 
         multiplex_result : MACMultiplexResult or None
             Optional transmit-side FDMA metadata.
@@ -373,11 +496,15 @@ class FDMACore(MACCoreBase):
         x_rec = None
 
         if received_signal is None:
-            if multiplex_result is None or multiplex_result.per_sensor_allocated_waveform is None:
+            if (
+                multiplex_result is None
+                or multiplex_result.per_sensor_allocated_waveform is None
+            ):
                 raise ValueError(
                     "FDMACore.demultiplex(...) received_signal is None and no "
                     "per_sensor_allocated_waveform is available in multiplex_result."
                 )
+
             x_rec = ensure_3d_waveform_tensor(
                 multiplex_result.per_sensor_allocated_waveform
             )
@@ -388,6 +515,7 @@ class FDMACore(MACCoreBase):
                     "When received_signal is a dict, it must contain "
                     "'recovered_waveform_per_sensor'."
                 )
+
             x_rec = ensure_3d_waveform_tensor(
                 received_signal["recovered_waveform_per_sensor"]
             )
@@ -398,8 +526,11 @@ class FDMACore(MACCoreBase):
         validate_sensor_dimension(x_rec, self.S)
 
         aux = {}
+
         if do_power_diagnostics:
-            aux["recovered_average_power_per_sensor"] = self._average_power_per_sensor(x_rec)
+            aux["recovered_average_power_per_sensor"] = self._average_power_per_sensor(
+                x_rec
+            )
 
         return MACDemultiplexResult(
             recovered_waveform_per_sensor=x_rec,
@@ -424,6 +555,7 @@ class FDMACore(MACCoreBase):
         ----------
         x : np.ndarray
             Canonical waveform tensor:
+
                 (time, periods, sensors)
 
         target_power : float
@@ -434,6 +566,9 @@ class FDMACore(MACCoreBase):
         np.ndarray
             Power-normalized waveform tensor.
         """
+
+        if target_power <= 0:
+            raise ValueError("target_power must be positive.")
 
         x = np.asarray(x, dtype=float)
         x_out = np.array(x, copy=True)
@@ -460,19 +595,26 @@ class FDMACore(MACCoreBase):
         ----------
         x : np.ndarray
             Canonical waveform tensor:
+
                 (time, periods, sensors)
 
         Returns
         -------
         np.ndarray
             Shape:
+
                 (S,)
         """
 
         x = np.asarray(x, dtype=float)
+
+        if x.ndim != 3:
+            raise ValueError("x must have shape (time, periods, sensors).")
+
         _, _, S = x.shape
 
         p = np.zeros(S, dtype=float)
+
         for s in range(S):
             p[s] = np.mean(x[:, :, s] ** 2)
 

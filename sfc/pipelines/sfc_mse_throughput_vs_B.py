@@ -1,34 +1,59 @@
 """
 sfc/pipelines/sfc_mse_throughput_vs_B.py
 
-Pipeline per transmission cycle of tau seconds.Pipeline for reproducing manuscript Figure 7-style experiment:
+Pipeline per transmission cycle of tau seconds.
 
-   With the current semantic-based error-detection policy:
+Pipeline for reproducing a manuscript Figure-7-style experiment:
+
+1. Native SFC is evaluated over a sweep of total communication bandwidth B.
+
+2. RbCP_time is evaluated as the corresponding error-free time-grid/reference
+   branch.
+
+3. With the current semantic-based error-detection policy:
    - if one period is valid, all S signals of that period are counted as
      successfully received;
    - if one period is invalid, zero signals are counted.
 
    Therefore:
+
        throughput = (S * num_valid_periods) / (num_periods * tau)
 
    Since this pipeline uses n_periods = 1 per Monte Carlo trial, the empirical
    throughput becomes:
+
        throughput = (S / tau) * valid_period_fraction
 
-4. Figure-6-style physical regime:
-   - P is fixed
-   - N0 is fixed
+4. Fixed-power physical regime:
+   - P is fixed;
+   - N0 is fixed;
    - SNR varies with B according to:
+
          SNR(B) = P / (B * N0)
 
 5. IMPORTANT CORRECTION:
-   If the SED discards an invalid period, that period must NOT be included in the
+   If SED discards an invalid period, that period must NOT be included in the
    SFC MSE average. Therefore:
-   - throughput is averaged across all trials
-   - mse_sfc is averaged only across valid trials/periods
+   - throughput is averaged across all trials;
+   - mse_sfc is averaged only across valid trials/periods.
+
+6. IMPORTANT SOURCE-BANDWIDTH CONVENTION:
+   The source signal is filtered using the configured signal bandwidth:
+
+       signal.W
+
+   The pipeline must NOT redefine the filtering bandwidth from N using:
+
+       W_eff = 2 * N / tau
+
+   The role of N is to define the number of representation harmonics. The role
+   of W is to define the source bandwidth used by the signal filter.
 """
 
+from __future__ import annotations
+
 import copy
+
 import numpy as np
 import pandas as pd
 
@@ -47,7 +72,7 @@ from sfc.core.semantic_error_detection import detect_semantic_errors
 
 def generate_sfc_mse_throughput_vs_B_data(cfg):
     """
-    Generate the Figure 7-style dataset.
+    Generate the Figure-7-style dataset.
 
     Parameters
     ----------
@@ -60,6 +85,7 @@ def generate_sfc_mse_throughput_vs_B_data(cfg):
         DataFrame with columns:
         - B
         - SNR_dB_derived
+        - SNR_linear_derived
         - mse_sfc
         - mse_rbcp_time
         - throughput_sfc
@@ -81,7 +107,15 @@ def generate_sfc_mse_throughput_vs_B_data(cfg):
     print(f"[INFO] Trials per B = {cfg['monte_carlo']['interactions']}")
 
     b_cfg = cfg["sweep"]["B"]
-    b_values = np.arange(b_cfg["start"], b_cfg["stop"], b_cfg["step"])
+    b_start = float(b_cfg["start"])
+    b_stop = float(b_cfg["stop"])
+    b_step = float(b_cfg["step"])
+    include_stop = bool(b_cfg.get("include_stop", True))
+
+    if include_stop:
+        b_values = np.arange(b_start, b_stop + 0.5 * b_step, b_step)
+    else:
+        b_values = np.arange(b_start, b_stop, b_step)
 
     results = []
 
@@ -90,38 +124,39 @@ def generate_sfc_mse_throughput_vs_B_data(cfg):
         cfg_B["system"]["B"] = float(B)
 
         # ---------------------------------------------------------------------
-        # Figure-7 / fixed-power regime:
-        # keep P fixed and N0 fixed, derive SNR(B)
+        # Fixed-power regime:
+        # keep P fixed and N0 fixed. The builder derives SNR(B).
         # ---------------------------------------------------------------------
-        cfg_B["system"]["SNR_dB"] = _derive_snr_db_from_fixed_P_and_N0(cfg_B)
-
         params = build_derived_system_parameters(cfg_B)
 
-        N = cfg_B["signal"].get("N_override", params.N)
-        n_trials = cfg_B["monte_carlo"]["interactions"]
+        N = int(cfg_B["signal"].get("N_override", params.N))
+        n_trials = int(cfg_B["monte_carlo"]["interactions"])
 
         print("\n[INFO] ------------------------------------------------------------")
         print(f"[INFO] B = {B:.1f} Hz")
-        print(f"[INFO] P = {cfg_B['system']['P']:.6e} (fixed)")
-        print(f"[INFO] N0 = {cfg_B['system']['N0']:.6e} (fixed)")
-        print(f"[INFO] SNR_dB(B) = {cfg_B['system']['SNR_dB']:.6f}")
+        print(f"[INFO] P = {params.P:.6e} fixed per sensor")
+        print(f"[INFO] N0 = {params.N0:.6e} fixed")
+        print(f"[INFO] SNR_dB(B) = {params.SNR_dB:.6f}")
         print(f"[INFO] SNR(B) = {params.SNR:.6e}")
         print(
             f"[INFO] S = {params.S} | R = {params.R} | L = {params.L} | "
             f"tau = {params.tau:.3f} s | W = {params.W:.3f} Hz | N = {N}"
         )
         print(f"[INFO] M_time = {params.M_time}")
-        print(f"[INFO] semantic_error_detection = {cfg_B['mode'].get('semantic_error_detection', False)}")
+        print(
+            "[INFO] semantic_error_detection = "
+            f"{cfg_B.get('mode', {}).get('semantic_error_detection', False)}"
+        )
 
         # ---------------------------------------------------------------------
-        # Build one SFC channel for this B-point and reuse in all trials
+        # Build one SFC channel for this B-point and reuse in all trials.
         # ---------------------------------------------------------------------
         sfc_channel = None
         if cfg_B["mode"].get("run_sfc", False):
             sfc_channel = _build_sfc_channel_for_B(cfg_B, N, params.S)
 
         # ---------------------------------------------------------------------
-        # Monte Carlo accumulation
+        # Monte Carlo accumulation.
         # ---------------------------------------------------------------------
         mse_sfc_sum = 0.0
         n_valid_trials = 0
@@ -138,14 +173,14 @@ def generate_sfc_mse_throughput_vs_B_data(cfg):
                 sfc_channel=sfc_channel
             )
 
-            # RbCP_time is always averaged over all trials
+            # RbCP_time is averaged over all trials.
             mse_rbcp_time_sum += trial["mse_rbcp_time"]
 
-            # Throughput is always averaged over all trials
+            # Throughput is averaged over all trials.
             throughput_sum += trial["throughput_sfc"]
             valid_fraction_sum += trial["valid_period_fraction"]
 
-            # SFC MSE must be averaged only over valid trials
+            # SFC MSE is averaged only over valid trials.
             if trial["is_valid_trial"] and not np.isnan(trial["mse_sfc"]):
                 mse_sfc_sum += trial["mse_sfc"]
                 n_valid_trials += 1
@@ -163,7 +198,11 @@ def generate_sfc_mse_throughput_vs_B_data(cfg):
         valid_period_fraction = valid_fraction_sum / n_trials
         throughput_max = params.S / params.tau
 
-        print(f"[INFO] mse_sfc = {mse_sfc:.6e}" if not np.isnan(mse_sfc) else "[INFO] mse_sfc = nan (no valid trials)")
+        if not np.isnan(mse_sfc):
+            print(f"[INFO] mse_sfc = {mse_sfc:.6e}")
+        else:
+            print("[INFO] mse_sfc = nan (no valid trials)")
+
         print(f"[INFO] mse_rbcp_time = {mse_rbcp_time:.6e}")
         print(f"[INFO] throughput_sfc = {throughput_sfc:.6e}")
         print(f"[INFO] throughput_max = {throughput_max:.6e}")
@@ -171,8 +210,9 @@ def generate_sfc_mse_throughput_vs_B_data(cfg):
         print(f"[INFO] num_valid_trials = {n_valid_trials}/{n_trials}")
 
         results.append({
-            "B": B,
-            "SNR_dB_derived": cfg_B["system"]["SNR_dB"],
+            "B": float(B),
+            "SNR_dB_derived": float(params.SNR_dB),
+            "SNR_linear_derived": float(params.SNR),
             "mse_sfc": mse_sfc,
             "mse_rbcp_time": mse_rbcp_time,
             "throughput_sfc": throughput_sfc,
@@ -183,25 +223,6 @@ def generate_sfc_mse_throughput_vs_B_data(cfg):
         })
 
     return pd.DataFrame(results)
-
-
-# =============================================================================
-# FIXED-POWER SNR MODEL
-# =============================================================================
-
-def _derive_snr_db_from_fixed_P_and_N0(cfg):
-    """
-    Derive SNR_dB(B) from fixed P and fixed N0 using:
-
-        SNR(B) = P / (B * N0)
-    """
-
-    P = cfg["system"]["P"]
-    B = cfg["system"]["B"]
-    N0 = cfg["system"]["N0"]
-
-    snr = P / (B * N0)
-    return 10.0 * np.log10(snr)
 
 
 # =============================================================================
@@ -221,7 +242,10 @@ def _build_sfc_channel_for_B(cfg_B, N, S):
     cfg_sfc["channel"]["sensor_x_event"] = _build_sensor_x_event(S, N)
     cfg_sfc["channel"]["collision_mode"] = cfg_sfc["channel"].get("collision_mode", "sum")
     cfg_sfc["channel"]["type"] = cfg_sfc["channel"].get("type", "awgn")
-    cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get("detection_mode", "threshold")
+    cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get(
+        "detection_mode",
+        "threshold"
+    )
     cfg_sfc["channel"]["score_threshold"] = cfg_sfc["channel"].get(
         "score_threshold",
         cfg_sfc["system"]["L"]
@@ -260,7 +284,7 @@ def _build_sensor_x_event(S, N):
     """
 
     num_event_ids = 2 * N * S
-    sensor_x_event = np.zeros((S, num_event_ids))
+    sensor_x_event = np.zeros((S, num_event_ids), dtype=float)
 
     for s in range(S):
         start = 2 * s * N
@@ -287,7 +311,7 @@ def _run_one_trial(cfg, rng, N, sfc_channel=None):
 
     params = build_derived_system_parameters(cfg)
 
-    # One period per trial
+    # This pipeline is designed for one period per Monte Carlo trial.
     n_periods = 1
     tau = params.tau
     Tt = cfg["signal"]["Tt"]
@@ -296,7 +320,7 @@ def _run_one_trial(cfg, rng, N, sfc_channel=None):
     n_time = len(t)
 
     # -------------------------------------------------------------------------
-    # 1. Generate S random signals
+    # 1. Generate S random signals.
     # -------------------------------------------------------------------------
     x_raw = _generate_signals(
         cfg=cfg,
@@ -307,12 +331,18 @@ def _run_one_trial(cfg, rng, N, sfc_channel=None):
     )
 
     # -------------------------------------------------------------------------
-    # 2. Band-limit
+    # 2. Band-limit using configured signal.W.
     # -------------------------------------------------------------------------
-    x_filtered = _filter_signals(x_raw, N, tau, Tt)
+    x_filtered = _filter_signals(
+        x_raw=x_raw,
+        cfg=cfg,
+        params=params,
+        tau=tau,
+        Tt=Tt
+    )
 
     # -------------------------------------------------------------------------
-    # 3. Peak-to-peak control
+    # 3. Peak-to-peak control.
     # -------------------------------------------------------------------------
     x_filtered = _apply_peak_to_peak_control(
         x_filtered,
@@ -320,7 +350,7 @@ def _run_one_trial(cfg, rng, N, sfc_channel=None):
     )
 
     # -------------------------------------------------------------------------
-    # 4. DC handling
+    # 4. DC handling.
     # -------------------------------------------------------------------------
     x_zero_mean = _apply_dc_handling(
         x_filtered=x_filtered,
@@ -330,7 +360,7 @@ def _run_one_trial(cfg, rng, N, sfc_channel=None):
     )
 
     # -------------------------------------------------------------------------
-    # 5. Fourier coefficients
+    # 5. Fourier coefficients.
     # -------------------------------------------------------------------------
     an, bn, _ = _compute_fourier_coefficients(
         x_zero_mean=x_zero_mean,
@@ -338,12 +368,12 @@ def _run_one_trial(cfg, rng, N, sfc_channel=None):
         N=N,
         S=params.S,
         Tt=Tt,
-        normalize_dft=cfg["signal"]["normalize_dft"],
-        normalization_target=cfg["signal"]["normalization_target"]
+        normalize_dft=cfg["signal"].get("normalize_dft", True),
+        normalization_target=cfg["signal"].get("normalization_target", 3.99)
     )
 
     # -------------------------------------------------------------------------
-    # 6. ta/tb
+    # 6. ta/tb.
     # -------------------------------------------------------------------------
     ta, tb = _compute_phase_coefficients(
         an=an,
@@ -357,7 +387,7 @@ def _run_one_trial(cfg, rng, N, sfc_channel=None):
     )
 
     # -------------------------------------------------------------------------
-    # 7. RbCP_time (error-free time model)
+    # 7. RbCP_time error-free time model.
     # -------------------------------------------------------------------------
     mse_rbcp_time = _run_rbcp_time_branch(
         ta=ta,
@@ -371,18 +401,20 @@ def _run_one_trial(cfg, rng, N, sfc_channel=None):
     )
 
     # -------------------------------------------------------------------------
-    # 8. SFC + semantic-based error detection
+    # 8. SFC + semantic-based error detection.
     # -------------------------------------------------------------------------
-    mse_sfc, throughput_sfc, valid_period_fraction, is_valid_trial = _run_sfc_branch_with_sed(
-        ta=ta,
-        tb=tb,
-        cfg=cfg,
-        params=params,
-        N=N,
-        x_ref=x_zero_mean,
-        t=t,
-        n_periods=n_periods,
-        sfc_channel=sfc_channel
+    mse_sfc, throughput_sfc, valid_period_fraction, is_valid_trial = (
+        _run_sfc_branch_with_sed(
+            ta=ta,
+            tb=tb,
+            cfg=cfg,
+            params=params,
+            N=N,
+            x_ref=x_zero_mean,
+            t=t,
+            n_periods=n_periods,
+            sfc_channel=sfc_channel
+        )
     )
 
     return {
@@ -414,15 +446,32 @@ def _generate_signals(cfg, rng, num_time_samples, n_periods, S):
     if dist == "gaussian":
         return rng.normal(0, 1, size=(num_time_samples, n_periods, S))
 
-    raise ValueError("Invalid distribution")
+    raise ValueError("Invalid distribution. Use 'uniform' or 'gaussian'.")
 
 
-def _filter_signals(x_raw, N, tau, Tt):
+def _filter_signals(x_raw, cfg, params, tau, Tt):
     """
-    Band-limit each signal using W_eff = 2N / tau.
+    Band-limit each signal using configured signal.W.
+
+    IMPORTANT:
+    ---------
+    The source filter bandwidth must come from:
+
+        signal.W
+
+    It must NOT be redefined from N as:
+
+        W_eff = 2 * N / tau
+
+    N controls the number of representation harmonics. W controls the
+    source-signal bandwidth.
     """
 
-    W_eff = 2 * N / tau
+    W_filter = float(cfg["signal"].get("W", params.W))
+
+    if W_filter <= 0:
+        raise ValueError("signal.W must be positive.")
+
     x_filtered = np.zeros_like(x_raw)
 
     _, n_periods, S = x_raw.shape
@@ -431,7 +480,7 @@ def _filter_signals(x_raw, N, tau, Tt):
         for s in range(S):
             x_filtered[:, p, s] = filter_periodic(
                 x_raw[:, p, s],
-                W_eff,
+                W_filter,
                 Tt,
                 tau
             )
@@ -482,8 +531,15 @@ def _apply_dc_handling(x_filtered, tau, Tt, dc_enabled):
 # FOURIER / PHASE
 # =============================================================================
 
-def _compute_fourier_coefficients(x_zero_mean, tau, N, S, Tt,
-                                  normalize_dft, normalization_target):
+def _compute_fourier_coefficients(
+    x_zero_mean,
+    tau,
+    N,
+    S,
+    Tt,
+    normalize_dft,
+    normalization_target
+):
     """
     Compute Fourier coefficients for all periods/sensors.
     """
@@ -622,17 +678,14 @@ def _run_sfc_branch_with_sed(ta, tb, cfg, params, N, x_ref, t, n_periods, sfc_ch
 
     events = phase_core.ta_tb_to_events(ta, tb)
 
-    # Channel
     out = sfc_channel(events)
     events_est = out["events_est"] if isinstance(out, dict) else out
 
     # -------------------------------------------------------------------------
-    # IMPORTANT FIX
-    # -------------------------------------------------------------------------
     # The SFC channel may return an event matrix whose number of rows differs
-    # slightly from params.M_time due to the internal implementation.
-    # Since this pipeline uses n_periods = 1, the safest segmentation for SED is
-    # to use the ACTUAL number of rows observed at the channel output.
+    # slightly from params.M_time due to internal implementation. Since this
+    # pipeline uses n_periods = 1, the safest segmentation for SED is to use the
+    # actual number of rows observed at channel output.
     # -------------------------------------------------------------------------
     event_slots_total = events_est.shape[0]
 
@@ -646,7 +699,6 @@ def _run_sfc_branch_with_sed(ta, tb, cfg, params, N, x_ref, t, n_periods, sfc_ch
             )
         period_slots_for_sed = event_slots_total // n_periods
 
-    # Semantic-based error detection
     sensor_x_event = _build_sensor_x_event(params.S, N)
     sed_cfg = cfg.get("sed", {})
     discard_invalid_periods = sed_cfg.get("discard_invalid_periods", True)
@@ -661,18 +713,18 @@ def _run_sfc_branch_with_sed(ta, tb, cfg, params, N, x_ref, t, n_periods, sfc_ch
 
     corrected_events_est, period_valid_mask = _extract_sed_outputs(sed_result)
 
-    # Throughput is averaged over all periods/trials
     valid_fraction = float(np.mean(period_valid_mask))
-    throughput = (params.S * np.sum(period_valid_mask)) / (len(period_valid_mask) * params.tau)
+    throughput = (
+        params.S * np.sum(period_valid_mask)
+    ) / (
+        len(period_valid_mask) * params.tau
+    )
 
-    # In the current Figure-7 pipeline, n_periods = 1
     is_valid_trial = bool(period_valid_mask[0])
 
-    # If the only period in this trial is invalid, do NOT compute MSE.
     if not is_valid_trial:
         return np.nan, float(throughput), valid_fraction, False
 
-    # Reconstruction from corrected events only if valid
     ta_rec, tb_rec = phase_core.event_to_ta_tb(corrected_events_est)
     ta_rec = np.real(ta_rec)
     tb_rec = np.real(tb_rec)
@@ -682,7 +734,6 @@ def _run_sfc_branch_with_sed(ta, tb, cfg, params, N, x_ref, t, n_periods, sfc_ch
     count = 0
 
     for p in range(n_periods):
-        # Only valid periods enter the MSE
         if not period_valid_mask[p]:
             continue
 
@@ -710,8 +761,8 @@ def _extract_sed_outputs(sed_result):
     Extract (corrected_events_est, period_valid_mask) from the SED output.
 
     Supports:
-    - dataclass-like result with attributes
-    - dict-like result
+    - dataclass-like result with attributes;
+    - dict-like result.
     """
 
     if isinstance(sed_result, dict):
@@ -740,3 +791,9 @@ def save_dat_file(df, path, delimiter="\t"):
         index=False,
         float_format="%.8e"
     )
+
+
+__all__ = [
+    "generate_sfc_mse_throughput_vs_B_data",
+    "save_dat_file",
+]
