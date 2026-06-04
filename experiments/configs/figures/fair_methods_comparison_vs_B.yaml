@@ -1,19 +1,55 @@
 # experiments/configs/figures/fair_methods_comparison_vs_B.yaml
 
-description: "Fair comparison versus total bandwidth B: CS+FDMA, PPM+FDMA, RbCP, RbCP_time, SFC, SFC+SED"
+description: "Fair comparison versus total bandwidth B: Benchmark+FDMA, CS+FDMA, PPM+FDMA, RbCP, RbCP_time, SFC, SFC+SED"
+
+# =============================================================================
+# Monte Carlo
+# =============================================================================
 
 monte_carlo:
   seed: 47
   interactions: 30
 
+reproducibility:
+  seed: 47
+
+# =============================================================================
+# Output convention
+# =============================================================================
+
+output:
+  base_dir: "data/results"
+  figure_dir: "fair_methods_comparison_vs_B"
+  save_figures: true
+
+  formats:
+    data:
+      - dat
+      - csv
+    figure:
+      - png
+      - pdf
+
+data_format:
+  delimiter: "\t"
+
+# =============================================================================
+# Sweep over total bandwidth B
+# =============================================================================
+
 sweep:
   B:
-    start: 5000.0
-    stop: 30000.0
+    start: 100.0
+    stop: 100000.0
     step: 5000.0
     include_stop: true
 
+# =============================================================================
+# Method switches
+# =============================================================================
+
 mode:
+  run_benchmark_fdma: true
   run_cs_fdma: true
   run_ppm_fdma: true
   run_rbcp: true
@@ -21,18 +57,23 @@ mode:
   run_sfc: true
   run_sfc_sed: true
 
+# =============================================================================
+# Physical/system parameters
+# =============================================================================
+
 system:
-  S: 8
+  # Number of sensors.
+  S: 12
 
   # Total system bandwidth.
   # This value is overwritten by sweep.B.
-  B: 5000.0
+  B: null
 
   # Project convention:
   # P  = average transmit power per sensor
   # N0 = universal noise parameter
   P: 1.0
-  N0: 0.008
+  N0: 0.02
 
   # SFC resource-grid parameters.
   R: 12
@@ -42,53 +83,224 @@ system:
   # B_s = B / S
   bandwidth_allocation: null
 
+# =============================================================================
+# Source signal
+# =============================================================================
+
 signal:
+  # Signal period.
   tau: 1.0
+
+  # Dense-time numerical reference step.
+  # This is the simulation/reference grid used for x(t) and MSE evaluation.
+  # CS no longer operates directly on this dense grid.
   Tt: 0.001
 
+  # Source bandwidth used by filter_periodic.
+  # IMPORTANT: filter with this W directly.
   W: 10.4
+
+  # Fixed harmonic count for RbCP/SFC controlled comparison.
+  # If removed or set to null, N is derived in system_parameters.py.
   N_override: 5
 
+  # Number of periods per Monte Carlo trial.
   n_periods: 1
 
+  # Random source distribution.
   distribution: gaussian
-  peak_to_peak: 8.0
 
+  # Peak-to-peak scaling after filtering.
+  peak_to_peak: 12.0
+
+  # DFT normalization used by RbCP/SFC phase representation.
   normalize_dft: true
   normalization_target: 3.99
+
+  # Harmonic threshold used by phase coefficient routines.
   threshold_harmonics: 0.001
 
+# =============================================================================
+# DC handling
+# =============================================================================
+
 dc:
+  # false means remove DC after filtering.
   enabled: false
 
+# =============================================================================
+# Quantization policy used by system_parameters.py
+# =============================================================================
+
 quantization:
+  # Used by system_parameters.py for M_RbCP and Benchmark M.
   force_power_of_two: false
   rounding_mode: floor
 
+# =============================================================================
+# Benchmark + FDMA
+# =============================================================================
+
+benchmark:
+  # Benchmark and CS share the same uniform sampling rate:
+  #
+  #   fs = effective_rate_factor * sampling_rate
+  #
+  # With:
+  #   sampling_rate = W
+  #   effective_rate_factor = 2.0
+  #
+  # we get:
+  #   fs = 2W
+  #
+  # This rate is used:
+  #   - by Benchmark for uniform sampling/reconstruction logic
+  #   - by CS to sample x(t) into x[n] before CS encoding
+  sampling_rate: 10.4
+  effective_rate_factor: 1.0
+
+# =============================================================================
+# CS + FDMA
+# =============================================================================
+
 cs:
-  bits_per_measurement: 8.0
+  # ---------------------------------------------------------------------------
+  # Current CS chain
+  # ---------------------------------------------------------------------------
+  #
+  # The CS branch uses:
+  #
+  #   x(t) -> x[n] -> y = Phi x[n] -> q = Q(y) -> y_tilde
+  #        -> x_hat[n] -> x_hat(t)
+  #
+  # where x[n] are uniform samples of x(t) at the same sampling rate used by
+  # the Benchmark branch.
+  #
+  # MSE is computed between dense x(t) and reconstructed x_hat(t).
+  #
+  # ---------------------------------------------------------------------------
+  # Fair CS budget policy
+  # ---------------------------------------------------------------------------
+  #
+  # The pipeline does not treat measurement_bits as a fixed YAML parameter.
+  #
+  # For each sensor and each B value, the pipeline computes:
+  #
+  #   N_s = number of uniform samples x[n] per period
+  #   C_s = B_s * log2(1 + P / (B_s * N0))
+  #   bits_available = C_s * tau
+  #
+  # It then tries:
+  #
+  #   M_s = N_s
+  #
+  # whenever possible, and computes:
+  #
+  #   measurement_bits_s = floor(bits_available / N_s)
+  #
+  # If measurement_bits_s < 1, the pipeline sets:
+  #
+  #   measurement_bits_s = 1
+  #   M_s = floor(bits_available)
+  #
+  # Therefore:
+  #   - M_s is as large as possible, ideally equal to N_s
+  #   - measurement_bits_s is the largest integer precision allowed by the
+  #     channel budget
+  #   - the effective OMP sparsity is set by the pipeline to:
+  #
+  #       K_eff = min(M_s, N_s)
+
+  # If false:
+  #   y_rx = y
+  #
+  # If true:
+  #   q       = Q(y)
+  #   y_tilde = Q^{-1}(q)
+  #   y_rx    = y_tilde
+  #
+  # The number of quantization bits is computed dynamically by the pipeline.
+  quantize_measurements: true
+
+  # Supported currently by CSAcquisitionCore:
+  #   uniform_midrise
+  measurement_quantization_mode: uniform_midrise
+
+  # Quantization range strategy.
+  #
+  # per_signal:
+  #   each period/sensor measurement vector y gets its own [min(y), max(y)].
+  #   This is favorable to CS, but assumes the receiver knows that range.
+  #
+  # global:
+  #   one [min(y), max(y)] is computed over the acquisition tensor.
+  #
+  # fixed:
+  #   use measurement_quantization_min and measurement_quantization_max.
+  measurement_quantization_range: per_signal
+
+  # Used only when measurement_quantization_range: fixed.
+  measurement_quantization_min: null
+  measurement_quantization_max: null
+
+  # If true, out-of-range values are clipped to edge bins.
+  # If false, out-of-range values raise an error.
+  clip_quantization: true
+
+  # Kept for compatibility with debug scripts and alternative CS policies.
+  # In the current fair-CS pipeline, the effective sparsity is set internally as:
+  #
+  #   K_eff = min(M_s, N_s)
   sparsity: 5
+
+  # Sparsifying basis used by CSAcquisitionCore.
+  # Supported:
+  #   dct
+  #   identity
   basis: dct
+
+  # Sensing matrix used by CSAcquisitionCore.
+  # Supported:
+  #   gaussian
+  #   bernoulli
+  #   identity
   sensing_matrix: gaussian
-  random_state: null
+
+  # Fixed seed for reproducibility of Phi.
+  # If null, the pipeline draws per-trial/per-sensor random states from the
+  # Monte Carlo RNG.
+  random_state: 12345
+
   normalize_dictionary_columns: true
   store_true_representation: false
 
+# =============================================================================
+# PPM + FDMA
+# =============================================================================
+
 ppm:
+  # Requested PPM message sampling frequency.
+  #
+  # The pipeline clips this using:
+  #   fs_msg <= 2 B_s / (1 + rolloff)
+  #
+  # and also:
+  #   fs_msg <= 1 / (min_samples_per_symbol * Tt)
   fs_msg: 1000.0
 
   enforce_bandwidth_from_B_sensor: true
 
-  # Numerical-grid constraint:
-  # fs_msg <= 1 / (min_samples_per_symbol * Tt)
-  # With Tt=0.001 and min_samples_per_symbol=8:
-  # fs_msg <= 125 Hz.
+  # Numerical-grid constraint.
+  # With Tt = 0.001 and min_samples_per_symbol = 8:
+  #   fs_msg <= 125 Hz
   min_samples_per_symbol: 8
 
   pulse_type: raised_cosine
   rolloff: 0.99
   span: 12
 
+  # If pulse_width is null:
+  #   pulse_width = pulse_width_fraction / fs_msg
   pulse_width: null
   pulse_width_fraction: 0.1
 
@@ -98,39 +310,28 @@ ppm:
   periodic_replicas: 10
   clip_recovered_to_unit_interval: true
 
+  # Normalize each PPM waveform to average power P.
   normalize_sensor_power: true
+
+# =============================================================================
+# SFC channel
+# =============================================================================
 
 channel:
   type: awgn
   collision_mode: sum
   detection_mode: threshold
+
+  # If threshold is not explicitly set, detector uses:
+  # threshold_factor * sqrt(P * tau / L)
   threshold_factor: 0.5
+
+  # Usually set to L for strict full-length map match.
   score_threshold: 4
+
+# =============================================================================
+# Semantic error detection
+# =============================================================================
 
 sed:
   discard_invalid_periods: true
-
-
-# =============================================================================
-# Benchmark + FDMA
-# =============================================================================
-
-benchmark:
-  # Benchmark sampling rate.
-  #
-  # If omitted in the pipeline, params.W is used.
-  # Here we set it explicitly to match signal.W.
-  sampling_rate: 12
-
-  # Effective sampling-rate multiplier used in the communication budget.
-  #
-  # Use:
-  #   1.0 for fs = W
-  #   2.0 for Nyquist-like fs = 2W
-  #
-  # Keep this consistent with the intended benchmark convention.
-  effective_rate_factor: 1.0
-
-
-reproducibility:
-  seed: 47

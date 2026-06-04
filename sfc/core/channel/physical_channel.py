@@ -3,82 +3,90 @@ sfc/core/channel/physical_channel.py
 
 Physical channel block for SFC.
 
-PRINCIPLE ENFORCED HERE
+Physical interpretation
 -----------------------
-We denote the signal-to-noise ratio by:
+This module models the SFC received resource-time frame after map placement and
+collision/superposition.
 
-    SNR = P / (B * N0)
-
-where:
-- P  : average transmit power per sensor
-- B  : total system bandwidth
-- N0 : noise parameter used by the SFC physical channel
-
-In the software:
-- cfg["system"]["SNR_dB"] represents this SNR in dB
-- the same P, B, and N0 are used consistently across models
-- P is also the same parameter used in the Benchmark capacity calculation
-
-CENTRALIZATION RULE
--------------------
-This module does NOT recompute local physical quantities such as:
-- SNR_linear
-- N0
-- E_tot
-- E_s
-- signal_level
-- default_threshold
-
-Instead, all these quantities are derived centrally through:
-
-    build_derived_system_parameters(cfg)
-
-so that the physical model remains consistent across:
-- physical_channel.py
-- detection.py
-- pipelines
-- future channel modules
-
-CURRENT INTERPRETATION
-----------------------
-At this stage of the implementation:
-
-1. The total available energy per cycle is:
-       E_tot = P * tau
-
-2. The energy per transmitted symbol/resource is:
-       E_s = E_tot / L = (P * tau) / L
-
-3. The output is interpreted as the matched-filter output per resource-slot:
-       y = sqrt(E_s) * signal + n
-
-4. The additive noise is complex Gaussian:
-       n ~ CN(0, N0)
-
-5. Using the manuscript relation:
-       SNR = P / (B * N0)
-   we derive:
-       N0 = P / (B * SNR_linear)
-
-IMPORTANT
----------
-This module now operates on the FINAL CHANNEL FRAME, i.e.:
+The input frame is:
 
     signal.shape = (rx_slots_total, R)
 
-and returns:
+and the output frame is:
 
     y.shape = (rx_slots_total, R)
 
-This is consistent with the manuscript-level idea that the channel operates on
-the received resource-time frame after the temporal placement of the maps.
+The SFC physical-power convention is:
 
-Future work may refine:
-- actual pulse shape
-- explicit matched filter in continuous/discrete time
-- fading
-- phase-aware collision superposition
+    P = average transmit power per sensor
+    tau = signal period
+    N = number of harmonics
+    L = number of active chips/rows per SFC map
+
+Each sensor transmits 2N semantic events per period. Each event map has L active
+chips. Therefore, each sensor transmits:
+
+    2 N L
+
+active chips per period.
+
+To enforce average transmit power P per sensor over tau, the total energy per
+sensor per period is:
+
+    E_sensor = P tau
+
+and the energy per active SFC chip is:
+
+    E_chip = P tau / (2 N L)
+
+The current SFC channel works at the matched-filter/resource-output level.
+Therefore, the signal multiplier is:
+
+    sfc_signal_level = sqrt(E_chip)
+                     = sqrt(P tau / (2 N L))
+
+This is the matched-filter equivalent of the manuscript pulse-amplitude formula:
+
+    A = sqrt(tau P B / (4 L R N))
+
+because, with chip duration:
+
+    T_chip = 2R / B
+
+we have:
+
+    sqrt(E_chip) = A sqrt(T_chip)
+
+Noise model
+-----------
+The additive noise is modeled as circular complex Gaussian:
+
+    n ~ CN(0, N0)
+
+implemented as:
+
+    n = sqrt(N0/2) (n_I + j n_Q)
+
+with:
+
+    n_I, n_Q ~ N(0, 1)
+
+so that:
+
+    E[|n|^2] = N0
+
+Important note
+--------------
+The scalar:
+
+    SNR_reference = P / (B N0)
+
+may still be reported by system_parameters.py as a classical wideband reference
+quantity. However, it is not the direct SFC event-detection SNR. The relevant
+SFC signal level at the matched-filter output is governed by E_chip.
 """
+
+from __future__ import annotations
 
 import numpy as np
 
@@ -97,10 +105,14 @@ class PhysicalChannel:
     Input / Output shape
     --------------------
     Input:
-        signal : (rx_slots_total, R)
+        signal : np.ndarray
+            Shape:
+                (rx_slots_total, R)
 
     Output:
-        y : (rx_slots_total, R), complex-valued
+        y : np.ndarray
+            Shape:
+                (rx_slots_total, R), complex-valued
     """
 
     def __init__(self, cfg):
@@ -111,17 +123,6 @@ class PhysicalChannel:
         ----------
         cfg : dict
             Configuration dictionary.
-
-        Notes
-        -----
-        The following quantities are obtained centrally from
-        `build_derived_system_parameters(cfg)`:
-
-        - SNR_linear
-        - N0
-        - E_tot = P * tau
-        - E_s   = (P * tau) / L
-        - signal_level = sqrt(E_s)
         """
 
         self.cfg = cfg
@@ -131,15 +132,87 @@ class PhysicalChannel:
         # ------------------------------------------------------------------
         self.params = build_derived_system_parameters(cfg)
 
-        self.P = self.params.P
-        self.B = self.params.B
-        self.SNR_dB = self.params.SNR_dB
-        self.SNR = self.params.SNR
+        self.P = float(self.params.P)
+        self.B = float(self.params.B)
+        self.N0 = float(self.params.N0)
+        self.tau = float(self.params.tau)
+        self.L = int(self.params.L)
+        self.R = int(self.params.R)
 
-        self.N0 = self.params.N0
-        self.E_tot = self.params.E_tot
-        self.E_s = self.params.E_s
-        self.signal_level = self.params.signal_level
+        # Classical wideband reference SNR, useful for diagnostics only.
+        self.SNR = float(self.params.SNR)
+        self.SNR_dB = float(self.params.SNR_dB)
+
+        # ------------------------------------------------------------------
+        # Number of harmonics N.
+        #
+        # Prefer explicit signal.N_override when available because the SFC
+        # phase/event representation in pipelines often fixes N this way.
+        # Otherwise, use the centrally derived params.N.
+        # ------------------------------------------------------------------
+        signal_cfg = cfg.get("signal", {})
+
+        if signal_cfg.get("N_override", None) is not None:
+            self.N = int(signal_cfg["N_override"])
+        else:
+            self.N = int(self.params.N)
+
+        if self.N < 1:
+            raise ValueError("SFC PhysicalChannel requires N >= 1.")
+
+        if self.L < 1:
+            raise ValueError("SFC PhysicalChannel requires L >= 1.")
+
+        if self.P <= 0:
+            raise ValueError("SFC PhysicalChannel requires P > 0.")
+
+        if self.tau <= 0:
+            raise ValueError("SFC PhysicalChannel requires tau > 0.")
+
+        if self.N0 <= 0:
+            raise ValueError("SFC PhysicalChannel requires N0 > 0.")
+
+        # ------------------------------------------------------------------
+        # SFC matched-filter/resource-output energy normalization.
+        #
+        # Each sensor transmits 2N events per period.
+        # Each event map has L active chips.
+        #
+        # E_sensor = P * tau
+        # E_chip   = E_sensor / (2 * N * L)
+        #
+        # Since this channel operates at matched-filter output level:
+        #
+        # y_clean = sqrt(E_chip) * signal
+        # ------------------------------------------------------------------
+        self.E_sensor = self.P * self.tau
+        self.num_events_per_sensor = 2 * self.N
+        self.num_active_chips_per_sensor = self.num_events_per_sensor * self.L
+
+        self.E_event = self.E_sensor / self.num_events_per_sensor
+        self.E_chip = self.E_sensor / self.num_active_chips_per_sensor
+
+        self.sfc_signal_level = float(np.sqrt(self.E_chip))
+
+        # Manuscript physical pulse amplitude.
+        #
+        # A = sqrt(tau P B / (4 L R N))
+        #
+        # This is not directly used in the matched-filter frame, but it is kept
+        # for diagnostics and consistency checks.
+        self.sfc_pulse_amplitude = float(
+            np.sqrt((self.tau * self.P * self.B) / (4.0 * self.L * self.R * self.N))
+        )
+
+        # ------------------------------------------------------------------
+        # Backward-compatible aliases.
+        #
+        # Some existing modules may still inspect E_tot, E_s, or signal_level.
+        # For SFC, signal_level should now mean the matched-filter chip level.
+        # ------------------------------------------------------------------
+        self.E_tot = self.E_sensor
+        self.E_s = self.E_chip
+        self.signal_level = self.sfc_signal_level
 
         # ------------------------------------------------------------------
         # Channel type
@@ -148,40 +221,25 @@ class PhysicalChannel:
 
     def transmit(self, signal):
         """
-        Transmit the final channel frame through the physical channel.
-
-        PRINCIPLE
-        ---------
-        This function enforces:
-
-            SNR = P / (B * N0)
-
-        via the centrally derived parameter:
-
-            N0 = P / (B * SNR_linear)
-
-        and models the matched-filter output as:
-
-            y = sqrt(E_s) * signal + n
-
-        with:
-            E_s = (P * tau) / L
-            n ~ CN(0, N0)
+        Transmit the final SFC resource-time frame through the physical channel.
 
         Parameters
         ----------
         signal : np.ndarray
             Final channel frame with shape:
+
                 (rx_slots_total, R)
 
             This matrix is interpreted as the structured resource-time frame
-            BEFORE physical-layer amplitude/noise effects.
+            before physical-layer matched-filter scaling and noise.
 
         Returns
         -------
         np.ndarray
-            Complex-valued received frame with the same shape as the input.
+            Complex-valued received frame with the same shape as input.
         """
+
+        signal = np.asarray(signal)
 
         assert len(signal.shape) == 2, \
             "signal must have shape (rx_slots_total, R)"
@@ -189,99 +247,73 @@ class PhysicalChannel:
         if self.mode == "clean":
             return self._clean(signal)
 
-        elif self.mode == "awgn":
+        if self.mode == "awgn":
             return self._awgn(signal)
 
-        else:
-            raise ValueError(f"Unknown channel type: {self.mode}")
+        raise ValueError(f"Unknown channel type: {self.mode}")
 
     def _clean(self, signal):
         """
-        Clean channel (no additive noise).
+        Clean channel without additive noise.
 
-        PRINCIPLE
-        ---------
-        The clean-channel output is interpreted as the matched-filter output
-        for the transmitted resource-time frame:
+        Matched-filter/resource-output model:
 
-            y = sqrt(E_s) * signal
+            y = sqrt(E_chip) * signal
 
         where:
-            E_s = (P * tau) / L
 
-        Parameters
-        ----------
-        signal : np.ndarray
-            Input frame with shape:
-                (rx_slots_total, R)
-
-        Returns
-        -------
-        np.ndarray
-            Complex-valued clean output frame.
+            E_chip = P tau / (2 N L)
         """
 
-        transmitted = self.signal_level * signal.astype(complex)
+        transmitted = self.sfc_signal_level * signal.astype(complex)
         return transmitted
 
     def _awgn(self, signal):
         """
-        Apply complex AWGN to the final channel frame.
+        Apply complex AWGN to the final SFC resource-time frame.
 
-        PRINCIPLE
-        ---------
-        This function enforces:
+        Matched-filter/resource-output model:
 
-            SNR = P / (B * N0)
-
-        through the centrally derived parameter:
-
-            N0 = P / (B * SNR_linear)
-
-        and uses the current matched-filter-output approximation:
-
-            y = sqrt(E_s) * signal + n
+            y = sqrt(E_chip) * signal + n
 
         where:
-            E_s = (P * tau) / L
+
+            E_chip = P tau / (2 N L)
 
         and:
+
             n ~ CN(0, N0)
-
-        Complex-noise generation
-        ------------------------
-        If:
-            n = n_I + j n_Q
-
-        then:
-            n_I ~ N(0, N0/2)
-            n_Q ~ N(0, N0/2)
-
-        so that:
-            E[|n|^2] = N0
-
-        Parameters
-        ----------
-        signal : np.ndarray
-            Input frame with shape:
-                (rx_slots_total, R)
-
-        Returns
-        -------
-        np.ndarray
-            Complex-valued noisy output frame.
-
-        Notes
-        -----
-        This is the correct place where the manuscript SNR affects the SFC:
-        - not as the SFC channel SNR itself,
-        - but through the derived N0, which sets the AWGN level.
         """
 
-        transmitted = self.signal_level * signal.astype(complex)
+        transmitted = self.sfc_signal_level * signal.astype(complex)
 
         noise = np.sqrt(self.N0 / 2.0) * (
             np.random.randn(*signal.shape) + 1j * np.random.randn(*signal.shape)
         )
 
         return transmitted + noise
+
+    def diagnostics(self):
+        """
+        Return physical-channel diagnostic quantities.
+        """
+
+        return {
+            "P": self.P,
+            "B": self.B,
+            "N0": self.N0,
+            "tau": self.tau,
+            "R": self.R,
+            "L": self.L,
+            "N": self.N,
+            "SNR_reference": self.SNR,
+            "SNR_reference_dB": self.SNR_dB,
+            "E_sensor": self.E_sensor,
+            "num_events_per_sensor": self.num_events_per_sensor,
+            "num_active_chips_per_sensor": self.num_active_chips_per_sensor,
+            "E_event": self.E_event,
+            "E_chip": self.E_chip,
+            "sfc_signal_level": self.sfc_signal_level,
+            "sfc_pulse_amplitude": self.sfc_pulse_amplitude,
+            "mode": self.mode,
+        }

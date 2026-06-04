@@ -28,23 +28,54 @@ By default, simulations should provide:
 
 and the builder computes:
 
-    SNR_total = P / (B * N0)
+    SNR_total_reference = P / (B * N0)
 
 For methods that use per-sensor bandwidth slices:
 
     B_s = alpha_s * B
     SNR_s = P / (B_s * N0)
 
-Fixed per-sensor SNR mode
--------------------------
-If system.P is null and system.SNR_dB is provided, this file interprets SNR_dB
-as the desired per-sensor SNR. Then P is derived from:
+SFC energy convention
+---------------------
+For SFC, P is the average transmit power per sensor over one period tau.
 
-    SNR_s = P / (B_s * N0)
+Each sensor transmits 2N semantic events per period, and each event map has L
+active chips. Therefore, each sensor transmits:
 
-For a scalar P shared by all sensors, this is only consistent for uniform
-bandwidth allocation. For nonuniform allocation, either use fixed P,N0 or extend
-the model to sensor-dependent powers P_s.
+    2 N L
+
+active chips per period.
+
+The total energy per sensor per period is:
+
+    E_sensor = P tau
+
+The SFC event energy is:
+
+    E_event = P tau / (2N)
+
+The SFC active-chip energy is:
+
+    E_chip = P tau / (2 N L)
+
+Since the current SFC physical channel operates at the matched-filter /
+resource-output level, the signal level used by physical_channel.py and
+detection.py is:
+
+    sfc_signal_level = sqrt(E_chip)
+                     = sqrt(P tau / (2 N L))
+
+The corresponding manuscript physical pulse amplitude is:
+
+    A = sqrt(tau P B / (4 L R N))
+
+assuming chip duration:
+
+    T_chip = 2R / B
+
+so that:
+
+    sqrt(E_chip) = A sqrt(T_chip)
 
 Compatibility
 -------------
@@ -81,10 +112,6 @@ from sfc.core.theory import (
     compute_slots_per_period as theory_compute_slots_per_period,
     compute_event_slots_total as theory_compute_event_slots_total,
     compute_rx_slots_total as theory_compute_rx_slots_total,
-    compute_total_energy as theory_compute_total_energy,
-    compute_symbol_energy as theory_compute_symbol_energy,
-    compute_signal_level as theory_compute_signal_level,
-    compute_default_detection_threshold as theory_compute_default_detection_threshold,
 )
 
 
@@ -103,11 +130,29 @@ class DerivedSystemParameters:
     P: float
     N0: float
 
+    # -------------------------------------------------------------------------
+    # Legacy/general energy fields
+    # -------------------------------------------------------------------------
     E_tot: float
     E_s: float
     signal_level: float
     default_threshold: float
 
+    # -------------------------------------------------------------------------
+    # SFC-specific energy fields
+    # -------------------------------------------------------------------------
+    sfc_E_sensor: float
+    sfc_num_events_per_sensor: int
+    sfc_num_active_chips_per_sensor: int
+    sfc_E_event: float
+    sfc_E_chip: float
+    sfc_signal_level: float
+    sfc_pulse_amplitude: float
+    sfc_default_threshold: float
+
+    # -------------------------------------------------------------------------
+    # SNR diagnostics
+    # -------------------------------------------------------------------------
     SNR: float
     SNR_dB: float
     SNR_per_sensor: np.ndarray
@@ -144,8 +189,10 @@ def _as_optional_float(value):
     """
     Convert value to float unless value is None.
     """
+
     if value is None:
         return None
+
     return float(value)
 
 
@@ -153,6 +200,7 @@ def _safe_log10(x):
     """
     Safe log10 for positive scalar/array.
     """
+
     x = np.asarray(x, dtype=float)
     return 10.0 * np.log10(np.maximum(x, np.finfo(float).tiny))
 
@@ -484,6 +532,24 @@ def build_derived_system_parameters(cfg: Dict[str, Any]) -> DerivedSystemParamet
     R = int(system_cfg.get("R", 1))
     L = int(system_cfg.get("L", 1))
 
+    if S < 1:
+        raise ValueError("system.S must be >= 1.")
+
+    if B <= 0:
+        raise ValueError("system.B must be positive.")
+
+    if W <= 0:
+        raise ValueError("signal.W must be positive.")
+
+    if tau <= 0:
+        raise ValueError("signal.tau must be positive.")
+
+    if R < 1:
+        raise ValueError("system.R must be >= 1.")
+
+    if L < 1:
+        raise ValueError("system.L must be >= 1.")
+
     n_periods = int(
         signal_cfg.get(
             "n_periods",
@@ -493,6 +559,20 @@ def build_derived_system_parameters(cfg: Dict[str, Any]) -> DerivedSystemParamet
             )
         )
     )
+
+    if n_periods < 1:
+        raise ValueError("n_periods must be >= 1.")
+
+    # -------------------------------------------------------------------------
+    # Harmonics
+    # -------------------------------------------------------------------------
+    if "N_override" in signal_cfg and signal_cfg["N_override"] is not None:
+        N = int(signal_cfg["N_override"])
+    else:
+        N = theory_compute_N(W=W, tau=tau)
+
+    if N < 1:
+        raise ValueError("Number of harmonics N must be >= 1.")
 
     # -------------------------------------------------------------------------
     # Bandwidth allocation
@@ -525,43 +605,60 @@ def build_derived_system_parameters(cfg: Dict[str, Any]) -> DerivedSystemParamet
     SNR_per_sensor_dB = _safe_log10(SNR_per_sensor)
 
     # -------------------------------------------------------------------------
-    # Energy / amplitude quantities used by SFC physical channel and detector
+    # Energy / amplitude quantities
     # -------------------------------------------------------------------------
     threshold_factor = float(
         cfg.get("channel", {}).get("threshold_factor", 0.5)
     )
 
-    E_tot = theory_compute_total_energy(
-        P=P,
-        tau=tau,
-    )
-
-    E_s = theory_compute_symbol_energy(
-        P=P,
-        tau=tau,
-        L=L,
-    )
-
-    signal_level = theory_compute_signal_level(
-        P=P,
-        tau=tau,
-        L=L,
-    )
-
-    default_threshold = theory_compute_default_detection_threshold(
-        P=P,
-        tau=tau,
-        L=L,
-        threshold_factor=threshold_factor,
-    )
+    # General total energy per sensor per period.
+    E_tot = P * tau
 
     # -------------------------------------------------------------------------
-    # Harmonics
+    # SFC-specific energy convention.
+    #
+    # Each sensor transmits 2N events per period.
+    # Each event has L active chips.
+    #
+    # E_sensor = P tau
+    # E_event  = P tau / (2N)
+    # E_chip   = P tau / (2NL)
+    #
+    # The current SFC channel operates at matched-filter/resource-output level,
+    # so the signal level is sqrt(E_chip).
     # -------------------------------------------------------------------------
-    if "N_override" in signal_cfg and signal_cfg["N_override"] is not None:
-        N = int(signal_cfg["N_override"])
-    else:
-        N = theory_compute_N(W=W, tau=tau)
+    sfc_E_sensor = E_tot
+    sfc_num_events_per_sensor = 2 * N
+    sfc_num_active_chips_per_sensor = sfc_num_events_per_sensor * L
+
+    sfc_E_event = sfc_E_sensor / sfc_num_events_per_sensor
+    sfc_E_chip = sfc_E_sensor / sfc_num_active_chips_per_sensor
+
+    sfc_signal_level = float(np.sqrt(sfc_E_chip))
+
+    sfc_pulse_amplitude = float(
+        np.sqrt((tau * P * B) / (4.0 * L * R * N))
+    )
+
+    sfc_default_threshold = float(threshold_factor * sfc_signal_level)
+
+    # -------------------------------------------------------------------------
+    # Backward-compatible aliases.
+    #
+    # Historically:
+    #   E_s = P*tau/L
+    #   signal_level = sqrt(E_s)
+    #
+    # For SFC consistency, these aliases now point to the SFC active-chip
+    # matched-filter quantities:
+    #
+    #   E_s = E_chip
+    #   signal_level = sqrt(E_chip)
+    #   default_threshold = threshold_factor * sqrt(E_chip)
+    # -------------------------------------------------------------------------
+    E_s = sfc_E_chip
+    signal_level = sfc_signal_level
+    default_threshold = sfc_default_threshold
 
     # -------------------------------------------------------------------------
     # Quantization policy
@@ -617,6 +714,14 @@ def build_derived_system_parameters(cfg: Dict[str, Any]) -> DerivedSystemParamet
         E_s=E_s,
         signal_level=signal_level,
         default_threshold=default_threshold,
+        sfc_E_sensor=sfc_E_sensor,
+        sfc_num_events_per_sensor=sfc_num_events_per_sensor,
+        sfc_num_active_chips_per_sensor=sfc_num_active_chips_per_sensor,
+        sfc_E_event=sfc_E_event,
+        sfc_E_chip=sfc_E_chip,
+        sfc_signal_level=sfc_signal_level,
+        sfc_pulse_amplitude=sfc_pulse_amplitude,
+        sfc_default_threshold=sfc_default_threshold,
         SNR=SNR_total,
         SNR_dB=SNR_total_dB,
         SNR_per_sensor=SNR_per_sensor,
@@ -648,7 +753,6 @@ __all__ = [
     "DerivedSystemParameters",
     "build_derived_system_parameters",
     "resolve_power_noise_model",
-
     "compute_M_rbcp_per_sensor",
     "compute_M_rbcp",
     "compute_benchmark_M_per_sensor",

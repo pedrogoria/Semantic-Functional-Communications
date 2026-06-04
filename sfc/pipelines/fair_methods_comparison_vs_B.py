@@ -27,52 +27,77 @@ Derived quantities:
     SNR_s   = P / (B_s * N0)
     C_s     = B_s * log2(1 + SNR_s)
 
-Method-specific interpretation
-------------------------------
-Benchmark + FDMA:
-    - each sensor gets bandwidth B_s
-    - each sensor has SNR_s
-    - feasible quantization bins M_s are derived from the per-sensor budget
-    - analytical absolute MSE:
-          MSE_s = peak_to_peak^2 / (12 M_s^2)
+CS + FDMA convention in this pipeline
+-------------------------------------
+The CS branch uses the physically clearer chain:
 
-CS + FDMA:
-    - each sensor gets bandwidth B_s
-    - each sensor has SNR_s
-    - available bits per cycle are C_s * tau
-    - number of CS measurements is derived from this bit budget
-    - IMPORTANT: this branch models CS measurements as a capacity-limited
-      digital payload. Transmission noise is accounted for through the
-      admissible number of measurements, not by adding AWGN directly to
-      the CS measurement vector.
+    x(t) -> x[n] -> y = Phi x[n] -> q = Q(y) -> y_tilde
+         -> x_hat[n] -> x_hat(t)
 
-PPM + FDMA:
-    - each sensor gets bandwidth B_s
-    - PPM message rate fs_msg is constrained by B_s
-    - PPM message rate fs_msg is also constrained by the numerical time grid
-    - AWGN uses SNR_s
-    - PPM waveform is normalized to average power P per sensor
+where:
 
-RbCP:
-    - uses M_RbCP derived from the per-sensor bandwidth/sensor-capacity budget
-    - common M_RbCP is min_s M_RbCP,s
-    - reconstructs from quantized phase coefficients
+    x(t)
+        dense numerical reference signal.
 
-RbCP_time:
-    - uses M_time derived from the SFC event-time grid using total B
-    - reconstructs from phase coefficients quantized using M_time
+    x[n]
+        uniform samples of x(t), sampled at the same rate used by the
+        Benchmark branch.
+
+    y
+        CS measurements.
+
+    q
+        quantized CS measurement indices, if quantization is enabled.
+
+    x_hat[n]
+        recovered sample vector.
+
+    x_hat(t)
+        sinc reconstruction from x_hat[n].
 
 SFC:
-    - SFC uses total bandwidth B
-    - SFC does not use B_s
-    - SFC channel receives the full system config
+    - each sensor has average power P over the period tau
+    - SFC does not use per-sensor FDMA bandwidth B_s
+    - SFC uses the total event-time grid associated with total bandwidth B
+    - SFC pulse amplitudes/energies must be normalized so that each sensor
+      satisfies average transmit power P
+    - SFC detection should be parameterized by pulse energy and N0, not by
+      the scalar SNR_total = P / (B N0) alone
 
-SFC + SED:
-    - uses the same SFC detected events as native SFC
-    - applies semantic error detection/correction before reconstruction
-    - reports valid-period fraction
+Fair CS budget rule
+-------------------
+In this version, the CS branch tries to transmit all samples x[n] whenever the
+channel budget allows it.
 
-IMPORTANT SOURCE-BANDWIDTH CONVENTION
+Let:
+
+    N_s = number of uniform samples per period
+    C_s = per-sensor Shannon capacity
+    tau = signal period
+    bits_available = C_s * tau
+
+If possible:
+
+    M_s = N_s
+    measurement_bits_s = floor(bits_available / N_s)
+
+If measurement_bits_s < 1, then the channel cannot carry all N_s measurements
+even with one bit per measurement. In that case:
+
+    measurement_bits_s = 1
+    M_s = floor(bits_available)
+
+If M_s < 1, the CS branch for that sensor is infeasible.
+
+The OMP sparsity is not a channel quantity. Here it is set to the largest
+possible effective value:
+
+    K_eff = min(M_s, N_s)
+
+This favors CS by allowing the receiver to use as many active coefficients as
+the measurement system can support.
+
+Important source-bandwidth convention
 -------------------------------------
 The source signal is filtered using the configured source bandwidth:
 
@@ -90,7 +115,7 @@ filter.
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -147,15 +172,13 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
         N = int(cfg_B["signal"].get("N_override", params.N))
         n_trials = int(cfg_B["monte_carlo"]["interactions"])
 
-        # ---------------------------------------------------------------------
-        # Benchmark + FDMA is analytical, so compute once per B.
-        # ---------------------------------------------------------------------
         mse_benchmark_fdma, M_benchmark_per_sensor = _run_benchmark_fdma_branch(
             cfg=cfg_B,
             params=params
         )
 
         M_benchmark_arr = np.asarray(M_benchmark_per_sensor, dtype=object)
+
         M_benchmark_min = (
             _safe_min_int(M_benchmark_arr)
             if M_benchmark_arr.size > 0
@@ -209,6 +232,12 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
         sfc_sed_valid_sum = 0.0
 
         cs_measurements_all = []
+        cs_sampling_rate_all = []
+        cs_num_samples_all = []
+        cs_measurement_bits_all = []
+        cs_sparsity_eff_all = []
+        cs_quantized_fraction_all = []
+
         ppm_fs_msg_all = []
 
         run_sfc = cfg_B.get("mode", {}).get("run_sfc", True)
@@ -259,6 +288,12 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
                 sfc_sed_valid_sum += trial["sfc_sed_valid_fraction"]
 
             cs_measurements_all.extend(trial["cs_measurements"])
+            cs_sampling_rate_all.extend(trial["cs_sampling_rate"])
+            cs_num_samples_all.extend(trial["cs_num_samples"])
+            cs_measurement_bits_all.extend(trial["cs_measurement_bits"])
+            cs_sparsity_eff_all.extend(trial["cs_sparsity_eff"])
+            cs_quantized_fraction_all.extend(trial["cs_quantized_fraction"])
+
             ppm_fs_msg_all.extend(trial["ppm_fs_msg"])
 
             if (i + 1) % max(1, n_trials // 5) == 0:
@@ -286,6 +321,11 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
         )
 
         cs_measurements_all = np.asarray(cs_measurements_all, dtype=float)
+        cs_sampling_rate_all = np.asarray(cs_sampling_rate_all, dtype=float)
+        cs_num_samples_all = np.asarray(cs_num_samples_all, dtype=float)
+        cs_measurement_bits_all = np.asarray(cs_measurement_bits_all, dtype=float)
+        cs_sparsity_eff_all = np.asarray(cs_sparsity_eff_all, dtype=float)
+        cs_quantized_fraction_all = np.asarray(cs_quantized_fraction_all, dtype=float)
         ppm_fs_msg_all = np.asarray(ppm_fs_msg_all, dtype=float)
 
         cs_measurements_min = (
@@ -296,6 +336,41 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
         cs_measurements_max = (
             float(np.max(cs_measurements_all))
             if cs_measurements_all.size > 0
+            else np.nan
+        )
+        cs_sampling_rate = (
+            float(np.mean(cs_sampling_rate_all))
+            if cs_sampling_rate_all.size > 0
+            else np.nan
+        )
+        cs_num_samples = (
+            float(np.mean(cs_num_samples_all))
+            if cs_num_samples_all.size > 0
+            else np.nan
+        )
+        cs_measurement_bits_min = (
+            float(np.min(cs_measurement_bits_all))
+            if cs_measurement_bits_all.size > 0
+            else np.nan
+        )
+        cs_measurement_bits_max = (
+            float(np.max(cs_measurement_bits_all))
+            if cs_measurement_bits_all.size > 0
+            else np.nan
+        )
+        cs_sparsity_eff_min = (
+            float(np.min(cs_sparsity_eff_all))
+            if cs_sparsity_eff_all.size > 0
+            else np.nan
+        )
+        cs_sparsity_eff_max = (
+            float(np.max(cs_sparsity_eff_all))
+            if cs_sparsity_eff_all.size > 0
+            else np.nan
+        )
+        cs_quantized_fraction = (
+            float(np.mean(cs_quantized_fraction_all))
+            if cs_quantized_fraction_all.size > 0
             else np.nan
         )
 
@@ -340,6 +415,16 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
             "sfc_sed_valid_fraction": sfc_sed_valid_fraction,
             "cs_measurements_min": cs_measurements_min,
             "cs_measurements_max": cs_measurements_max,
+            "cs_sampling_rate": cs_sampling_rate,
+            "cs_num_samples": cs_num_samples,
+            "cs_measurement_bits_min": cs_measurement_bits_min,
+            "cs_measurement_bits_max": cs_measurement_bits_max,
+            "cs_sparsity_eff_min": cs_sparsity_eff_min,
+            "cs_sparsity_eff_max": cs_sparsity_eff_max,
+            "cs_quantize_measurements": bool(
+                cfg_B.get("cs", {}).get("quantize_measurements", False)
+            ),
+            "cs_quantized_fraction": cs_quantized_fraction,
             "ppm_fs_msg_min": ppm_fs_msg_min,
             "ppm_fs_msg_max": ppm_fs_msg_max,
             "num_trials": n_trials,
@@ -393,10 +478,24 @@ def _run_one_trial(
     sfc_sed_valid_fraction = np.nan
 
     cs_measurements = []
+    cs_sampling_rate = []
+    cs_num_samples = []
+    cs_measurement_bits = []
+    cs_sparsity_eff = []
+    cs_quantized_fraction = []
+
     ppm_fs_msg = []
 
     if cfg.get("mode", {}).get("run_cs_fdma", True):
-        mse_cs_fdma, cs_measurements = _run_cs_fdma_branch(
+        (
+            mse_cs_fdma,
+            cs_measurements,
+            cs_sampling_rate,
+            cs_num_samples,
+            cs_measurement_bits,
+            cs_sparsity_eff,
+            cs_quantized_fraction,
+        ) = _run_cs_fdma_branch(
             x_ref=x_ref,
             t=t,
             cfg=cfg,
@@ -457,6 +556,11 @@ def _run_one_trial(
         "mse_sfc_sed": mse_sfc_sed,
         "sfc_sed_valid_fraction": sfc_sed_valid_fraction,
         "cs_measurements": cs_measurements,
+        "cs_sampling_rate": cs_sampling_rate,
+        "cs_num_samples": cs_num_samples,
+        "cs_measurement_bits": cs_measurement_bits,
+        "cs_sparsity_eff": cs_sparsity_eff,
+        "cs_quantized_fraction": cs_quantized_fraction,
         "ppm_fs_msg": ppm_fs_msg,
     }
 
@@ -533,6 +637,101 @@ def _generate_common_source(
                 x_out[:, p, s] = x_filtered[:, p, s] - dc
 
     return x_out
+
+
+# =============================================================================
+# SAMPLING / SINC HELPERS
+# =============================================================================
+
+def _resolve_benchmark_sampling_rate(cfg: Dict[str, Any], params) -> float:
+    """
+    Resolve the uniform sampling rate shared by Benchmark and CS.
+
+    Convention:
+        fs = effective_rate_factor * sampling_rate
+    """
+
+    benchmark_cfg = cfg.get("benchmark", {})
+    sampling_rate = float(benchmark_cfg.get("sampling_rate", params.W))
+    effective_rate_factor = float(benchmark_cfg.get("effective_rate_factor", 2.0))
+
+    fs = effective_rate_factor * sampling_rate
+
+    if fs <= 0:
+        raise ValueError("Resolved sampling rate must be positive.")
+
+    return fs
+
+
+def _sample_signal_tensor_uniform(
+    x_ref: np.ndarray,
+    t_dense: np.ndarray,
+    tau: float,
+    fs: float
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Uniformly sample a dense signal tensor.
+    """
+
+    Ts = 1.0 / fs
+    t_samples = np.arange(0.0, tau, Ts)
+
+    _, n_periods, S = x_ref.shape
+    x_samples = np.zeros((len(t_samples), n_periods, S), dtype=float)
+
+    for p in range(n_periods):
+        for s in range(S):
+            x_samples[:, p, s] = np.interp(
+                t_samples,
+                t_dense,
+                x_ref[:, p, s]
+            )
+
+    return t_samples, x_samples
+
+
+def _sinc_reconstruct_from_samples(
+    x_samples_1d: np.ndarray,
+    t_eval: np.ndarray,
+    fs: float
+) -> np.ndarray:
+    """
+    Reconstruct continuous-time signal from uniform samples using sinc.
+    """
+
+    x_samples_1d = np.asarray(x_samples_1d, dtype=float)
+    t_eval = np.asarray(t_eval, dtype=float)
+
+    n = np.arange(len(x_samples_1d))
+    x_hat = np.zeros_like(t_eval, dtype=float)
+
+    for i, ti in enumerate(t_eval):
+        x_hat[i] = np.sum(x_samples_1d * np.sinc(fs * ti - n))
+
+    return x_hat
+
+
+def _sinc_reconstruct_tensor(
+    x_samples: np.ndarray,
+    t_eval: np.ndarray,
+    fs: float
+) -> np.ndarray:
+    """
+    Apply sinc reconstruction to tensor.
+    """
+
+    _, n_periods, S = x_samples.shape
+    x_hat = np.zeros((len(t_eval), n_periods, S), dtype=float)
+
+    for p in range(n_periods):
+        for s in range(S):
+            x_hat[:, p, s] = _sinc_reconstruct_from_samples(
+                x_samples[:, p, s],
+                t_eval,
+                fs
+            )
+
+    return x_hat
 
 
 # =============================================================================
@@ -664,16 +863,6 @@ def _run_benchmark_fdma_branch(
 ) -> Tuple[float, np.ndarray]:
     """
     Run analytical Benchmark + FDMA branch.
-
-    The Benchmark branch computes feasible per-sensor quantization bins M_s
-    from the per-sensor physical budget:
-
-        B_s = alpha_s * B
-        SNR_s = P / (B_s * N0)
-
-    and returns the average absolute quantization MSE:
-
-        MSE_s = peak_to_peak^2 / (12 M_s^2)
     """
 
     if not cfg.get("mode", {}).get("run_benchmark_fdma", True):
@@ -742,24 +931,47 @@ def _run_cs_fdma_branch(
     cfg: Dict[str, Any],
     params,
     rng: np.random.Generator
-) -> Tuple[float, List[int]]:
+) -> Tuple[float, List[int], List[float], List[int], List[int], List[int], List[float]]:
     """
     Run CS + FDMA branch.
+
+    Model:
+        x(t) -> uniform samples x[n] -> CS -> x_hat[n] -> sinc -> x_hat(t)
     """
 
     cs_cfg = cfg.get("cs", {})
 
-    bits_per_measurement = float(cs_cfg.get("bits_per_measurement", 8.0))
-    sparsity_cfg = int(cs_cfg.get("sparsity", 5))
     basis = cs_cfg.get("basis", "dct")
     sensing_matrix = cs_cfg.get("sensing_matrix", "gaussian")
     normalize_dictionary_columns = cs_cfg.get("normalize_dictionary_columns", True)
     store_true_representation = cs_cfg.get("store_true_representation", False)
 
-    n_time, _, S = x_ref.shape
+    quantize_measurements = bool(cs_cfg.get("quantize_measurements", False))
+    quantization_mode = cs_cfg.get("measurement_quantization_mode", "uniform_midrise")
+    quantization_range = cs_cfg.get("measurement_quantization_range", "per_signal")
+    measurement_quantization_min = cs_cfg.get("measurement_quantization_min", None)
+    measurement_quantization_max = cs_cfg.get("measurement_quantization_max", None)
+    clip_quantization = bool(cs_cfg.get("clip_quantization", True))
 
-    x_hat = np.zeros_like(x_ref)
-    measurements_per_sensor = []
+    fs = _resolve_benchmark_sampling_rate(cfg, params)
+
+    t_samples, x_samples = _sample_signal_tensor_uniform(
+        x_ref=x_ref,
+        t_dense=t,
+        tau=params.tau,
+        fs=fs
+    )
+
+    n_samples, _, S = x_samples.shape
+
+    x_hat_samples = np.zeros_like(x_samples)
+
+    measurements_per_sensor: List[int] = []
+    sampling_rate_per_sensor: List[float] = []
+    num_samples_per_sensor: List[int] = []
+    measurement_bits_per_sensor: List[int] = []
+    sparsity_eff_per_sensor: List[int] = []
+    quantized_fraction_per_sensor: List[float] = []
 
     for s in range(S):
         B_sensor = float(params.B_per_sensor[s])
@@ -767,11 +979,51 @@ def _run_cs_fdma_branch(
         capacity_sensor = B_sensor * np.log2(1.0 + snr_sensor)
         bits_per_cycle = capacity_sensor * params.tau
 
-        n_measurements = int(np.floor(bits_per_cycle / bits_per_measurement))
-        n_measurements = max(1, min(n_measurements, n_time))
+        # ---------------------------------------------------------------------
+        # Fair CS allocation:
+        #
+        # 1. Try to transmit all samples x[n]:
+        #       M = n_samples
+        #
+        # 2. Use the largest integer measurement_bits allowed by the channel:
+        #       measurement_bits = floor(bits_per_cycle / n_samples)
+        #
+        # 3. If not even 1 bit/sample is possible, use 1 bit and reduce M:
+        #       M = floor(bits_per_cycle)
+        # ---------------------------------------------------------------------
+        measurement_bits_full = int(np.floor(bits_per_cycle / n_samples))
 
-        sparsity_eff = min(sparsity_cfg, n_measurements)
-        measurements_per_sensor.append(n_measurements)
+        if measurement_bits_full >= 1:
+            n_measurements = n_samples
+            measurement_bits = measurement_bits_full
+        else:
+            measurement_bits = 1
+            n_measurements = int(np.floor(bits_per_cycle))
+
+            if n_measurements < 1:
+                # Channel cannot carry even one 1-bit measurement.
+                return (
+                    np.nan,
+                    measurements_per_sensor,
+                    sampling_rate_per_sensor,
+                    num_samples_per_sensor,
+                    measurement_bits_per_sensor,
+                    sparsity_eff_per_sensor,
+                    quantized_fraction_per_sensor,
+                )
+
+            n_measurements = min(n_measurements, n_samples)
+
+        # K is not a channel parameter. Here we use the largest effective
+        # sparsity that the measurement system can support.
+        sparsity_eff = min(n_measurements, n_samples)
+
+        measurements_per_sensor.append(int(n_measurements))
+        sampling_rate_per_sensor.append(float(fs))
+        num_samples_per_sensor.append(int(n_samples))
+        measurement_bits_per_sensor.append(int(measurement_bits))
+        sparsity_eff_per_sensor.append(int(sparsity_eff))
+        quantized_fraction_per_sensor.append(1.0 if quantize_measurements else 0.0)
 
         cs_random_state = cs_cfg.get("random_state", None)
         if cs_random_state is None:
@@ -785,22 +1037,43 @@ def _run_cs_fdma_branch(
             random_state=cs_random_state,
             normalize_dictionary_columns=normalize_dictionary_columns,
             store_true_representation=store_true_representation,
+            quantize_measurements=quantize_measurements,
+            measurement_bits=measurement_bits,
+            quantization_mode=quantization_mode,
+            quantization_range=quantization_range,
+            measurement_quantization_min=measurement_quantization_min,
+            measurement_quantization_max=measurement_quantization_max,
+            clip_quantization=clip_quantization,
         )
 
-        x_sensor = x_ref[:, :, s:s + 1]
+        x_sensor_samples = x_samples[:, :, s:s + 1]
 
         acq = cs_core.acquire(
-            x=x_sensor,
-            t=t
+            x=x_sensor_samples,
+            t=t_samples
         )
 
         rec = cs_core.reconstruct(acq)
 
-        x_hat[:, :, s:s + 1] = rec.reconstructed_signal
+        x_hat_samples[:, :, s:s + 1] = rec.reconstructed_signal
 
-    mse = float(np.mean((x_ref - x_hat) ** 2))
+    x_hat_dense = _sinc_reconstruct_tensor(
+        x_samples=x_hat_samples,
+        t_eval=t,
+        fs=fs
+    )
 
-    return mse, measurements_per_sensor
+    mse = float(np.mean((x_ref - x_hat_dense) ** 2))
+
+    return (
+        mse,
+        measurements_per_sensor,
+        sampling_rate_per_sensor,
+        num_samples_per_sensor,
+        measurement_bits_per_sensor,
+        sparsity_eff_per_sensor,
+        quantized_fraction_per_sensor,
+    )
 
 
 # =============================================================================
@@ -1085,7 +1358,15 @@ def _run_sfc_family_branch(
         )
 
     if run_sfc_sed:
-        period_slots = events_est.shape[0] // n_periods
+        event_slots_total = events_est.shape[0]
+
+        if event_slots_total % n_periods != 0:
+            raise ValueError(
+                f"event_slots_total={event_slots_total} is not divisible by "
+                f"n_periods={n_periods}. SED period segmentation is ambiguous."
+            )
+
+        period_slots = event_slots_total // n_periods
 
         sed_result = detect_semantic_errors(
             events_est=events_est,
@@ -1123,6 +1404,8 @@ def _mse_from_sfc_events(
 ) -> float:
     """
     Convert event estimates to ta/tb, reconstruct, and compute MSE.
+
+    If period_valid_mask is provided, only valid periods enter the MSE.
     """
 
     ta_rec, tb_rec = phase_core.event_to_ta_tb(events_for_rec)
@@ -1341,8 +1624,6 @@ def _fits_int64(value) -> bool:
 def _safe_table_value(value):
     """
     Return value as int if it fits int64, otherwise as string.
-
-    This avoids pandas/numpy integer overflow for very large M_RbCP values.
     """
 
     if isinstance(value, float) and np.isnan(value):

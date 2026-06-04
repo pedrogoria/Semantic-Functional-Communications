@@ -14,6 +14,7 @@ framework, including:
 - feasible Benchmark M under per-sensor bandwidth/power/noise constraints
 - SFC time-slot relations
 - duplicate-reception upper bound
+- SFC energy/amplitude helper formulas
 - physical helper formulas
 
 Design rule
@@ -38,6 +39,48 @@ the sensor SNR is:
 
 Therefore, functions of the form compute_M_*(...) receive P and N0 by default
 and compute SNR_s internally.
+
+SFC energy convention
+---------------------
+For SFC, P is the average transmit power per sensor over one period tau.
+
+Each sensor transmits 2N semantic events per period. Each event map has L
+active chips. Therefore, each sensor transmits:
+
+    2 N L
+
+active chips per period.
+
+The total energy per sensor per period is:
+
+    E_sensor = P tau
+
+The SFC event energy is:
+
+    E_event = P tau / (2N)
+
+The SFC active-chip energy is:
+
+    E_chip = P tau / (2 N L)
+
+Since the current SFC physical channel operates at the matched-filter /
+resource-output level, the signal level used by physical_channel.py and
+detection.py is:
+
+    sfc_signal_level = sqrt(E_chip)
+                     = sqrt(P tau / (2 N L))
+
+The corresponding manuscript physical pulse amplitude is:
+
+    A = sqrt(tau P B / (4 L R N))
+
+assuming chip duration:
+
+    T_chip = 2R / B
+
+so that:
+
+    sqrt(E_chip) = A sqrt(T_chip)
 
 Quantization policy
 -------------------
@@ -69,6 +112,13 @@ def compute_N(W: float, tau: float) -> int:
 
         N = floor(W * tau / 2)
     """
+
+    if W <= 0:
+        raise ValueError("W must be positive.")
+
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
     return int(np.floor((W * tau) / 2.0))
 
 
@@ -76,13 +126,15 @@ def compute_snr_linear(SNR_dB: float) -> float:
     """
     Convert SNR from dB to linear scale.
     """
-    return 10.0 ** (SNR_dB / 10.0)
+
+    return 10.0 ** (float(SNR_dB) / 10.0)
 
 
 def compute_snr_db(SNR: float) -> float:
     """
     Convert SNR from linear scale to dB.
     """
+
     return 10.0 * np.log10(max(float(SNR), np.finfo(float).tiny))
 
 
@@ -92,7 +144,14 @@ def compute_capacity(B: float, SNR: float) -> float:
 
         C = B * log2(1 + SNR)
     """
-    return B * np.log2(1.0 + SNR)
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if SNR < 0:
+        raise ValueError("SNR must be nonnegative.")
+
+    return float(B * np.log2(1.0 + SNR))
 
 
 def compute_sensor_snr(P: float, B_sensor: float, N0: float) -> float:
@@ -112,14 +171,17 @@ def compute_sensor_snr(P: float, B_sensor: float, N0: float) -> float:
     N0 : float
         Noise spectral-density / noise parameter.
     """
+
     if P <= 0:
         raise ValueError("P must be positive.")
+
     if B_sensor <= 0:
         raise ValueError("B_sensor must be positive.")
+
     if N0 <= 0:
         raise ValueError("N0 must be positive.")
 
-    return P / (B_sensor * N0)
+    return float(P / (B_sensor * N0))
 
 
 # =============================================================================
@@ -189,7 +251,7 @@ def compute_q(M_rbcp: float) -> float:
     """
 
     M_rbcp = max(float(M_rbcp), 1.0)
-    return (M_rbcp / (2.0 * np.pi)) * np.sin(np.pi / M_rbcp)
+    return float((M_rbcp / (2.0 * np.pi)) * np.sin(np.pi / M_rbcp))
 
 
 def rbcp_mse_upper_bound(N: int, Q: float) -> float:
@@ -198,7 +260,8 @@ def rbcp_mse_upper_bound(N: int, Q: float) -> float:
 
         MSE_upper = 4 * N * (1/2 - Q) * (3/2 - Q)
     """
-    return 4.0 * N * (0.5 - Q) * (1.5 - Q)
+
+    return float(4.0 * N * (0.5 - Q) * (1.5 - Q))
 
 
 def rbcp_mse_lower_bound(N: int, Q: float) -> float:
@@ -207,7 +270,8 @@ def rbcp_mse_lower_bound(N: int, Q: float) -> float:
 
         MSE_lower = N * (1 - 4Q^2)
     """
-    return N * (1.0 - 4.0 * Q * Q)
+
+    return float(N * (1.0 - 4.0 * Q * Q))
 
 
 def rbcp_mse_star(N: int, Q: float) -> float:
@@ -216,7 +280,8 @@ def rbcp_mse_star(N: int, Q: float) -> float:
 
         MSE*_RbCP = 2N (1 - 2Q)
     """
-    return 2.0 * N * (1.0 - 2.0 * Q)
+
+    return float(2.0 * N * (1.0 - 2.0 * Q))
 
 
 # =============================================================================
@@ -233,8 +298,13 @@ def compute_M_rbcp_from_M(M: float, W: float, tau: float) -> float:
 
         N = floor(W * tau / 2)
     """
+
     N = compute_N(W, tau)
-    return M * tau * W / (2.0 * N)
+
+    if N <= 0:
+        raise ValueError("Computed N must be positive.")
+
+    return float(M * tau * W / (2.0 * N))
 
 
 def compute_M_from_M_rbcp(M_rbcp: float, W: float, tau: float) -> float:
@@ -243,8 +313,13 @@ def compute_M_from_M_rbcp(M_rbcp: float, W: float, tau: float) -> float:
 
         M = M_RbCP * (2N) / (tau * W)
     """
+
     N = compute_N(W, tau)
-    return M_rbcp * (2.0 * N) / (tau * W)
+
+    if N <= 0:
+        raise ValueError("Computed N must be positive.")
+
+    return float(M_rbcp * (2.0 * N) / (tau * W))
 
 
 # =============================================================================
@@ -262,6 +337,7 @@ def compute_bandwidth_allocation(
     -----
     - if bandwidth_allocation is None:
         equal split among S sensors
+
     - otherwise:
         * length must be S
         * entries must be nonnegative
@@ -345,6 +421,7 @@ def compute_M_rbcp_single_sensor(
     """
 
     N = compute_N(W, tau)
+
     if N <= 0:
         raise ValueError("Computed N must be positive.")
 
@@ -587,6 +664,15 @@ def compute_M_time(tau: float, B: float, R: int) -> int:
     SFC uses the total B, not B_s.
     """
 
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if R <= 0:
+        raise ValueError("R must be positive.")
+
     return int(np.floor((tau * B) / R))
 
 
@@ -599,10 +685,27 @@ def compute_slot_duration(B: float, R: int) -> float:
 
     if B <= 0:
         raise ValueError("B must be positive.")
+
     if R <= 0:
         raise ValueError("R must be positive.")
 
-    return R / B
+    return float(R / B)
+
+
+def compute_sfc_chip_duration(B: float, R: int) -> float:
+    """
+    Manuscript chip duration used in the SFC amplitude relation:
+
+        T_chip = 2R / B
+    """
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if R <= 0:
+        raise ValueError("R must be positive.")
+
+    return float((2.0 * R) / B)
 
 
 def compute_slots_per_period(tau: float, B: float, R: int) -> int:
@@ -612,7 +715,7 @@ def compute_slots_per_period(tau: float, B: float, R: int) -> int:
         floor(tau / (R/B)) = floor(tau * B / R)
     """
 
-    return int(np.floor(tau * B / R))
+    return compute_M_time(tau=tau, B=B, R=R)
 
 
 def compute_event_slots_total(
@@ -624,6 +727,9 @@ def compute_event_slots_total(
     """
     Total number of possible event-start slots over n_periods.
     """
+
+    if n_periods < 1:
+        raise ValueError("n_periods must be >= 1.")
 
     return compute_slots_per_period(tau, B, R) * int(n_periods)
 
@@ -642,7 +748,155 @@ def compute_rx_slots_total(
         rx_slots_total = event_slots_total + L - 1
     """
 
+    if L < 1:
+        raise ValueError("L must be >= 1.")
+
     return compute_event_slots_total(tau, B, R, n_periods) + int(L) - 1
+
+
+# =============================================================================
+# SFC ENERGY / AMPLITUDE RELATIONS
+# =============================================================================
+
+def compute_sfc_num_events_per_sensor(N: int) -> int:
+    """
+    Number of semantic SFC events transmitted by each sensor per period:
+
+        num_events_per_sensor = 2N
+    """
+
+    if N < 1:
+        raise ValueError("N must be >= 1.")
+
+    return int(2 * N)
+
+
+def compute_sfc_num_active_chips_per_sensor(N: int, L: int) -> int:
+    """
+    Number of active SFC chips transmitted by each sensor per period:
+
+        num_active_chips_per_sensor = 2 N L
+    """
+
+    if N < 1:
+        raise ValueError("N must be >= 1.")
+
+    if L < 1:
+        raise ValueError("L must be >= 1.")
+
+    return int(2 * N * L)
+
+
+def compute_sfc_sensor_energy(P: float, tau: float) -> float:
+    """
+    Total SFC energy per sensor per period:
+
+        E_sensor = P tau
+    """
+
+    if P <= 0:
+        raise ValueError("P must be positive.")
+
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
+    return float(P * tau)
+
+
+def compute_sfc_event_energy(P: float, tau: float, N: int) -> float:
+    """
+    SFC energy per semantic event:
+
+        E_event = P tau / (2N)
+    """
+
+    E_sensor = compute_sfc_sensor_energy(P=P, tau=tau)
+    num_events = compute_sfc_num_events_per_sensor(N=N)
+
+    return float(E_sensor / num_events)
+
+
+def compute_sfc_chip_energy(P: float, tau: float, N: int, L: int) -> float:
+    """
+    SFC energy per active chip:
+
+        E_chip = P tau / (2 N L)
+    """
+
+    E_sensor = compute_sfc_sensor_energy(P=P, tau=tau)
+    num_chips = compute_sfc_num_active_chips_per_sensor(N=N, L=L)
+
+    return float(E_sensor / num_chips)
+
+
+def compute_sfc_signal_level(P: float, tau: float, N: int, L: int) -> float:
+    """
+    SFC matched-filter/resource-output signal level:
+
+        sfc_signal_level = sqrt(E_chip)
+                         = sqrt(P tau / (2 N L))
+    """
+
+    return float(np.sqrt(compute_sfc_chip_energy(P=P, tau=tau, N=N, L=L)))
+
+
+def compute_sfc_pulse_amplitude(
+    P: float,
+    tau: float,
+    B: float,
+    R: int,
+    N: int,
+    L: int,
+) -> float:
+    """
+    Manuscript SFC physical pulse amplitude:
+
+        A = sqrt(tau P B / (4 L R N))
+
+    This is a waveform-domain amplitude. The current SFC channel operates at
+    matched-filter/resource-output level and therefore uses sqrt(E_chip) instead.
+    """
+
+    if P <= 0:
+        raise ValueError("P must be positive.")
+
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if R < 1:
+        raise ValueError("R must be >= 1.")
+
+    if N < 1:
+        raise ValueError("N must be >= 1.")
+
+    if L < 1:
+        raise ValueError("L must be >= 1.")
+
+    return float(np.sqrt((tau * P * B) / (4.0 * L * R * N)))
+
+
+def compute_sfc_default_detection_threshold(
+    P: float,
+    tau: float,
+    N: int,
+    L: int,
+    threshold_factor: float = 0.5,
+) -> float:
+    """
+    Default SFC detection threshold:
+
+        threshold = threshold_factor * sqrt(E_chip)
+    """
+
+    if threshold_factor < 0:
+        raise ValueError("threshold_factor must be nonnegative.")
+
+    return float(
+        threshold_factor * compute_sfc_signal_level(P=P, tau=tau, N=N, L=L)
+    )
 
 
 # =============================================================================
@@ -695,39 +949,63 @@ def compute_N0(P: float, B: float, SNR: float) -> float:
 
     if P <= 0:
         raise ValueError("P must be positive.")
+
     if B <= 0:
         raise ValueError("B must be positive.")
+
     if SNR <= 0:
         raise ValueError("SNR must be positive.")
 
-    return P / (B * SNR)
+    return float(P / (B * SNR))
 
 
 def compute_total_energy(P: float, tau: float) -> float:
     """
-    Total available energy per cycle:
+    Total available energy per sensor per cycle:
 
         E_tot = P * tau
     """
-    return P * tau
+
+    return compute_sfc_sensor_energy(P=P, tau=tau)
 
 
 def compute_symbol_energy(P: float, tau: float, L: int) -> float:
     """
-    Energy per transmitted symbol/resource:
+    Legacy symbol-energy helper.
 
-        E_s = (P * tau) / L
+    Historical convention:
+
+        E_s_legacy = (P * tau) / L
+
+    This function is kept for compatibility. For SFC use:
+
+        compute_sfc_chip_energy(P, tau, N, L)
     """
-    return (P * tau) / L
+
+    if P <= 0:
+        raise ValueError("P must be positive.")
+
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
+    if L < 1:
+        raise ValueError("L must be >= 1.")
+
+    return float((P * tau) / L)
 
 
 def compute_signal_level(P: float, tau: float, L: int) -> float:
     """
-    Expected matched-filter output amplitude scale:
+    Legacy matched-filter output amplitude scale:
 
-        sqrt(E_s)
+        sqrt(E_s_legacy)
+
+    This function is kept for compatibility. For SFC use:
+
+        compute_sfc_signal_level(P, tau, N, L)
     """
-    return np.sqrt(compute_symbol_energy(P, tau, L))
+
+    return float(np.sqrt(compute_symbol_energy(P, tau, L)))
 
 
 def compute_default_detection_threshold(
@@ -737,12 +1015,19 @@ def compute_default_detection_threshold(
     threshold_factor: float = 0.5,
 ) -> float:
     """
-    Default detection threshold:
+    Legacy default detection threshold:
 
-        threshold = threshold_factor * sqrt(E_s)
+        threshold = threshold_factor * sqrt(E_s_legacy)
+
+    This function is kept for compatibility. For SFC use:
+
+        compute_sfc_default_detection_threshold(P, tau, N, L, threshold_factor)
     """
 
-    return threshold_factor * compute_signal_level(P, tau, L)
+    if threshold_factor < 0:
+        raise ValueError("threshold_factor must be nonnegative.")
+
+    return float(threshold_factor * compute_signal_level(P, tau, L))
 
 
 # =============================================================================
@@ -789,14 +1074,25 @@ __all__ = [
     # SFC time / slot relations
     "compute_M_time",
     "compute_slot_duration",
+    "compute_sfc_chip_duration",
     "compute_slots_per_period",
     "compute_event_slots_total",
     "compute_rx_slots_total",
 
+    # SFC energy/amplitude helpers
+    "compute_sfc_num_events_per_sensor",
+    "compute_sfc_num_active_chips_per_sensor",
+    "compute_sfc_sensor_energy",
+    "compute_sfc_event_energy",
+    "compute_sfc_chip_energy",
+    "compute_sfc_signal_level",
+    "compute_sfc_pulse_amplitude",
+    "compute_sfc_default_detection_threshold",
+
     # duplicate probability
     "epsilon_upper_bound",
 
-    # physical helpers
+    # legacy physical helpers
     "compute_N0",
     "compute_total_energy",
     "compute_symbol_energy",

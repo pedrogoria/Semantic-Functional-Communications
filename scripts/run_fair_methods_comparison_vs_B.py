@@ -74,6 +74,15 @@ import numpy as np
 import pandas as pd
 import yaml
 
+# =============================================================================
+# PIPELINE IMPORTS
+# =============================================================================
+
+from sfc.pipelines.fair_methods_comparison_vs_B import (
+    generate_fair_methods_comparison_vs_B_data,
+    save_dat_file,
+)
+
 
 # =============================================================================
 # PATH HANDLING
@@ -83,16 +92,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-
-# =============================================================================
-# PIPELINE IMPORTS
-# =============================================================================
-
-from sfc.pipelines.fair_methods_comparison_vs_B import (
-    generate_fair_methods_comparison_vs_B_data,
-    save_dat_file,
-)
 
 
 # =============================================================================
