@@ -91,12 +91,15 @@ Core dependencies include:
 
 Most experiments can be run directly from the Python console.
 
-### Fair methods comparison versus bandwidth
+The following snippet is intentionally self-contained so editors do not report unresolved references such as `df`:
 
 ```python
 from scripts.run_fair_methods_comparison_vs_B import run_fair_methods_comparison_vs_B
 
-df = run_fair_methods_comparison_vs_B()
+result_df = run_fair_methods_comparison_vs_B()
+
+print(result_df.head())
+print(result_df.filter(regex="B|mse").to_string(index=False))
 ```
 
 This uses the default config:
@@ -111,23 +114,19 @@ and writes outputs to:
 data/results/fair_methods_comparison_vs_B/
 ```
 
-Inspect results:
-
-```python
-df.head()
-df.filter(regex="B|mse").to_string(index=False)
-```
-
 ---
 
 ## Running Individual Figures from Python Console
+
+Each snippet below is self-contained. This avoids unresolved-reference warnings in IDEs that inspect Python blocks inside Markdown files.
 
 ### Figure 1
 
 ```python
 from scripts.run_figure1 import run_fig01
 
-df1 = run_fig01("experiments/configs/figures/fig01.yaml")
+fig01_df = run_fig01("experiments/configs/figures/fig01.yaml")
+print(fig01_df.head())
 ```
 
 ### Figure 2
@@ -135,7 +134,8 @@ df1 = run_fig01("experiments/configs/figures/fig01.yaml")
 ```python
 from scripts.run_figure2 import run_fig02
 
-df2 = run_fig02("experiments/configs/figures/fig02.yaml")
+fig02_df = run_fig02("experiments/configs/figures/fig02.yaml")
+print(fig02_df.head())
 ```
 
 ### RbCP MSE versus bandwidth
@@ -143,9 +143,10 @@ df2 = run_fig02("experiments/configs/figures/fig02.yaml")
 ```python
 from scripts.run_rbcp_mse_vs_B import run_rbcp_mse_vs_B
 
-df_rbcp_B = run_rbcp_mse_vs_B(
+rbcp_b_df = run_rbcp_mse_vs_B(
     "experiments/configs/figures/rbcp_mse_vs_B.yaml"
 )
+print(rbcp_b_df.head())
 ```
 
 ### RbCP MSE versus bandwidth, fixed power
@@ -153,9 +154,10 @@ df_rbcp_B = run_rbcp_mse_vs_B(
 ```python
 from scripts.run_rbcp_mse_vs_B_fixed_power import run_rbcp_mse_vs_B_fixed_power
 
-df_rbcp_fixed = run_rbcp_mse_vs_B_fixed_power(
+rbcp_fixed_df = run_rbcp_mse_vs_B_fixed_power(
     "experiments/configs/figures/rbcp_mse_vs_B_fixed_power.yaml"
 )
+print(rbcp_fixed_df.head())
 ```
 
 ### RbCP / Benchmark truncation comparison
@@ -165,9 +167,10 @@ from scripts.run_rbcp_benchmark_truncation_mse_vs_B import (
     run_rbcp_benchmark_truncation_mse_vs_B,
 )
 
-df_trunc = run_rbcp_benchmark_truncation_mse_vs_B(
+truncation_df = run_rbcp_benchmark_truncation_mse_vs_B(
     "experiments/configs/figures/rbcp_benchmark_truncation_mse_vs_B.yaml"
 )
+print(truncation_df.head())
 ```
 
 ### RbCP signal representation
@@ -175,9 +178,10 @@ df_trunc = run_rbcp_benchmark_truncation_mse_vs_B(
 ```python
 from scripts.run_rbcp_signal_representation import run_rbcp_signal_representation
 
-data_repr = run_rbcp_signal_representation(
+representation_data = run_rbcp_signal_representation(
     "experiments/configs/figures/rbcp_signal_representation.yaml"
 )
+print(representation_data.keys())
 ```
 
 ### SFC duplicate reception probability
@@ -185,9 +189,10 @@ data_repr = run_rbcp_signal_representation(
 ```python
 from scripts.run_sfc_duplicate_rx import run_sfc_duplicate_rx
 
-df_dup = run_sfc_duplicate_rx(
+duplicate_rx_df = run_sfc_duplicate_rx(
     "experiments/configs/figures/sfc_duplicate_rx.yaml"
 )
+print(duplicate_rx_df.head())
 ```
 
 ### SFC MSE and throughput versus bandwidth
@@ -195,9 +200,10 @@ df_dup = run_sfc_duplicate_rx(
 ```python
 from scripts.run_sfc_mse_throughput_vs_B import run_sfc_mse_throughput_vs_B
 
-df_sfc_thr = run_sfc_mse_throughput_vs_B(
+sfc_throughput_df = run_sfc_mse_throughput_vs_B(
     "experiments/configs/figures/sfc_mse_throughput_vs_B.yaml"
 )
+print(sfc_throughput_df.head())
 ```
 
 ---
@@ -307,7 +313,7 @@ The SFC detector has two stages.
 
 The local detector threshold-binarizes the received frame and scans all possible event-start windows.
 
-For each candidate start slot `t0` and each reference map, it computes:
+For each candidate start slot `t0` and each reference map, the local detector computes:
 
 ```text
 score = sum(y_bin[t0:t0+L, :] * reference_map)
