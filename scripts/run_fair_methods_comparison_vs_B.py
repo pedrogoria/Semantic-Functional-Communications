@@ -83,7 +83,6 @@ from sfc.pipelines.fair_methods_comparison_vs_B import (
     save_dat_file,
 )
 
-
 # =============================================================================
 # PATH HANDLING
 # =============================================================================
@@ -93,24 +92,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
 # =============================================================================
 # DEFAULTS
 # =============================================================================
 
 DEFAULT_CONFIG_PATH = (
-    PROJECT_ROOT
-    / "experiments"
-    / "configs"
-    / "figures"
-    / "fair_methods_comparison_vs_B.yaml"
+        PROJECT_ROOT
+        / "experiments"
+        / "configs"
+        / "figures"
+        / "fair_methods_comparison_vs_B.yaml"
 )
 
 DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "data"
-    / "results"
-    / "fair_methods_comparison_vs_B"
+        PROJECT_ROOT
+        / "data"
+        / "results"
+        / "fair_methods_comparison_vs_B"
 )
 
 BASE_NAME = "fair_methods_comparison_vs_B"
@@ -135,9 +133,9 @@ def load_yaml_config(config_path: str | Path) -> dict:
 
 
 def copy_config_to_results(
-    config_path: str | Path,
-    output_dir: str | Path,
-    base_name: str = BASE_NAME,
+        config_path: str | Path,
+        output_dir: str | Path,
+        base_name: str = BASE_NAME,
 ) -> Path:
     """
     Copy YAML config into the output directory.
@@ -212,12 +210,12 @@ def _json_safe_value(value: Any):
 
 
 def save_metadata_json(
-    metadata_path: str | Path,
-    *,
-    config_path: str | Path,
-    output_dir: str | Path,
-    df: pd.DataFrame,
-    generated_files: Dict[str, str],
+        metadata_path: str | Path,
+        *,
+        config_path: str | Path,
+        output_dir: str | Path,
+        df: pd.DataFrame,
+        generated_files: Dict[str, str],
 ):
     """
     Save run metadata as JSON.
@@ -364,10 +362,10 @@ def _set_log_ylim(ax, series_list):
 
 
 def plot_main_mse_figure(
-    df: pd.DataFrame,
-    output_dir: str | Path,
-    base_name: str = BASE_NAME,
-    show: bool = False,
+        df: pd.DataFrame,
+        output_dir: str | Path,
+        base_name: str = BASE_NAME,
+        show: bool = False,
 ) -> dict:
     """
     Plot main MSE figure and save PNG/PDF.
@@ -448,10 +446,10 @@ def plot_main_mse_figure(
 
 
 def plot_diagnostics_figure(
-    df: pd.DataFrame,
-    output_dir: str | Path,
-    base_name: str = BASE_NAME,
-    show: bool = False,
+        df: pd.DataFrame,
+        output_dir: str | Path,
+        base_name: str = BASE_NAME,
+        show: bool = False,
 ) -> dict:
     """
     Plot diagnostics figure and save PNG/PDF.
@@ -627,12 +625,12 @@ def plot_diagnostics_figure(
 # =============================================================================
 
 def run_fair_methods_comparison_vs_B(
-    config_path: str | Path = DEFAULT_CONFIG_PATH,
-    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
-    base_name: str = BASE_NAME,
-    copy_config: bool = True,
-    make_plots: bool = True,
-    show_plots: bool = False,
+        config_path: str | Path = DEFAULT_CONFIG_PATH,
+        output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+        base_name: str = BASE_NAME,
+        copy_config: bool = True,
+        make_plots: bool = True,
+        show_plots: bool = False,
 ) -> pd.DataFrame:
     """
     Run fair methods comparison versus B.
@@ -786,3 +784,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_fair_methods_comparison_vs_B import run_fair_methods_comparison_vs_B
+#
+# df = run_fair_methods_comparison_vs_B()

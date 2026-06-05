@@ -756,3 +756,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_fair_methods_comparison_vs_B import run_fair_methods_comparison_vs_B
+#
+# df = run_fair_methods_comparison_vs_B()

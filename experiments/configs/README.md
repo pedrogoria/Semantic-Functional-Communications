@@ -1,4 +1,4 @@
-    # Configuration Tree Guide
+# Configuration Tree Guide
 
 This directory contains **two different kinds of configuration files**:
 
@@ -35,11 +35,15 @@ Files under `experiments/configs/figures/` are the **actual experiment configs**
 
 Examples:
 
-- `experiments/configs/figures/figure1.yaml`
-- `experiments/configs/figures/figure2.yaml`
+- `experiments/configs/figures/fig01.yaml`
+- `experiments/configs/figures/fig02.yaml`
 - `experiments/configs/figures/rbcp_mse_vs_B.yaml`
 - `experiments/configs/figures/rbcp_mse_vs_B_fixed_power.yaml`
+- `experiments/configs/figures/rbcp_benchmark_truncation_mse_vs_B.yaml`
+- `experiments/configs/figures/rbcp_signal_representation.yaml`
+- `experiments/configs/figures/sfc_duplicate_rx.yaml`
 - `experiments/configs/figures/sfc_mse_throughput_vs_B.yaml`
+- `experiments/configs/figures/fair_methods_comparison_vs_B.yaml`
 
 These files should stay focused and only override the parameters needed by the experiment.
 
@@ -54,10 +58,20 @@ These files should stay focused and only override the parameters needed by the e
 3. If the experiment introduces **new configurable keys**, also update:
    - `experiments/configs/configs.yaml`
    - `experiments/configs/CONFIG_REFERENCE.md`
+   - `experiments/configs/README.md`, if the tree usage or conventions changed.
 
 ### When changing the core configuration surface
 
-If the `sfc/core` layer begins to accept a new key or a new value range, update the reference files even if no immediate figure uses the new option.
+If the `sfc/core` layer begins to accept a new key, a new value range, or a new mode, update the reference files even if no immediate figure uses the new option.
+
+The configuration reference files should be updated when one of these changes happens:
+
+- a new config key is introduced;
+- a key is deprecated;
+- a new valid option/value is added;
+- a legacy alias is kept for compatibility;
+- a default behavior changes;
+- a core theoretical convention changes.
 
 ---
 
@@ -72,19 +86,13 @@ This keeps figure YAMLs cleaner while preserving a single place where all suppor
 
 ---
 
-## 5) Suggested maintenance rule
+## 5) Important current SFC conventions
 
-Whenever one of these changes happens:
+### 5.1 Theorem-consistent SFC maps
 
-- a new config key is introduced;
-- a key is deprecated;
-- a new valid option/value is added;
-- a legacy alias is kept for compatibility;
+The SFC map generator now follows the theorem-consistent orthogonal-vector construction.
 
-update all three of the following:
+The `R` resources are partitioned into `L` disjoint row-resource groups:
 
-- `experiments/configs/configs.yaml`
-- `experiments/configs/README.md` (if the tree usage changed)
-- `experiments/configs/CONFIG_REFERENCE.md`
-
-This keeps the configuration system understandable long-term.
+```text
+D_1, D_2, ..., D_L

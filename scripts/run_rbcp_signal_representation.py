@@ -268,3 +268,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_rbcp_signal_representation import run_rbcp_signal_representation
+#
+# data_repr = run_rbcp_signal_representation(
+#     "experiments/configs/figures/rbcp_signal_representation.yaml"
+# )

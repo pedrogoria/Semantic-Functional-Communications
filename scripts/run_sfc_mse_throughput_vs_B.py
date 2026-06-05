@@ -357,3 +357,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_sfc_mse_throughput_vs_B import run_sfc_mse_throughput_vs_B
+#
+# df_sfc_thr = run_sfc_mse_throughput_vs_B(
+#     "experiments/configs/figures/sfc_mse_throughput_vs_B.yaml"
+# )

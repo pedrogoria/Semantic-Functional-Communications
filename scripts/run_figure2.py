@@ -45,7 +45,6 @@ def load_config(path):
 # =============================================================================
 
 def prepare_output_dir(cfg):
-
     output_cfg = cfg["output"]
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -89,7 +88,6 @@ def get_git_commit():
 # =============================================================================
 
 def generate_plot(df, cfg, output_dir, timestamp):
-
     plot_cfg = cfg["plot"]
 
     plt.figure()
@@ -100,7 +98,6 @@ def generate_plot(df, cfg, output_dir, timestamp):
     # Plot RbCP curves (theory + MC)
     # -------------------------------------------------------------------------
     for N in n_values:
-
         df_sub = df[df["N"] == N]
 
         # Upper bound
@@ -132,7 +129,6 @@ def generate_plot(df, cfg, output_dir, timestamp):
     # Only one curve (independent of N)
     # -------------------------------------------------------------------------
     if cfg["benchmark"]["enabled"]:
-
         df_bench = df[df["N"] == cfg["benchmark"]["compare_with_n"]]
 
         plt.plot(
@@ -185,7 +181,6 @@ def generate_plot(df, cfg, output_dir, timestamp):
 # =============================================================================
 
 def save_metadata(cfg, output_dir, timestamp, config_path):
-
     meta_path = os.path.join(output_dir, f"metadata_{timestamp}.txt")
 
     with open(meta_path, "w") as f:
@@ -207,7 +202,6 @@ def copy_config_file(config_path, output_dir):
 # =============================================================================
 
 def run_fig02(config_path):
-
     cfg = load_config(config_path)
 
     output_dir, timestamp = prepare_output_dir(cfg)
@@ -260,3 +254,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_figure2 import run_fig02
+#
+# df2 = run_fig02("experiments/configs/figures/fig02.yaml")

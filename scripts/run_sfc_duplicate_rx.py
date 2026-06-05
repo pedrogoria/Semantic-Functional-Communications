@@ -333,3 +333,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_sfc_duplicate_rx import run_sfc_duplicate_rx
+#
+# df_dup = run_sfc_duplicate_rx(
+#     "experiments/configs/figures/sfc_duplicate_rx.yaml"
+# )

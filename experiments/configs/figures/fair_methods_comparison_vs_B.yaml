@@ -73,7 +73,7 @@ system:
   # P  = average transmit power per sensor
   # N0 = universal noise parameter
   P: 1.0
-  N0: 0.02
+  N0: 0.007
 
   # SFC resource-grid parameters.
   R: 12

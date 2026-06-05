@@ -28,12 +28,52 @@ This class orchestrates the SFC channel blocks:
 
 Map-generation logic
 --------------------
-This class uses the authorized fixed-map codebook logic:
+This class uses a theorem-consistent fixed-map codebook.
 
-- each valid map has shape (L, R);
-- each valid map has exactly one active cell per row;
-- map assignment to event IDs is uniformly sampled from the valid codebook;
-- once generated, the map assigned to an event ID remains fixed.
+A valid SFC map has shape:
+
+    (L, R)
+
+and exactly one active cell per row.
+
+However, to guarantee unambiguous partially overlapping transmissions under the
+orthogonal-vector construction, row resources are partitioned into L disjoint
+subsets:
+
+    D_1, D_2, ..., D_L
+
+such that:
+
+    D_i cap D_j = empty, for i != j
+    D_1 union ... union D_L = D_perp
+
+In the one-hot resource-vector implementation, D_perp is represented by the R
+canonical binary vectors. Therefore, the R resource indices are partitioned into
+L disjoint row-resource groups.
+
+Each row l of each map is only allowed to activate a resource from group D_l.
+
+Thus, the number of theorem-valid maps is:
+
+    |D_1| * |D_2| * ... * |D_L|
+
+For example, with R=12 and L=4, the balanced partition is:
+
+    3, 3, 3, 3
+
+and the maximum number of theorem-valid maps is:
+
+    3^4 = 81
+
+Therefore, configurations requiring more than 81 event IDs, e.g.
+
+    2 * N * S = 2 * 5 * 12 = 120
+
+are infeasible with R=12, L=4 under this theorem-consistent construction.
+
+For S=12, N=5, L=4, one needs at least R=16, because:
+
+    4^4 = 256 >= 120
 
 Physical-power convention
 -------------------------
@@ -80,7 +120,8 @@ Output if return_intermediates=True:
 from __future__ import annotations
 
 import itertools
-from typing import Any, Dict
+import math
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -123,6 +164,12 @@ class SFCChannel:
         if self.L < 1:
             raise ValueError("system.L must be >= 1.")
 
+        if self.R < self.L:
+            raise ValueError(
+                "The theorem-consistent SFC map construction requires R >= L, "
+                f"got R={self.R}, L={self.L}."
+            )
+
         # ------------------------------------------------------------------
         # Optional sensor-event association matrix.
         #
@@ -140,6 +187,15 @@ class SFCChannel:
         self.maps_library = None
         self.num_event_ids = None
         self.mapper = None
+
+        # ------------------------------------------------------------------
+        # Theorem-consistent row-resource groups.
+        # These groups are fixed for the lifetime of the SFCChannel object.
+        # ------------------------------------------------------------------
+        self.row_resource_groups = self._build_row_resource_groups()
+        self.total_theorem_valid_maps = self._count_theorem_valid_maps(
+            self.row_resource_groups
+        )
 
         # ------------------------------------------------------------------
         # Channel submodules.
@@ -304,17 +360,75 @@ class SFCChannel:
         return np.identity(self.S)
 
     # ======================================================================
-    # MAP GENERATION LOGIC
+    # THEOREM-CONSISTENT MAP GENERATION LOGIC
     # ======================================================================
+
+    def _build_row_resource_groups(self) -> List[List[int]]:
+        """
+        Partition the R resources into L disjoint row-resource groups.
+
+        The groups implement the theorem condition:
+
+            D_i cap D_j = empty, for i != j
+            D_1 union ... union D_L = D_perp
+
+        In this implementation, D_perp is represented by the R one-hot
+        canonical resource vectors.
+
+        The partition is balanced:
+
+        Example:
+            R=12, L=4 -> [[0,1,2], [3,4,5], [6,7,8], [9,10,11]]
+
+            R=14, L=4 -> sizes [4,4,3,3]
+        """
+
+        base_size = self.R // self.L
+        remainder = self.R % self.L
+
+        groups = []
+        start = 0
+
+        for row in range(self.L):
+            group_size = base_size + 1 if row < remainder else base_size
+            stop = start + group_size
+            groups.append(list(range(start, stop)))
+            start = stop
+
+        if start != self.R:
+            raise RuntimeError(
+                f"Internal partition error: consumed {start} resources, "
+                f"but R={self.R}."
+            )
+
+        for row, group in enumerate(groups):
+            if len(group) == 0:
+                raise ValueError(
+                    f"Invalid row-resource partition: row {row} received "
+                    "an empty resource group."
+                )
+
+        return groups
+
+    @staticmethod
+    def _count_theorem_valid_maps(row_resource_groups: List[List[int]]) -> int:
+        """
+        Count the number of theorem-valid maps:
+
+            product_l |D_l|
+        """
+
+        return int(math.prod(len(group) for group in row_resource_groups))
 
     def _generate_maps(self, num_event_ids):
         """
-        Generate fixed maps.
+        Generate fixed theorem-consistent maps.
 
         Logic
         -----
-        - build the full valid codebook;
+        - build the full theorem-valid codebook;
         - each valid map has exactly one active cell per row;
+        - row l may only use resources from the l-th row-resource group;
         - sample num_event_ids unique maps uniformly without replacement;
         - keep the selected assignment fixed for the life of the channel object.
         """
@@ -325,10 +439,13 @@ class SFCChannel:
 
         if num_event_ids > total_valid_maps:
             raise AssertionError(
-                f"Not enough unique valid maps available. "
-                f"Requested num_event_ids={num_event_ids}, "
-                f"but only {total_valid_maps} valid maps exist "
-                f"for R={self.R}, L={self.L}."
+                "Not enough unique theorem-valid SFC maps available. "
+                f"Requested num_event_ids={num_event_ids}, but only "
+                f"{total_valid_maps} theorem-valid maps exist for "
+                f"R={self.R}, L={self.L}, row_resource_group_sizes="
+                f"{[len(g) for g in self.row_resource_groups]}. "
+                "Increase system.R, reduce system.S, reduce signal.N_override, "
+                "or reduce system.L."
             )
 
         seed = self.cfg.get("reproducibility", {}).get(
@@ -345,48 +462,53 @@ class SFCChannel:
 
         maps = codebook[selected_indices]
 
-        invalid_or_duplicates = self._unique_maps(maps)
+        invalid_or_duplicates = self._validate_maps(maps)
 
         if len(invalid_or_duplicates) > 0:
             raise AssertionError(
-                f"Generated maps are invalid or duplicated: "
-                f"{invalid_or_duplicates}"
+                "Generated maps are invalid, duplicated, or violate "
+                f"the row-resource partition: {invalid_or_duplicates}"
             )
 
         print(
-            f"[INFO] Generated {num_event_ids} fixed maps uniformly from "
-            f"{total_valid_maps} valid maps"
+            f"[INFO] Generated {num_event_ids} fixed theorem-valid maps "
+            f"uniformly from {total_valid_maps} valid maps"
+        )
+        print(
+            f"[INFO] SFC row-resource group sizes = "
+            f"{[len(g) for g in self.row_resource_groups]}"
         )
 
         return maps
 
     def _build_valid_map_codebook(self):
         """
-        Build the full codebook of valid maps.
+        Build the full theorem-valid codebook of SFC maps.
 
         A valid map has:
 
         - shape (L, R);
-        - exactly one active cell per row.
+        - exactly one active cell per row;
+        - row l only activates resources from D_l;
+        - D_l are disjoint row-resource groups.
 
-        Number of valid maps:
+        Number of theorem-valid maps:
 
-            R^L
+            |D_1| * |D_2| * ... * |D_L|
+
+        This replaces the old R^L construction.
         """
 
-        total_valid_maps = self.R ** self.L
+        total_valid_maps = self.total_theorem_valid_maps
 
-        all_row_choices = itertools.product(
-            range(self.R),
-            repeat=self.L,
-        )
+        row_choices_iterator = itertools.product(*self.row_resource_groups)
 
         codebook = np.zeros(
             (total_valid_maps, self.L, self.R),
             dtype=float,
         )
 
-        for idx, row_choice_tuple in enumerate(all_row_choices):
+        for idx, row_choice_tuple in enumerate(row_choices_iterator):
             for row, col in enumerate(row_choice_tuple):
                 codebook[idx, row, col] = 1.0
 
@@ -396,11 +518,16 @@ class SFCChannel:
     # MAP VALIDATION
     # ======================================================================
 
-    def _unique_maps(self, maps):
+    def _validate_maps(self, maps):
         """
-        Check invalid or duplicate maps.
+        Check invalid, duplicate, or theorem-inconsistent maps.
 
-        A valid map must have exactly one active cell per row.
+        A valid theorem-consistent map must:
+
+        - have shape (L, R);
+        - have exactly one active cell per row;
+        - activate, in row l, only a resource from row_resource_groups[l];
+        - be unique within the selected map set.
 
         Parameters
         ----------
@@ -411,8 +538,8 @@ class SFCChannel:
 
         Returns
         -------
-        list[tuple[int, int]]
-            List of invalid or duplicate map index pairs.
+        list
+            List of validation problems.
         """
 
         maps = np.asarray(maps)
@@ -420,18 +547,88 @@ class SFCChannel:
         if len(maps.shape) != 3:
             raise ValueError("maps must have shape (num_maps, L, R).")
 
-        invalid_or_duplicates = []
+        if maps.shape[1] != self.L or maps.shape[2] != self.R:
+            raise ValueError(
+                f"maps must have shape (num_maps, L, R)=(*, {self.L}, {self.R}), "
+                f"got {maps.shape}."
+            )
+
+        problems = []
+
+        row_resource_sets = [
+            set(group) for group in self.row_resource_groups
+        ]
 
         for i in range(maps.shape[0]):
-            if not np.all(np.sum(maps[i], axis=1) == 1):
-                invalid_or_duplicates.append((i, i))
+            # --------------------------------------------------------------
+            # Check exactly one active cell per row.
+            # --------------------------------------------------------------
+            row_sums = np.sum(maps[i], axis=1)
+
+            if not np.all(row_sums == 1):
+                problems.append(
+                    {
+                        "map_i": i,
+                        "problem": "not_exactly_one_active_cell_per_row",
+                        "row_sums": row_sums.tolist(),
+                    }
+                )
                 continue
 
+            # --------------------------------------------------------------
+            # Check row-resource group consistency.
+            # --------------------------------------------------------------
+            for row in range(self.L):
+                active_cols = np.where(maps[i, row, :] > 0)[0]
+
+                if len(active_cols) != 1:
+                    problems.append(
+                        {
+                            "map_i": i,
+                            "row": row,
+                            "problem": "row_not_one_hot",
+                            "active_cols": active_cols.tolist(),
+                        }
+                    )
+                    continue
+
+                col = int(active_cols[0])
+
+                if col not in row_resource_sets[row]:
+                    problems.append(
+                        {
+                            "map_i": i,
+                            "row": row,
+                            "problem": "resource_not_in_row_group",
+                            "col": col,
+                            "allowed_group": sorted(row_resource_sets[row]),
+                        }
+                    )
+
+            # --------------------------------------------------------------
+            # Check duplicate maps.
+            # --------------------------------------------------------------
             for j in range(i + 1, maps.shape[0]):
                 if np.array_equal(maps[i], maps[j]):
-                    invalid_or_duplicates.append((i, j))
+                    problems.append(
+                        {
+                            "map_i": i,
+                            "map_j": j,
+                            "problem": "duplicate_map",
+                        }
+                    )
 
-        return invalid_or_duplicates
+        return problems
+
+    def _unique_maps(self, maps):
+        """
+        Backward-compatible wrapper.
+
+        Historically this method checked only one-hot validity and duplicate
+        maps. It now delegates to the theorem-consistent validator.
+        """
+
+        return self._validate_maps(maps)
 
     # ======================================================================
     # DIAGNOSTICS
@@ -449,12 +646,20 @@ class SFCChannel:
             "num_event_ids": self.num_event_ids,
             "maps_library_initialized": self.maps_library is not None,
             "mapper_initialized": self.mapper is not None,
+            "row_resource_groups": self.row_resource_groups,
+            "row_resource_group_sizes": [
+                len(group) for group in self.row_resource_groups
+            ],
+            "total_theorem_valid_maps": self.total_theorem_valid_maps,
         }
 
         if self.sensor_x_event is not None and len(self.sensor_x_event) != 0:
             diagnostics["sensor_x_event_shape"] = tuple(
                 np.asarray(self.sensor_x_event).shape
             )
+
+        if self.maps_library is not None:
+            diagnostics["maps_library_shape"] = tuple(self.maps_library.shape)
 
         if hasattr(self.collision, "diagnostics"):
             diagnostics["collision"] = self.collision.diagnostics()
