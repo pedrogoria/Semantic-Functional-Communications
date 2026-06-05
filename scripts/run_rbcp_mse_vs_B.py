@@ -314,3 +314,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_rbcp_mse_vs_B import run_rbcp_mse_vs_B
+#
+# df_rbcp_B = run_rbcp_mse_vs_B(
+#     "experiments/configs/figures/rbcp_mse_vs_B.yaml"
+# )

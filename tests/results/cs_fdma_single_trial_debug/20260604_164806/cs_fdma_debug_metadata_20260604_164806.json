@@ -1,0 +1,76 @@
+{
+  "created_at": "2026-06-04T13:48:10Z",
+  "project_root": "C:\\Users\\pedro.goria.silva@lut.fi\\PycharmProjects\\Semantic-Functional-Communications",
+  "config_path": "tests\\configs\\cs_fdma_single_trial_debug.yaml",
+  "output_dir": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806",
+  "git_commit": "4758c63b77cde65191e3c580ff311b20a266d121",
+  "signal_mode": "synthetic_sparse_dct_samples",
+  "physical_model": {
+    "P": 1.0,
+    "N0": 0.03,
+    "B_total": 500.0,
+    "B_sensor": 500.0,
+    "SNR_sensor": 0.06666666666666667,
+    "SNR_sensor_dB": -11.760912590556813,
+    "capacity_sensor": 46.554702195740724,
+    "bits_per_cycle": 46.554702195740724
+  },
+  "sampling": {
+    "fs": 10.4,
+    "num_samples": 11,
+    "dense_Tt": 0.001,
+    "dense_num_samples": 1000
+  },
+  "cs": {
+    "measurement_bits": 4,
+    "n_measurements": 11,
+    "sparsity_requested": 5,
+    "sparsity_effective": 5,
+    "basis": "dct",
+    "sensing_matrix": "gaussian",
+    "quantize_measurements": true,
+    "measurement_quantization_mse": 0.02539296531298343,
+    "quantization_metadata": {
+      "enabled": true,
+      "bits": 4,
+      "num_bins": 16,
+      "mode": "uniform_midrise",
+      "range_mode": "per_signal",
+      "clip": true,
+      "per_signal": {
+        "period_0_sensor_0": {
+          "enabled": true,
+          "bits": 4,
+          "num_bins": 16,
+          "mode": "uniform_midrise",
+          "y_min": -3.4285902215096704,
+          "y_max": 4.999180352276976,
+          "delta": 0.5267356608616655,
+          "saturated_low": 0,
+          "saturated_high": 0
+        }
+      }
+    }
+  },
+  "metrics": {
+    "mse_sampling_ideal": 0.0,
+    "mse_ideal_cs": 0.9012133317952675,
+    "mse_quantized_cs": 0.7443620604119858
+  },
+  "generated_files": {
+    "signal_png": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_signal_20260604_164806.png",
+    "signal_pdf": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_signal_20260604_164806.pdf",
+    "measurements_png": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_measurements_20260604_164806.png",
+    "measurements_pdf": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_measurements_20260604_164806.pdf",
+    "topk_coefficients_png": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_topk_coefficients_20260604_164806.png",
+    "topk_coefficients_pdf": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_topk_coefficients_20260604_164806.pdf",
+    "energy_png": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_accumulated_energy_20260604_164806.png",
+    "energy_pdf": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_accumulated_energy_20260604_164806.pdf",
+    "error_png": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_error_20260604_164806.png",
+    "error_pdf": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_error_20260604_164806.pdf",
+    "channel_budget_png": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_channel_budget_20260604_164806.png",
+    "channel_budget_pdf": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_channel_budget_20260604_164806.pdf",
+    "arrays_npz": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_arrays_20260604_164806.npz",
+    "config": "tests/results\\cs_fdma_single_trial_debug\\20260604_164806\\cs_fdma_debug_20260604_164806.yaml"
+  }
+}

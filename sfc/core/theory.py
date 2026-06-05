@@ -3,21 +3,84 @@ sfc/core/theory.py
 
 Central repository for closed-form theoretical relations used across the project.
 
-This module centralizes formulas from the manuscript, including:
+This module centralizes formulas from the manuscript and from the simulation
+framework, including:
+
 - number of harmonics N
 - Shannon capacity
-- RbCP Q-factor
-- MSE bounds / approximations for RbCP
-- common / per-sensor feasible M_RbCP under bandwidth sharing
-- benchmark feasible number of bins M under capacity constraints
+- bandwidth allocation
+- per-sensor SNR from P, N0 and B_s
+- feasible RbCP M under per-sensor bandwidth/power/noise constraints
+- feasible Benchmark M under per-sensor bandwidth/power/noise constraints
 - SFC time-slot relations
-- duplicate-reception upper bound (Lemma 5)
-- physical helper formulas (SNR, N0, energy, thresholds)
+- duplicate-reception upper bound
+- SFC energy/amplitude helper formulas
+- physical helper formulas
 
 Design rule
 -----------
-Pipelines, channel modules, debug scripts, and builders should import the
+Pipelines, channel modules, debug scripts, and builders should import
 theoretical relations from this file instead of reimplementing formulas locally.
+
+Main physical convention
+------------------------
+The preferred physical model is parameterized by:
+
+    P  = average available transmit power per sensor
+    N0 = noise spectral-density / noise parameter
+
+For methods that use a per-sensor bandwidth slice:
+
+    B_s = alpha_s * B
+
+the sensor SNR is:
+
+    SNR_s = P / (B_s * N0)
+
+Therefore, functions of the form compute_M_*(...) receive P and N0 by default
+and compute SNR_s internally.
+
+SFC energy convention
+---------------------
+For SFC, P is the average transmit power per sensor over one period tau.
+
+Each sensor transmits 2N semantic events per period. Each event map has L
+active chips. Therefore, each sensor transmits:
+
+    2 N L
+
+active chips per period.
+
+The total energy per sensor per period is:
+
+    E_sensor = P tau
+
+The SFC event energy is:
+
+    E_event = P tau / (2N)
+
+The SFC active-chip energy is:
+
+    E_chip = P tau / (2 N L)
+
+Since the current SFC physical channel operates at the matched-filter /
+resource-output level, the signal level used by physical_channel.py and
+detection.py is:
+
+    sfc_signal_level = sqrt(E_chip)
+                     = sqrt(P tau / (2 N L))
+
+The corresponding manuscript physical pulse amplitude is:
+
+    A = sqrt(tau P B / (4 L R N))
+
+assuming chip duration:
+
+    T_chip = 2R / B
+
+so that:
+
+    sqrt(E_chip) = A sqrt(T_chip)
 
 Quantization policy
 -------------------
@@ -27,15 +90,8 @@ Default behavior:
 - floor rounding
 
 Power-of-two restriction can still be requested explicitly via:
+
     force_power_of_two=True
-
-Important note
---------------
-This file does NOT require any manuscript-specific switch such as:
-    enforce_eq17_rate_matching
-
-Eq. (17) remains available as a theoretical relationship between M and M_RbCP,
-but it is not enforced here as a mandatory global policy.
 """
 
 from __future__ import annotations
@@ -52,22 +108,17 @@ import numpy as np
 
 def compute_N(W: float, tau: float) -> int:
     """
-    Number of harmonics.
+    Number of harmonics:
 
         N = floor(W * tau / 2)
-
-    Parameters
-    ----------
-    W : float
-        Signal bandwidth.
-    tau : float
-        Cycle / frame duration.
-
-    Returns
-    -------
-    int
-        Number of harmonics.
     """
+
+    if W <= 0:
+        raise ValueError("W must be positive.")
+
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
     return int(np.floor((W * tau) / 2.0))
 
 
@@ -75,28 +126,62 @@ def compute_snr_linear(SNR_dB: float) -> float:
     """
     Convert SNR from dB to linear scale.
     """
-    return 10 ** (SNR_dB / 10.0)
+
+    return 10.0 ** (float(SNR_dB) / 10.0)
+
+
+def compute_snr_db(SNR: float) -> float:
+    """
+    Convert SNR from linear scale to dB.
+    """
+
+    return 10.0 * np.log10(max(float(SNR), np.finfo(float).tiny))
 
 
 def compute_capacity(B: float, SNR: float) -> float:
     """
-    Shannon capacity.
+    Shannon capacity:
 
         C = B * log2(1 + SNR)
+    """
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if SNR < 0:
+        raise ValueError("SNR must be nonnegative.")
+
+    return float(B * np.log2(1.0 + SNR))
+
+
+def compute_sensor_snr(P: float, B_sensor: float, N0: float) -> float:
+    """
+    Compute per-sensor SNR:
+
+        SNR_s = P / (B_s * N0)
 
     Parameters
     ----------
-    B : float
-        Channel bandwidth.
-    SNR : float
-        Signal-to-noise ratio in linear scale.
+    P : float
+        Average available transmit power per sensor.
 
-    Returns
-    -------
-    float
-        Capacity in bits per second.
+    B_sensor : float
+        Bandwidth assigned to the sensor.
+
+    N0 : float
+        Noise spectral-density / noise parameter.
     """
-    return B * np.log2(1.0 + SNR)
+
+    if P <= 0:
+        raise ValueError("P must be positive.")
+
+    if B_sensor <= 0:
+        raise ValueError("B_sensor must be positive.")
+
+    if N0 <= 0:
+        raise ValueError("N0 must be positive.")
+
+    return float(P / (B_sensor * N0))
 
 
 # =============================================================================
@@ -107,22 +192,6 @@ def _apply_integer_rounding(value: float, rounding_mode: str = "floor") -> int:
     """
     Convert a positive real value to an integer according to the selected
     rounding mode.
-
-    Parameters
-    ----------
-    value : float
-        Positive real value to be converted.
-
-    rounding_mode : str, optional
-        One of:
-            - "floor"  (default)
-            - "ceil"
-            - "round"
-
-    Returns
-    -------
-    int
-        Integerized value, with minimum 1.
     """
 
     value = max(float(value), 1.0)
@@ -145,42 +214,18 @@ def _apply_integer_rounding(value: float, rounding_mode: str = "floor") -> int:
 def _finalize_M(
     M_continuous: float,
     force_power_of_two: bool = False,
-    rounding_mode: str = "floor"
+    rounding_mode: str = "floor",
 ) -> int:
     """
     Finalize a continuous-valued number of quantization bins M.
 
-    Default behavior
-    ----------------
+    Default behavior:
     - free integer M
     - no power-of-two constraint
-    - round according to `rounding_mode`
+    - round according to rounding_mode
 
-    If force_power_of_two=True
-    --------------------------
-    The nearest allowed value is constrained to:
-        2^k
-
-    with k obtained by applying the same `rounding_mode` to log2(M_continuous).
-
-    Parameters
-    ----------
-    M_continuous : float
-        Continuous-valued M obtained from a theoretical inequality.
-
-    force_power_of_two : bool, optional
-        If True, constrain the final M to powers of 2.
-
-    rounding_mode : str, optional
-        One of:
-            - "floor"  (default)
-            - "ceil"
-            - "round"
-
-    Returns
-    -------
-    int
-        Final integer M.
+    If force_power_of_two=True:
+    - constrain the final M to powers of 2
     """
 
     M_continuous = max(float(M_continuous), 1.0)
@@ -195,153 +240,86 @@ def _finalize_M(
 
 
 # =============================================================================
-# RbCP THEORY (LEMMA 4 / PROPOSITION 2)
+# RbCP THEORY
 # =============================================================================
 
 def compute_q(M_rbcp: float) -> float:
     """
-    Compute the Q term used in Lemma 3 / Lemma 4 / Proposition 2:
+    Compute the Q term used in the RbCP MSE formulas:
 
         Q = (M_RbCP / (2*pi)) * sin(pi / M_RbCP)
-
-    Parameters
-    ----------
-    M_rbcp : float
-        Number of quantization bins for the RbCP representation.
-
-    Returns
-    -------
-    float
-        Q factor.
     """
+
     M_rbcp = max(float(M_rbcp), 1.0)
-    return (M_rbcp / (2.0 * np.pi)) * np.sin(np.pi / M_rbcp)
+    return float((M_rbcp / (2.0 * np.pi)) * np.sin(np.pi / M_rbcp))
 
 
 def rbcp_mse_upper_bound(N: int, Q: float) -> float:
     """
-    Lemma 4 upper bound for MSE_RbCP:
-
-        MSE_RbCP / N <= 4 * (1/2 - Q) * (3/2 - Q)
-
-    Therefore:
+    RbCP upper bound:
 
         MSE_upper = 4 * N * (1/2 - Q) * (3/2 - Q)
-
-    Parameters
-    ----------
-    N : int
-        Number of harmonics.
-    Q : float
-        Q factor.
-
-    Returns
-    -------
-    float
-        Upper bound on the RbCP MSE.
     """
-    return 4.0 * N * (0.5 - Q) * (1.5 - Q)
+
+    return float(4.0 * N * (0.5 - Q) * (1.5 - Q))
 
 
 def rbcp_mse_lower_bound(N: int, Q: float) -> float:
     """
-    Lemma 4 lower bound for MSE_RbCP:
-
-        MSE_RbCP / N >= 1 - 4Q^2
-
-    Therefore:
+    RbCP lower bound:
 
         MSE_lower = N * (1 - 4Q^2)
-
-    Parameters
-    ----------
-    N : int
-        Number of harmonics.
-    Q : float
-        Q factor.
-
-    Returns
-    -------
-    float
-        Lower bound on the RbCP MSE.
     """
-    return N * (1.0 - 4.0 * Q * Q)
+
+    return float(N * (1.0 - 4.0 * Q * Q))
 
 
 def rbcp_mse_star(N: int, Q: float) -> float:
     """
-    Proposition 2:
+    Proposition-style RbCP approximation:
 
         MSE*_RbCP = 2N (1 - 2Q)
-
-    Parameters
-    ----------
-    N : int
-        Number of harmonics.
-    Q : float
-        Q factor.
-
-    Returns
-    -------
-    float
-        MSE*_RbCP.
     """
-    return 2.0 * N * (1.0 - 2.0 * Q)
+
+    return float(2.0 * N * (1.0 - 2.0 * Q))
 
 
 # =============================================================================
-# RELATION BETWEEN M AND M_RbCP (EQ. 17)
+# RELATION BETWEEN M AND M_RbCP
 # =============================================================================
 
 def compute_M_rbcp_from_M(M: float, W: float, tau: float) -> float:
     """
-    Equation (17):
+    Equation-style mapping:
 
         M_RbCP = M * tau * W / (2N)
 
     with:
+
         N = floor(W * tau / 2)
-
-    Parameters
-    ----------
-    M : float
-        Number of Benchmark quantization bins.
-    W : float
-        Signal bandwidth.
-    tau : float
-        Frame duration.
-
-    Returns
-    -------
-    float
-        Corresponding continuous-valued M_RbCP.
     """
+
     N = compute_N(W, tau)
-    return M * tau * W / (2.0 * N)
+
+    if N <= 0:
+        raise ValueError("Computed N must be positive.")
+
+    return float(M * tau * W / (2.0 * N))
 
 
 def compute_M_from_M_rbcp(M_rbcp: float, W: float, tau: float) -> float:
     """
-    Inverse of Equation (17):
+    Inverse mapping:
 
         M = M_RbCP * (2N) / (tau * W)
-
-    Parameters
-    ----------
-    M_rbcp : float
-        Number of RbCP bins.
-    W : float
-        Signal bandwidth.
-    tau : float
-        Frame duration.
-
-    Returns
-    -------
-    float
-        Corresponding continuous-valued Benchmark M.
     """
+
     N = compute_N(W, tau)
-    return M_rbcp * (2.0 * N) / (tau * W)
+
+    if N <= 0:
+        raise ValueError("Computed N must be positive.")
+
+    return float(M_rbcp * (2.0 * N) / (tau * W))
 
 
 # =============================================================================
@@ -350,32 +328,29 @@ def compute_M_from_M_rbcp(M_rbcp: float, W: float, tau: float) -> float:
 
 def compute_bandwidth_allocation(
     S: int,
-    bandwidth_allocation: Optional[Sequence[float]] = None
+    bandwidth_allocation: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
     """
     Compute / validate the bandwidth-allocation vector.
 
     Rules
     -----
-    - if None: equal split among S sensors
+    - if bandwidth_allocation is None:
+        equal split among S sensors
+
     - otherwise:
         * length must be S
         * entries must be nonnegative
         * sum must be 1
-
-    Returns
-    -------
-    np.ndarray
-        Allocation vector of length S.
     """
+
+    if S < 1:
+        raise ValueError("S must be >= 1.")
 
     if bandwidth_allocation is None:
         return np.ones(S, dtype=float) / S
 
-    alloc = np.asarray(bandwidth_allocation, dtype=float)
-
-    if alloc.ndim != 1:
-        raise ValueError("bandwidth_allocation must be a 1D vector")
+    alloc = np.asarray(bandwidth_allocation, dtype=float).reshape(-1)
 
     if len(alloc) != S:
         raise ValueError(
@@ -383,7 +358,7 @@ def compute_bandwidth_allocation(
         )
 
     if np.any(alloc < 0):
-        raise ValueError("bandwidth_allocation must contain nonnegative values")
+        raise ValueError("bandwidth_allocation must contain nonnegative values.")
 
     if not np.isclose(np.sum(alloc), 1.0):
         raise ValueError(
@@ -396,7 +371,7 @@ def compute_bandwidth_allocation(
 def compute_sensor_bandwidths(
     B: float,
     S: int,
-    bandwidth_allocation: Optional[Sequence[float]] = None
+    bandwidth_allocation: Optional[Sequence[float]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Compute effective per-sensor bandwidths from the total bandwidth B.
@@ -407,9 +382,13 @@ def compute_sensor_bandwidths(
         (allocation, B_per_sensor)
     """
 
-    alloc = compute_bandwidth_allocation(S, bandwidth_allocation)
-    B_per_sensor = B * alloc
-    return alloc, B_per_sensor
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    allocation = compute_bandwidth_allocation(S, bandwidth_allocation)
+    B_per_sensor = B * allocation
+
+    return allocation, B_per_sensor
 
 
 # =============================================================================
@@ -420,63 +399,41 @@ def compute_M_rbcp_single_sensor(
     W: float,
     tau: float,
     B_sensor: float,
-    SNR: float,
+    P: float,
+    N0: float,
     force_power_of_two: bool = False,
-    rounding_mode: str = "floor"
+    rounding_mode: str = "floor",
 ) -> int:
     """
     Compute the feasible number of RbCP bins for one sensor.
 
-    Communication constraint for one sensor:
-        2N log2(M_RbCP) <= tau * B_sensor * log2(1 + SNR)
+    Constraint:
+
+        2N log2(M_RbCP) <= tau * B_s * log2(1 + SNR_s)
+
+    with:
+
+        SNR_s = P / (B_s * N0)
 
     Therefore:
-        M_RbCP <= (1 + SNR)^(tau * B_sensor / (2N))
 
-    Default behavior
-    ----------------
-    - M_RbCP is a free integer
-    - no power-of-two restriction
-    - rounding_mode="floor"
-
-    Parameters
-    ----------
-    W : float
-        Signal bandwidth.
-
-    tau : float
-        Frame duration.
-
-    B_sensor : float
-        Bandwidth slice assigned to this sensor.
-
-    SNR : float
-        Signal-to-noise ratio in linear scale.
-
-    force_power_of_two : bool, optional
-        If True, restrict the final M_RbCP to powers of 2.
-
-    rounding_mode : str, optional
-        One of:
-            - "floor"  (default)
-            - "ceil"
-            - "round"
-
-    Returns
-    -------
-    int
-        Feasible M_RbCP for one sensor.
+        M_RbCP <= (1 + SNR_s)^(tau * B_s / (2N))
     """
 
     N = compute_N(W, tau)
 
+    if N <= 0:
+        raise ValueError("Computed N must be positive.")
+
+    SNR_sensor = compute_sensor_snr(P=P, B_sensor=B_sensor, N0=N0)
+
     exponent = (tau * B_sensor) / (2.0 * N)
-    M_continuous = (1.0 + SNR) ** exponent
+    M_continuous = (1.0 + SNR_sensor) ** exponent
 
     return _finalize_M(
         M_continuous=M_continuous,
         force_power_of_two=force_power_of_two,
-        rounding_mode=rounding_mode
+        rounding_mode=rounding_mode,
     )
 
 
@@ -485,39 +442,34 @@ def compute_M_rbcp_per_sensor(
     W: float,
     tau: float,
     B: float,
-    SNR: float,
+    P: float,
+    N0: float,
     bandwidth_allocation: Optional[Sequence[float]] = None,
     force_power_of_two: bool = False,
-    rounding_mode: str = "floor"
+    rounding_mode: str = "floor",
 ) -> np.ndarray:
     """
     Per-sensor feasible M_RbCP values, accounting for bandwidth sharing.
-
-    Default behavior
-    ----------------
-    - free integer M_RbCP
-    - no power-of-two restriction
-    - rounding_mode="floor"
-
-    Returns
-    -------
-    np.ndarray
-        Shape (S,)
     """
 
-    _, B_per_sensor = compute_sensor_bandwidths(B, S, bandwidth_allocation)
+    _, B_per_sensor = compute_sensor_bandwidths(
+        B=B,
+        S=S,
+        bandwidth_allocation=bandwidth_allocation,
+    )
 
     return np.array([
-        compute_M_rbcp_single_sensor(
+        int(compute_M_rbcp_single_sensor(
             W=W,
             tau=tau,
             B_sensor=B_s,
-            SNR=SNR,
+            P=P,
+            N0=N0,
             force_power_of_two=force_power_of_two,
-            rounding_mode=rounding_mode
-        )
+            rounding_mode=rounding_mode,
+        ))
         for B_s in B_per_sensor
-    ], dtype=int)
+    ], dtype=object)
 
 
 def compute_M_rbcp(
@@ -525,24 +477,16 @@ def compute_M_rbcp(
     W: float,
     tau: float,
     B: float,
-    SNR: float,
+    P: float,
+    N0: float,
     bandwidth_allocation: Optional[Sequence[float]] = None,
     force_power_of_two: bool = False,
-    rounding_mode: str = "floor"
+    rounding_mode: str = "floor",
 ) -> int:
     """
-    Common feasible M_RbCP across S sensors.
+    Common feasible M_RbCP across S sensors:
 
-    Default behavior
-    ----------------
-    - free integer M_RbCP
-    - no power-of-two restriction
-    - rounding_mode="floor"
-
-    Returns
-    -------
-    int
-        Common feasible M_RbCP.
+        M_RbCP = min_s M_RbCP,s
     """
 
     M_vec = compute_M_rbcp_per_sensor(
@@ -550,11 +494,13 @@ def compute_M_rbcp(
         W=W,
         tau=tau,
         B=B,
-        SNR=SNR,
+        P=P,
+        N0=N0,
         bandwidth_allocation=bandwidth_allocation,
         force_power_of_two=force_power_of_two,
         rounding_mode=rounding_mode,
     )
+
     return int(np.min(M_vec))
 
 
@@ -565,67 +511,44 @@ def compute_M_rbcp(
 def compute_benchmark_M_single_sensor(
     tau: float,
     B_sensor: float,
-    SNR: float,
+    P: float,
+    N0: float,
     sampling_rate: float,
     force_power_of_two: bool = False,
-    rounding_mode: str = "floor"
+    rounding_mode: str = "floor",
 ) -> int:
     """
     Compute the feasible number of Benchmark quantization bins M for one sensor.
 
-    Communication constraint for one sensor:
-        sampling_rate * log2(M) <= B_sensor * log2(1 + SNR)
+    Constraint:
+
+        sampling_rate * log2(M) <= B_s * log2(1 + SNR_s)
+
+    with:
+
+        SNR_s = P / (B_s * N0)
 
     Therefore:
-        M <= (1 + SNR)^(B_sensor / sampling_rate)
 
-    Default behavior
-    ----------------
-    - free integer M
-    - no power-of-two restriction
-    - rounding_mode="floor"
+        M <= (1 + SNR_s)^(B_s / sampling_rate)
 
-    Parameters
-    ----------
-    tau : float
-        Frame duration. Present for interface symmetry.
-
-    B_sensor : float
-        Effective bandwidth assigned to one sensor.
-
-    SNR : float
-        Signal-to-noise ratio in linear scale.
-
-    sampling_rate : float
-        Sampling rate of the Benchmark branch.
-
-    force_power_of_two : bool, optional
-        If True, force M to be a power of 2.
-
-    rounding_mode : str, optional
-        One of:
-            - "floor"  (default)
-            - "ceil"
-            - "round"
-
-    Returns
-    -------
-    int
-        Feasible number of bins M.
+    tau is kept for interface symmetry.
     """
 
-    _ = tau  # kept for interface consistency
+    _ = tau
 
     if sampling_rate <= 0:
-        raise ValueError("sampling_rate must be positive")
+        raise ValueError("sampling_rate must be positive.")
+
+    SNR_sensor = compute_sensor_snr(P=P, B_sensor=B_sensor, N0=N0)
 
     exponent = B_sensor / sampling_rate
-    M_continuous = (1.0 + SNR) ** exponent
+    M_continuous = (1.0 + SNR_sensor) ** exponent
 
     return _finalize_M(
         M_continuous=M_continuous,
         force_power_of_two=force_power_of_two,
-        rounding_mode=rounding_mode
+        rounding_mode=rounding_mode,
     )
 
 
@@ -633,76 +556,61 @@ def compute_benchmark_M_per_sensor(
     S: int,
     tau: float,
     B: float,
-    SNR: float,
+    P: float,
+    N0: float,
     sampling_rate: float,
     bandwidth_allocation: Optional[Sequence[float]] = None,
     force_power_of_two: bool = False,
-    rounding_mode: str = "floor"
+    rounding_mode: str = "floor",
 ) -> np.ndarray:
     """
     Per-sensor feasible Benchmark M values.
-
-    Default behavior
-    ----------------
-    - free integer M
-    - no power-of-two restriction
-    - rounding_mode="floor"
-
-    Returns
-    -------
-    np.ndarray
-        Shape (S,)
     """
 
-    _, B_per_sensor = compute_sensor_bandwidths(B, S, bandwidth_allocation)
+    _, B_per_sensor = compute_sensor_bandwidths(
+        B=B,
+        S=S,
+        bandwidth_allocation=bandwidth_allocation,
+    )
 
     return np.array([
-        compute_benchmark_M_single_sensor(
+        int(compute_benchmark_M_single_sensor(
             tau=tau,
             B_sensor=B_s,
-            SNR=SNR,
+            P=P,
+            N0=N0,
             sampling_rate=sampling_rate,
             force_power_of_two=force_power_of_two,
-            rounding_mode=rounding_mode
-        )
+            rounding_mode=rounding_mode,
+        ))
         for B_s in B_per_sensor
-    ], dtype=int)
+    ], dtype=object)
 
-
-# =============================================================================
-# BENCHMARK BITS-PER-SAMPLE (BACKWARD COMPATIBILITY)
-# =============================================================================
 
 def compute_benchmark_bits_per_sample_single_sensor(
     tau: float,
     B_sensor: float,
-    SNR: float,
+    P: float,
+    N0: float,
     sampling_rate: float,
     force_power_of_two: bool = False,
-    rounding_mode: str = "floor"
+    rounding_mode: str = "floor",
 ) -> int:
     """
-    Backward-compatible helper returning an effective bits-per-sample value
-    derived from the feasible Benchmark M.
+    Return effective bits per sample derived from feasible Benchmark M.
 
-    Default behavior
-    ----------------
-    - M is free integer (not necessarily a power of 2)
-    - bits are computed as floor(log2(M))
-
-    Returns
-    -------
-    int
-        Effective bits per sample.
+    Default:
+        bits = floor(log2(M))
     """
 
     M = compute_benchmark_M_single_sensor(
         tau=tau,
         B_sensor=B_sensor,
-        SNR=SNR,
+        P=P,
+        N0=N0,
         sampling_rate=sampling_rate,
         force_power_of_two=force_power_of_two,
-        rounding_mode=rounding_mode
+        rounding_mode=rounding_mode,
     )
 
     bits = int(np.floor(np.log2(max(M, 1))))
@@ -713,34 +621,33 @@ def compute_benchmark_bits_per_sample_per_sensor(
     S: int,
     tau: float,
     B: float,
-    SNR: float,
+    P: float,
+    N0: float,
     sampling_rate: float,
     bandwidth_allocation: Optional[Sequence[float]] = None,
     force_power_of_two: bool = False,
-    rounding_mode: str = "floor"
+    rounding_mode: str = "floor",
 ) -> np.ndarray:
     """
-    Backward-compatible helper returning effective bits-per-sample per sensor
-    derived from feasible Benchmark M values.
+    Return effective bits per sample per sensor derived from feasible Benchmark M.
     """
 
     M_vec = compute_benchmark_M_per_sensor(
         S=S,
         tau=tau,
         B=B,
-        SNR=SNR,
+        P=P,
+        N0=N0,
         sampling_rate=sampling_rate,
         bandwidth_allocation=bandwidth_allocation,
         force_power_of_two=force_power_of_two,
-        rounding_mode=rounding_mode
+        rounding_mode=rounding_mode,
     )
 
-    bits_vec = np.array([
+    return np.array([
         max(int(np.floor(np.log2(max(M, 1)))), 1)
         for M in M_vec
     ], dtype=int)
-
-    return bits_vec
 
 
 # =============================================================================
@@ -749,18 +656,23 @@ def compute_benchmark_bits_per_sample_per_sensor(
 
 def compute_M_time(tau: float, B: float, R: int) -> int:
     """
-    Number of time bins / symbol-start bins for the SFC time model:
+    Number of time bins / event-start bins for the SFC time model:
 
-        M_time = tau * B / R
+        M_time = floor(tau * B / R)
 
-    In the discrete simulation, we use the floor-consistent value:
-        floor(tau * B / R)
-
-    Returns
-    -------
-    int
-        Discrete M_time used in the simulations.
+    Important:
+    SFC uses the total B, not B_s.
     """
+
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if R <= 0:
+        raise ValueError("R must be positive.")
+
     return int(np.floor((tau * B) / R))
 
 
@@ -770,7 +682,30 @@ def compute_slot_duration(B: float, R: int) -> float:
 
         T_slot = R / B
     """
-    return R / B
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if R <= 0:
+        raise ValueError("R must be positive.")
+
+    return float(R / B)
+
+
+def compute_sfc_chip_duration(B: float, R: int) -> float:
+    """
+    Manuscript chip duration used in the SFC amplitude relation:
+
+        T_chip = 2R / B
+    """
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if R <= 0:
+        raise ValueError("R must be positive.")
+
+    return float((2.0 * R) / B)
 
 
 def compute_slots_per_period(tau: float, B: float, R: int) -> int:
@@ -779,52 +714,203 @@ def compute_slots_per_period(tau: float, B: float, R: int) -> int:
 
         floor(tau / (R/B)) = floor(tau * B / R)
     """
-    return int(np.floor(tau * B / R))
+
+    return compute_M_time(tau=tau, B=B, R=R)
 
 
-def compute_event_slots_total(tau: float, B: float, R: int, n_periods: int) -> int:
+def compute_event_slots_total(
+    tau: float,
+    B: float,
+    R: int,
+    n_periods: int,
+) -> int:
     """
     Total number of possible event-start slots over n_periods.
     """
-    return compute_slots_per_period(tau, B, R) * n_periods
+
+    if n_periods < 1:
+        raise ValueError("n_periods must be >= 1.")
+
+    return compute_slots_per_period(tau, B, R) * int(n_periods)
 
 
-def compute_rx_slots_total(tau: float, B: float, R: int, n_periods: int, L: int) -> int:
+def compute_rx_slots_total(
+    tau: float,
+    B: float,
+    R: int,
+    n_periods: int,
+    L: int,
+) -> int:
     """
-    Total number of received discrete-time slots once the map length L is taken
-    into account.
+    Total number of received discrete-time slots once the map length L is
+    considered:
 
         rx_slots_total = event_slots_total + L - 1
     """
-    return compute_event_slots_total(tau, B, R, n_periods) + L - 1
+
+    if L < 1:
+        raise ValueError("L must be >= 1.")
+
+    return compute_event_slots_total(tau, B, R, n_periods) + int(L) - 1
 
 
 # =============================================================================
-# DUPLICATE-RECEPTION UPPER BOUND (LEMMA 5)
+# SFC ENERGY / AMPLITUDE RELATIONS
+# =============================================================================
+
+def compute_sfc_num_events_per_sensor(N: int) -> int:
+    """
+    Number of semantic SFC events transmitted by each sensor per period:
+
+        num_events_per_sensor = 2N
+    """
+
+    if N < 1:
+        raise ValueError("N must be >= 1.")
+
+    return int(2 * N)
+
+
+def compute_sfc_num_active_chips_per_sensor(N: int, L: int) -> int:
+    """
+    Number of active SFC chips transmitted by each sensor per period:
+
+        num_active_chips_per_sensor = 2 N L
+    """
+
+    if N < 1:
+        raise ValueError("N must be >= 1.")
+
+    if L < 1:
+        raise ValueError("L must be >= 1.")
+
+    return int(2 * N * L)
+
+
+def compute_sfc_sensor_energy(P: float, tau: float) -> float:
+    """
+    Total SFC energy per sensor per period:
+
+        E_sensor = P tau
+    """
+
+    if P <= 0:
+        raise ValueError("P must be positive.")
+
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
+    return float(P * tau)
+
+
+def compute_sfc_event_energy(P: float, tau: float, N: int) -> float:
+    """
+    SFC energy per semantic event:
+
+        E_event = P tau / (2N)
+    """
+
+    E_sensor = compute_sfc_sensor_energy(P=P, tau=tau)
+    num_events = compute_sfc_num_events_per_sensor(N=N)
+
+    return float(E_sensor / num_events)
+
+
+def compute_sfc_chip_energy(P: float, tau: float, N: int, L: int) -> float:
+    """
+    SFC energy per active chip:
+
+        E_chip = P tau / (2 N L)
+    """
+
+    E_sensor = compute_sfc_sensor_energy(P=P, tau=tau)
+    num_chips = compute_sfc_num_active_chips_per_sensor(N=N, L=L)
+
+    return float(E_sensor / num_chips)
+
+
+def compute_sfc_signal_level(P: float, tau: float, N: int, L: int) -> float:
+    """
+    SFC matched-filter/resource-output signal level:
+
+        sfc_signal_level = sqrt(E_chip)
+                         = sqrt(P tau / (2 N L))
+    """
+
+    return float(np.sqrt(compute_sfc_chip_energy(P=P, tau=tau, N=N, L=L)))
+
+
+def compute_sfc_pulse_amplitude(
+    P: float,
+    tau: float,
+    B: float,
+    R: int,
+    N: int,
+    L: int,
+) -> float:
+    """
+    Manuscript SFC physical pulse amplitude:
+
+        A = sqrt(tau P B / (4 L R N))
+
+    This is a waveform-domain amplitude. The current SFC channel operates at
+    matched-filter/resource-output level and therefore uses sqrt(E_chip) instead.
+    """
+
+    if P <= 0:
+        raise ValueError("P must be positive.")
+
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if R < 1:
+        raise ValueError("R must be >= 1.")
+
+    if N < 1:
+        raise ValueError("N must be >= 1.")
+
+    if L < 1:
+        raise ValueError("L must be >= 1.")
+
+    return float(np.sqrt((tau * P * B) / (4.0 * L * R * N)))
+
+
+def compute_sfc_default_detection_threshold(
+    P: float,
+    tau: float,
+    N: int,
+    L: int,
+    threshold_factor: float = 0.5,
+) -> float:
+    """
+    Default SFC detection threshold:
+
+        threshold = threshold_factor * sqrt(E_chip)
+    """
+
+    if threshold_factor < 0:
+        raise ValueError("threshold_factor must be nonnegative.")
+
+    return float(
+        threshold_factor * compute_sfc_signal_level(P=P, tau=tau, N=N, L=L)
+    )
+
+
+# =============================================================================
+# DUPLICATE-RECEPTION UPPER BOUND
 # =============================================================================
 
 def epsilon_upper_bound(M_time: int, N: int, S: int) -> float:
     """
-    Compute the upper bound from Lemma 5:
+    Compute the duplicate-reception upper bound:
 
         epsilon <= 1 - M_time! / ((M_time - 2NS)! * M_time^(2NS))
 
     If M_time < 2NS, duplicates are guaranteed by the pigeonhole principle,
     so epsilon = 1.
-
-    Parameters
-    ----------
-    M_time : int
-        Number of time bins available in one cycle.
-    N : int
-        Number of harmonics.
-    S : int
-        Number of sensors.
-
-    Returns
-    -------
-    float
-        Upper bound on the average probability of receiving duplicate values.
     """
 
     k = 2 * N * S
@@ -855,68 +941,106 @@ def compute_N0(P: float, B: float, SNR: float) -> float:
         SNR = P / (B * N0)
 
     Therefore:
+
         N0 = P / (B * SNR)
 
-    IMPORTANT
-    ---------
-    This uses the TOTAL system bandwidth B.
+    This helper uses whichever B is passed to it.
     """
-    return P / (B * SNR)
+
+    if P <= 0:
+        raise ValueError("P must be positive.")
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if SNR <= 0:
+        raise ValueError("SNR must be positive.")
+
+    return float(P / (B * SNR))
 
 
 def compute_total_energy(P: float, tau: float) -> float:
     """
-    Total available energy per cycle:
+    Total available energy per sensor per cycle:
 
         E_tot = P * tau
     """
-    return P * tau
+
+    return compute_sfc_sensor_energy(P=P, tau=tau)
 
 
 def compute_symbol_energy(P: float, tau: float, L: int) -> float:
     """
-    Energy per transmitted symbol/resource:
+    Legacy symbol-energy helper.
 
-        E_s = (P * tau) / L
+    Historical convention:
+
+        E_s_legacy = (P * tau) / L
+
+    This function is kept for compatibility. For SFC use:
+
+        compute_sfc_chip_energy(P, tau, N, L)
     """
-    return (P * tau) / L
+
+    if P <= 0:
+        raise ValueError("P must be positive.")
+
+    if tau <= 0:
+        raise ValueError("tau must be positive.")
+
+    if L < 1:
+        raise ValueError("L must be >= 1.")
+
+    return float((P * tau) / L)
 
 
 def compute_signal_level(P: float, tau: float, L: int) -> float:
     """
-    Expected matched-filter output amplitude scale:
+    Legacy matched-filter output amplitude scale:
 
-        sqrt(E_s)
+        sqrt(E_s_legacy)
+
+    This function is kept for compatibility. For SFC use:
+
+        compute_sfc_signal_level(P, tau, N, L)
     """
-    return np.sqrt(compute_symbol_energy(P, tau, L))
+
+    return float(np.sqrt(compute_symbol_energy(P, tau, L)))
 
 
 def compute_default_detection_threshold(
     P: float,
     tau: float,
     L: int,
-    threshold_factor: float = 0.5
+    threshold_factor: float = 0.5,
 ) -> float:
     """
-    Default detection threshold:
+    Legacy default detection threshold:
 
-        threshold = threshold_factor * sqrt(E_s)
+        threshold = threshold_factor * sqrt(E_s_legacy)
 
-    with:
-        E_s = (P * tau) / L
+    This function is kept for compatibility. For SFC use:
+
+        compute_sfc_default_detection_threshold(P, tau, N, L, threshold_factor)
     """
-    return threshold_factor * compute_signal_level(P, tau, L)
+
+    if threshold_factor < 0:
+        raise ValueError("threshold_factor must be nonnegative.")
+
+    return float(threshold_factor * compute_signal_level(P, tau, L))
 
 
 # =============================================================================
-# OPTIONAL EXPORT LIST
+# EXPORTS
 # =============================================================================
 
 __all__ = [
     # basic theory
     "compute_N",
     "compute_snr_linear",
+    "compute_snr_db",
     "compute_capacity",
+    "compute_sensor_snr",
 
     # quantization helpers
     "_apply_integer_rounding",
@@ -928,7 +1052,7 @@ __all__ = [
     "rbcp_mse_lower_bound",
     "rbcp_mse_star",
 
-    # Eq. (17)
+    # Eq. relation
     "compute_M_rbcp_from_M",
     "compute_M_from_M_rbcp",
 
@@ -950,14 +1074,25 @@ __all__ = [
     # SFC time / slot relations
     "compute_M_time",
     "compute_slot_duration",
+    "compute_sfc_chip_duration",
     "compute_slots_per_period",
     "compute_event_slots_total",
     "compute_rx_slots_total",
 
-    # Duplicate probability
+    # SFC energy/amplitude helpers
+    "compute_sfc_num_events_per_sensor",
+    "compute_sfc_num_active_chips_per_sensor",
+    "compute_sfc_sensor_energy",
+    "compute_sfc_event_energy",
+    "compute_sfc_chip_energy",
+    "compute_sfc_signal_level",
+    "compute_sfc_pulse_amplitude",
+    "compute_sfc_default_detection_threshold",
+
+    # duplicate probability
     "epsilon_upper_bound",
 
-    # Physical helpers
+    # legacy physical helpers
     "compute_N0",
     "compute_total_energy",
     "compute_symbol_energy",

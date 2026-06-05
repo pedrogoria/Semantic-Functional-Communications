@@ -12,21 +12,22 @@ This module produces:
 - x_benchmark
 
 System parameters are physical:
+
 - S
 - P
+- N0
 - B
 - R
 - L
-- SNR_dB
 - W
 - tau
 
 Derived parameters are obtained centrally from:
+
     build_derived_system_parameters(cfg)
 
 IMPORTANT
 ---------
-✅ NEW / INTERPRETATIVE LOGIC
 For this figure, we propagate one representative signal through the SFC stack.
 
 That means:
@@ -35,36 +36,61 @@ That means:
 - all event IDs of this representative signal are assigned locally to sensor 0
   in a figure-specific sensor_x_event used only inside this pipeline
 
-IMPORTANT CHANGE REQUESTED
---------------------------
+SFC branch
+----------
 The SFC branch is fed with:
+
     ta, tb
 
 and NOT with:
+
     ta_q, tb_q
 
 That is:
+
 - x_rbcp uses quantized ta/tb
 - x_sfc uses non-quantized ta/tb and relies on the SFC event/channel stack
 
-BANDWIDTH SHARING
+Bandwidth sharing
 -----------------
 The total bandwidth B is the total system bandwidth.
 
 Only the communication-budget-based quantities use per-sensor bandwidth slices:
+
 - M_RbCP
 - Benchmark / Nyquist M
 
-For this representative-signal figure, the benchmark branch uses the bandwidth
+For this representative-signal figure, the Benchmark branch uses the bandwidth
 slice of sensor 0:
 
     B_sensor = params.B_per_sensor[0]
 
+and therefore the corresponding sensor-0 SNR:
+
+    SNR_0 = P / (B_sensor * N0)
+
 If no bandwidth allocation is provided in the YAML, the split is equal among
 all S sensors.
+
+IMPORTANT SOURCE-BANDWIDTH CONVENTION
+-------------------------------------
+The source signal is filtered using the configured source bandwidth:
+
+    signal.W
+
+The pipeline must NOT redefine the filtering bandwidth from N using:
+
+    W_eff = 2 * N / tau
+
+The role of N is to define the number of representation harmonics.
+The role of W is to define the source-signal bandwidth used by the signal
+filter.
 """
 
+from __future__ import annotations
+
 import copy
+
 import numpy as np
 
 from sfc.core.filters import filter_periodic
@@ -124,33 +150,36 @@ def generate_rbcp_signal_representation_data(cfg):
     rng = np.random.default_rng(cfg["reproducibility"]["seed"])
     params = build_derived_system_parameters(cfg)
 
-    # Figure uses one representative signal only
+    # Figure uses one representative signal only.
     n_periods = 1
-    N = cfg["signal"].get("N_override", params.N)
+    N = int(cfg["signal"].get("N_override", params.N))
     tau = params.tau
     Tt = cfg["signal"]["Tt"]
-    w0 = 2 * np.pi / tau
+    w0 = 2.0 * np.pi / tau
 
-    t = np.arange(0, tau, Tt)
+    t = np.arange(0.0, tau, Tt)
     n_time = len(t)
 
     print("[INFO] Running rbcp_signal_representation")
     print(f"[INFO] S = {params.S}")
     print(f"[INFO] P = {params.P}")
+    print(f"[INFO] N0 = {params.N0}")
     print(f"[INFO] B = {params.B}")
     print(f"[INFO] R = {params.R}")
     print(f"[INFO] L = {params.L}")
-    print(f"[INFO] SNR_dB = {params.SNR_dB}")
+    print(f"[INFO] SNR_total_dB = {params.SNR_dB}")
+    print(f"[INFO] SNR_sensor_0_dB = {params.SNR_per_sensor_dB[0]}")
     print(f"[INFO] W = {params.W}")
     print(f"[INFO] tau = {params.tau}")
     print(f"[INFO] N = {N}")
     print(f"[INFO] M_RbCP = {params.M_rbcp}")
+    print(f"[INFO] M_RbCP per sensor = {params.M_rbcp_per_sensor}")
     print(f"[INFO] B_per_sensor = {params.B_per_sensor}")
     print(f"[INFO] quantization_force_power_of_two = {params.quantization_force_power_of_two}")
     print(f"[INFO] quantization_rounding_mode = {params.quantization_rounding_mode}")
 
     # -------------------------------------------------------------------------
-    # 1. Generate one representative signal
+    # 1. Generate one representative signal.
     # -------------------------------------------------------------------------
     x_raw = _generate_representative_signal(
         cfg=cfg,
@@ -163,25 +192,26 @@ def generate_rbcp_signal_representation_data(cfg):
     x_raw_3d = x_raw[:, None, None]
 
     # -------------------------------------------------------------------------
-    # 2. Band-limit
+    # 2. Band-limit using configured signal.W.
     # -------------------------------------------------------------------------
     x_filtered_3d = _filter_signal_tensor(
-        x_raw_3d,
-        N=N,
+        x_raw_3d=x_raw_3d,
+        cfg=cfg,
+        params=params,
         tau=tau,
         Tt=Tt
     )
 
     # -------------------------------------------------------------------------
-    # 3. Peak-to-peak control
+    # 3. Peak-to-peak control.
     # -------------------------------------------------------------------------
     x_filtered_3d = _apply_peak_to_peak_control(
         x_filtered_3d,
-        cfg["signal"]["peak_to_peak"]
+        cfg["signal"].get("peak_to_peak", 0.0)
     )
 
     # -------------------------------------------------------------------------
-    # 4. DC handling
+    # 4. DC handling.
     # -------------------------------------------------------------------------
     x_zero_mean_3d = _apply_dc_handling(
         x_filtered=x_filtered_3d,
@@ -191,21 +221,21 @@ def generate_rbcp_signal_representation_data(cfg):
     )
 
     # -------------------------------------------------------------------------
-    # 5. Fourier coefficients
+    # 5. Fourier coefficients.
     # -------------------------------------------------------------------------
     an, bn, x_used = _compute_fourier_coefficients(
         x_zero_mean=x_zero_mean_3d,
         tau=tau,
         N=N,
         Tt=Tt,
-        normalize_dft=cfg["signal"]["normalize_dft"],
-        normalization_target=cfg["signal"]["normalization_target"]
+        normalize_dft=cfg["signal"].get("normalize_dft", True),
+        normalization_target=cfg["signal"].get("normalization_target", 3.99)
     )
 
     x_used_1d = x_used[:, 0, 0]
 
     # -------------------------------------------------------------------------
-    # 6. ta/tb
+    # 6. ta/tb.
     # -------------------------------------------------------------------------
     ta, tb = _compute_phase_coefficients(
         an=an,
@@ -217,12 +247,12 @@ def generate_rbcp_signal_representation_data(cfg):
         n_periods=n_periods
     )
 
-    # Extract 1D phase vectors for the representative signal
+    # Extract 1D phase vectors for the representative signal.
     ta_1d = ta[0, :, 0]
     tb_1d = tb[0, :, 0]
 
     # -------------------------------------------------------------------------
-    # 7. RbCP branch (quantized ta/tb)
+    # 7. RbCP branch: quantized ta/tb.
     # -------------------------------------------------------------------------
     ta_q, tb_q = quantize_ta_tb(
         ta_1d,
@@ -237,10 +267,11 @@ def generate_rbcp_signal_representation_data(cfg):
         t,
         w0
     )
-    mse_rbcp = np.mean((x_used_1d - x_rbcp) ** 2)
+
+    mse_rbcp = float(np.mean((x_used_1d - x_rbcp) ** 2))
 
     # -------------------------------------------------------------------------
-    # 8. SFC branch (NON-quantized ta/tb)
+    # 8. SFC branch: NON-quantized ta/tb.
     # -------------------------------------------------------------------------
     x_sfc = np.full_like(x_used_1d, np.nan, dtype=float)
     mse_sfc = np.nan
@@ -255,11 +286,11 @@ def generate_rbcp_signal_representation_data(cfg):
             t=t,
             sfc_enabled=True
         )
-        mse_sfc = np.mean((x_used_1d - x_sfc) ** 2)
+        mse_sfc = float(np.mean((x_used_1d - x_sfc) ** 2))
 
     # -------------------------------------------------------------------------
-    # 9. Benchmark branch
-    #    Uses sensor-0 bandwidth slice only
+    # 9. Benchmark branch.
+    #    Uses sensor-0 bandwidth slice only.
     # -------------------------------------------------------------------------
     x_benchmark, M_benchmark = _run_benchmark_branch(
         x_ref=x_used_1d,
@@ -267,7 +298,8 @@ def generate_rbcp_signal_representation_data(cfg):
         cfg=cfg,
         params=params
     )
-    mse_benchmark = np.mean((x_used_1d - x_benchmark) ** 2)
+
+    mse_benchmark = float(np.mean((x_used_1d - x_benchmark) ** 2))
 
     return {
         "t": t,
@@ -307,15 +339,32 @@ def _generate_representative_signal(cfg, rng, num_time_samples):
     if dist == "gaussian":
         return rng.normal(0, 1, size=num_time_samples)
 
-    raise ValueError("Invalid distribution")
+    raise ValueError("Invalid distribution. Use 'uniform' or 'gaussian'.")
 
 
-def _filter_signal_tensor(x_raw_3d, N, tau, Tt):
+def _filter_signal_tensor(x_raw_3d, cfg, params, tau, Tt):
     """
-    Band-limit the representative signal tensor using W_eff = 2N / tau.
+    Band-limit the representative signal tensor using configured signal.W.
+
+    IMPORTANT:
+    ---------
+    The source filter bandwidth must come from:
+
+        signal.W
+
+    It must NOT be redefined from N as:
+
+        W_eff = 2 * N / tau
+
+    N controls the number of representation harmonics. W controls the
+    source-signal bandwidth.
     """
 
-    W_eff = 2 * N / tau
+    W_filter = float(cfg["signal"].get("W", params.W))
+
+    if W_filter <= 0:
+        raise ValueError("signal.W must be positive.")
+
     x_filtered = np.zeros_like(x_raw_3d)
 
     # shape = (time, periods, sensors=1)
@@ -325,7 +374,7 @@ def _filter_signal_tensor(x_raw_3d, N, tau, Tt):
         for s in range(S):
             x_filtered[:, p, s] = filter_periodic(
                 x_raw_3d[:, p, s],
-                W_eff,
+                W_filter,
                 Tt,
                 tau
             )
@@ -448,7 +497,7 @@ def _run_sfc_branch(ta, tb, cfg, params, N, t, sfc_enabled=True):
         return np.full_like(t, np.nan, dtype=float)
 
     n_periods = 1
-    w0 = 2 * np.pi / params.tau
+    w0 = 2.0 * np.pi / params.tau
 
     phase_core = PhaseCoefficientCore(
         T=params.tau,
@@ -462,10 +511,10 @@ def _run_sfc_branch(ta, tb, cfg, params, N, t, sfc_enabled=True):
         threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
     )
 
-    # Representative-signal events: shape based on 1 signal only
+    # Representative-signal events: shape based on 1 signal only.
     events = phase_core.ta_tb_to_events(ta, tb)
 
-    # Build one SFC channel using a figure-specific sensor_x_event
+    # Build one SFC channel using a figure-specific sensor_x_event.
     sfc_channel = _build_representative_sfc_channel(cfg, params, N)
 
     out = sfc_channel(events)
@@ -493,12 +542,15 @@ def _build_representative_sfc_channel(cfg, params, N):
     ---------------------------------
     Only the representative signal exists in the event matrix, so the number of
     event IDs is:
+
         2 * N
 
     But the physical system still has S sensors.
 
     We assign all event IDs to sensor 0 in a figure-specific sensor_x_event:
+
         shape = (S, 2N)
+
     with:
         row 0 -> ones
         rows 1..S-1 -> zeros
@@ -509,13 +561,16 @@ def _build_representative_sfc_channel(cfg, params, N):
     if "channel" not in cfg_sfc:
         cfg_sfc["channel"] = {}
 
-    sensor_x_event = np.zeros((params.S, 2 * N))
+    sensor_x_event = np.zeros((params.S, 2 * N), dtype=float)
     sensor_x_event[0, :] = 1.0
 
     cfg_sfc["channel"]["sensor_x_event"] = sensor_x_event
     cfg_sfc["channel"]["collision_mode"] = cfg_sfc["channel"].get("collision_mode", "sum")
     cfg_sfc["channel"]["type"] = cfg_sfc["channel"].get("type", "awgn")
-    cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get("detection_mode", "threshold")
+    cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get(
+        "detection_mode",
+        "threshold"
+    )
     cfg_sfc["channel"]["score_threshold"] = cfg_sfc["channel"].get(
         "score_threshold",
         cfg_sfc["system"]["L"]
@@ -551,24 +606,30 @@ def _run_benchmark_branch(x_ref, t, cfg, params):
 
     IMPORTANT
     ---------
-    For this figure, the benchmark uses the bandwidth slice of sensor 0 only:
+    For this figure, the Benchmark uses the bandwidth slice of sensor 0 only:
 
         B_sensor = params.B_per_sensor[0]
+
+    The number of bins M is computed from the physical sensor-0 budget:
+
+        SNR_0 = P / (B_sensor * N0)
 
     The number of bins M is obtained from the core, using the current default
     quantization policy (free integer by default).
     """
 
     benchmark_cfg = cfg.get("benchmark", {})
-    sampling_rate = benchmark_cfg.get("sampling_rate", params.W)
+    sampling_rate = float(benchmark_cfg.get("sampling_rate", params.W))
+    effective_rate_factor = float(benchmark_cfg.get("effective_rate_factor", 1.0))
 
-    B_sensor = params.B_per_sensor[0]
+    B_sensor = float(params.B_per_sensor[0])
 
     M = compute_benchmark_M_single_sensor(
         tau=params.tau,
         B_sensor=B_sensor,
-        SNR=params.SNR,
-        sampling_rate=sampling_rate,
+        P=params.P,
+        N0=params.N0,
+        sampling_rate=effective_rate_factor * sampling_rate,
         force_power_of_two=params.quantization_force_power_of_two,
         rounding_mode=params.quantization_rounding_mode
     )
@@ -593,15 +654,20 @@ def _benchmark_sample_quantize_reconstruct(x_ref, t, sampling_rate, M):
     This implementation does NOT require M to be a power of 2.
     """
 
+    M = int(M)
+
+    if M < 2:
+        return np.full_like(t, np.nan, dtype=float)
+
     tau = t[-1] + (t[1] - t[0])
 
     Ts = 1.0 / sampling_rate
     t_samples = np.arange(0.0, tau, Ts)
 
-    # Sample the reference signal on the sampling grid
+    # Sample the reference signal on the sampling grid.
     x_samples = np.interp(t_samples, t, x_ref)
 
-    # Uniform quantization over the signal dynamic range
+    # Uniform quantization over the signal dynamic range.
     x_min = np.min(x_ref)
     x_max = np.max(x_ref)
 
@@ -610,13 +676,16 @@ def _benchmark_sample_quantize_reconstruct(x_ref, t, sampling_rate, M):
 
     delta = (x_max - x_min) / M
 
-    # Mid-rise / clipped uniform quantizer
-    idx = np.floor((x_samples - x_min) / delta)
-    idx = np.clip(idx, 0, M - 1)
+    if not np.isfinite(delta) or np.isclose(delta, 0.0):
+        # Extremely large M: quantization error is numerically negligible.
+        xq = np.array(x_samples, dtype=float, copy=True)
+    else:
+        # Mid-rise / clipped uniform quantizer.
+        idx = np.floor((x_samples - x_min) / delta)
+        idx = np.clip(idx, 0, M - 1)
+        xq = x_min + (idx + 0.5) * delta
 
-    xq = x_min + (idx + 0.5) * delta
-
-    # sinc reconstruction:
+    # Sinc reconstruction:
     # y(t) = sum_k xq[k] * sinc(fs * t - k)
     fs = sampling_rate
     k = np.arange(len(xq))
@@ -626,3 +695,8 @@ def _benchmark_sample_quantize_reconstruct(x_ref, t, sampling_rate, M):
         x_hat[i] = np.sum(xq * np.sinc(fs * ti - k))
 
     return x_hat
+
+
+__all__ = [
+    "generate_rbcp_signal_representation_data",
+]

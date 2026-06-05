@@ -1,6 +1,7 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
 
 [project]
 name = "semantic-functional-communications"
@@ -8,12 +9,41 @@ version = "0.1.0"
 description = "Semantic-Functional Communications simulations"
 readme = "README.md"
 requires-python = ">=3.8"
+
 dependencies = [
   "numpy<2.0",
   "scipy<1.11",
   "matplotlib<3.8",
-  "pyyaml"
+  "pandas<2.1",
+  "pyyaml",
 ]
 
-[tool.setuptools]
-packages = ["sfc"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "black",
+  "ruff",
+]
+
+
+[tool.setuptools.packages.find]
+include = ["sfc", "sfc.*"]
+
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+
+
+[tool.ruff]
+line-length = 88
+target-version = "py38"
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+]
+ignore = []

@@ -17,8 +17,6 @@ Key goals
 
 IMPORTANT
 ---------
-✅ NEW / INTERPRETATIVE LOGIC
-----------------------------
 This file intentionally contains the whole pipeline instead of calling the
 figure pipeline, so that multi-signal and multi-period debugging can be done
 without ambiguity.
@@ -26,17 +24,40 @@ without ambiguity.
 Data conventions
 ----------------
 Signals are handled as tensors with shape:
+
     (time, periods, sensors)
 
 For example:
+
     x_filtered.shape = (T_samples, n_periods, S)
 
 The phase layer uses:
+
     ta.shape = (n_periods, N, S)
     tb.shape = (n_periods, N, S)
 
 The SFC event matrix uses:
-    events.shape = (rs_per_period * n_periods, 2 * N * S)
+
+    events.shape = (event_slots_total, 2 * N * S)
+
+Physical convention
+-------------------
+The default physical model is:
+
+    P  = average available transmit power per sensor
+    N0 = noise spectral-density / noise parameter
+
+Then:
+
+    SNR_total = P / (B * N0)
+
+For communication-budget-based per-sensor methods, such as the Nyquist
+Benchmark and RbCP:
+
+    B_s = alpha_s * B
+    SNR_s = P / (B_s * N0)
+
+For SFC and RbCP_time, the time/event model uses the total B, not B_s.
 """
 
 import copy
@@ -53,6 +74,9 @@ from sfc.core.nyquist import Nyquist
 from sfc.core.channel.SFCChannel import SFCChannel
 from sfc.core.system_parameters import (
     build_derived_system_parameters,
+)
+
+from sfc.core.theory import (
     compute_benchmark_bits_per_sample_single_sensor,
 )
 
@@ -102,8 +126,13 @@ def _benchmark_nyquist_multisignal(x_zero_mean, cfg, params, Tt):
 
     IMPORTANT
     ---------
-    The benchmark communication budget uses the per-sensor bandwidth slice:
-        params.B_per_sensor[s]
+    The benchmark communication budget uses each sensor's own bandwidth slice:
+
+        B_sensor = params.B_per_sensor[s]
+
+    and the corresponding per-sensor SNR:
+
+        SNR_s = params.P / (B_sensor * params.N0)
 
     Input
     -----
@@ -119,40 +148,62 @@ def _benchmark_nyquist_multisignal(x_zero_mean, cfg, params, Tt):
 
     benchmark_cfg = cfg.get("benchmark", {})
     sampling_rate = benchmark_cfg.get("sampling_rate", params.W)
+    effective_rate_factor = benchmark_cfg.get("effective_rate_factor", 1.0)
+    effective_sampling_rate = effective_rate_factor * sampling_rate
 
     n_time, n_periods, S = x_zero_mean.shape
     x_benchmark = np.zeros_like(x_zero_mean)
 
     print(f"[INFO] Benchmark sampling_rate = {sampling_rate}")
+    print(f"[INFO] Benchmark effective_rate_factor = {effective_rate_factor}")
+    print(f"[INFO] Benchmark effective_sampling_rate = {effective_sampling_rate}")
 
     for s in range(S):
+        B_sensor = float(params.B_per_sensor[s])
+        SNR_sensor = float(params.P / (B_sensor * params.N0))
+        SNR_sensor_dB = 10.0 * np.log10(max(SNR_sensor, np.finfo(float).tiny))
+
         bits_int = compute_benchmark_bits_per_sample_single_sensor(
             tau=params.tau,
             B_sensor=params.B_per_sensor[s],
-            SNR=params.SNR,
-            sampling_rate=sampling_rate
+            P=params.P,
+            N0=params.N0,
+            sampling_rate=sampling_rate,
+            force_power_of_two=params.quantization_force_power_of_two,
+            rounding_mode=params.quantization_rounding_mode,
         )
 
         print(
             f"[INFO] Benchmark sensor {s}: "
-            f"B_sensor = {params.B_per_sensor[s]:.6e}, "
+            f"B_sensor = {B_sensor:.6e}, "
+            f"SNR_sensor = {SNR_sensor:.6e}, "
+            f"SNR_sensor_dB = {SNR_sensor_dB:.3f}, "
             f"bits/sample = {bits_int}"
         )
 
+        t = np.arange(0, params.tau, Tt)
+
         for p in range(n_periods):
-            nyq = Nyquist(
-                T=params.tau,
-                Tt=Tt,
-                sampling_rate=sampling_rate,
-                sensor_nodes=1,
-                bits_codeword=bits_int,
-                snr_dB=100.0,
-                bandwidth=1e6
+            nyq_cfg = {
+                "T": params.tau,
+                "Tt": Tt,
+                "sampling_rate": effective_sampling_rate,
+                "sensor_nodes": 1,
+                "bits_codeword": int(bits_int),
+                "snr_dB": 100.0,
+                "bandwidth": 1e6,
+            }
+
+            nyq = Nyquist(nyq_cfg)
+
+            xs = nyq(
+                x_zero_mean[:, p, s],
+                t,
+                quantize=False
             )
 
-            t = np.arange(0, params.tau, Tt)
-            xs = nyq(x_zero_mean[:, p, s], t, quantize=False)
             xs_q = nyq.quantize(xs)
+
             x_benchmark[:, p, s] = nyq.recover_signal(xs_q)
 
     return x_benchmark
@@ -305,12 +356,26 @@ def run_debug_from_yaml(config_path):
     print(f"[INFO] S = {S}")
     print(f"[INFO] n_periods = {n_periods}")
     print(f"[INFO] N = {params.N}")
+    print(f"[INFO] P = {params.P:.6e}")
+    print(f"[INFO] N0 = {params.N0:.6e}")
+    print(f"[INFO] B = {params.B:.6e}")
+    print(f"[INFO] SNR_total = {params.SNR:.6e}")
+    print(f"[INFO] SNR_total_dB = {params.SNR_dB:.3f}")
+    print(f"[INFO] SNR_per_sensor = {params.SNR_per_sensor}")
+    print(f"[INFO] SNR_per_sensor_dB = {params.SNR_per_sensor_dB}")
     print(f"[INFO] M_RbCP = {params.M_rbcp}")
     print(f"[INFO] M_RbCP per sensor = {params.M_rbcp_per_sensor}")
     print(f"[INFO] bandwidth_allocation = {params.bandwidth_allocation}")
     print(f"[INFO] B_per_sensor = {params.B_per_sensor}")
-    print(f"[INFO] signal_level = {params.signal_level:.6e}")
-    print(f"[INFO] default_threshold = {params.default_threshold:.6e}")
+
+    # -------------------------------------------------------------------------
+    # Optional diagnostics if available in the current DerivedSystemParameters
+    # -------------------------------------------------------------------------
+    if hasattr(params, "signal_level"):
+        print(f"[INFO] signal_level = {params.signal_level:.6e}")
+
+    if hasattr(params, "default_threshold"):
+        print(f"[INFO] default_threshold = {params.default_threshold:.6e}")
 
     # -------------------------------------------------------------------------
     # 1. Generate S signals across multiple periods
@@ -579,16 +644,6 @@ def plot_debug_results(data):
 
     # -------------------------------------------------------------------------
     # CONSISTENCY CHECKS
-    #
-    # slot_duration = R / B
-    # slots_per_period = floor(tau * B / R)
-    # event_slots_total = slots_per_period * n_periods
-    # rx_slots_total = event_slots_total + L - 1
-    #
-    # IMPORTANT:
-    # - events.shape[0] counts only possible event-start slots
-    # - superposed and y are still stored as (event_slots_total, L, R)
-    # - the +L-1 tail appears only after building the final frame
     # -------------------------------------------------------------------------
     cfg_local = data["cfg"]
 
@@ -621,39 +676,18 @@ def plot_debug_results(data):
         "events_est.shape[0] must match the number of possible event-start slots"
 
     assert sfc_debug["channel_intermediates"]["superposed"].shape[0] == rx_slots_total, \
-        "superposed.shape[0] must match event_slots_total at the event-indexed stage"
+        "superposed.shape[0] must match event_slots_total + L - 1"
 
     assert sfc_debug["channel_intermediates"]["y"].shape[0] == rx_slots_total, \
-        "y.shape[0] must match event_slots_total at the event-indexed stage"
+        "y.shape[0] must match event_slots_total + L - 1"
 
     # -------------------------------------------------------------------------
     # SFC INTERNAL PLOTS
-    #
-    # Convert:
-    #   (event_slots_total, L, R)
-    #
-    # into the final channel frame:
-    #   (event_slots_total + L - 1, R)
     # -------------------------------------------------------------------------
     out = sfc_debug["channel_intermediates"]
 
     superposed = out["superposed"]
     y = out["y"]
-
-    # -------------------------------------------------------------------------
-    # SFC INTERNAL PLOTS
-    #
-    # Agora esperamos que:
-    #   superposed.shape = (rx_slots_total, R)
-    #   y.shape          = (rx_slots_total, R)
-    #
-    # onde:
-    #   rx_slots_total = event_slots_total + L - 1
-    # -------------------------------------------------------------------------
-    out = sfc_debug["channel_intermediates"]
-
-    superposed = out["superposed"]  # esperado: (rx_slots_total, R)
-    y = out["y"]  # esperado: (rx_slots_total, R), possivelmente complexo
 
     print("\n[PLOT CHECK]")
     print("superposed.shape =", superposed.shape)
@@ -672,7 +706,7 @@ def plot_debug_results(data):
         "y.shape[0] must be event_slots_total + L - 1"
 
     # -------------------------------------------------------------------------
-    # CHANNEL INPUT (single final frame, no noise)
+    # CHANNEL INPUT
     # -------------------------------------------------------------------------
     plt.figure(figsize=(9, 6))
     plt.imshow(
@@ -689,7 +723,7 @@ def plot_debug_results(data):
     plt.close()
 
     # -------------------------------------------------------------------------
-    # CHANNEL OUTPUT (single final frame, after channel)
+    # CHANNEL OUTPUT
     # -------------------------------------------------------------------------
     plt.figure(figsize=(9, 6))
     plt.imshow(

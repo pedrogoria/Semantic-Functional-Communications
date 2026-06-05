@@ -409,3 +409,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_rbcp_benchmark_truncation_mse_vs_B import (
+#     run_rbcp_benchmark_truncation_mse_vs_B,
+# )
+#
+# df_trunc = run_rbcp_benchmark_truncation_mse_vs_B(
+#     "experiments/configs/figures/rbcp_benchmark_truncation_mse_vs_B.yaml"
+# )

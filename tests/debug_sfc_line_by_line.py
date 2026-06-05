@@ -19,6 +19,23 @@ IMPORTANT
   filtering, DC can be removed, Fourier normalization is preserved, and then
   ta/tb are converted to events.
 - The SFC stack is then applied.
+- SFC uses the total system bandwidth B, not per-sensor bandwidth B_s.
+
+Physical convention
+-------------------
+Preferred project convention:
+
+    P  = average available transmit power per sensor
+    N0 = noise spectral-density / noise parameter
+
+Then:
+
+    SNR_total = P / (B * N0)
+
+This debug helper still accepts SNR_dB for convenience. If N0 is not explicitly
+provided, N0 is derived from P, B, and SNR_dB:
+
+    N0 = P / (B * SNR_total)
 
 Recommended usage from PyCharm console
 --------------------------------------
@@ -27,6 +44,7 @@ from tests.debug_sfc_line_by_line import run_sfc_line_by_line_debug
 out = run_sfc_line_by_line_debug(
     S=1,
     P=1.0,
+    N0=None,
     B=14.0,
     R=12,
     L=4,
@@ -70,13 +88,101 @@ from sfc.core.filters import filter_periodic
 from sfc.core.fourier import FourierCoefficientCore
 from sfc.core.phase_cof import calc_ta_tb, PhaseCoefficientCore
 from sfc.core.reconstruction import recover_signal
-from sfc.core.system_parameters import compute_N, compute_M_rbcp
+from sfc.core.system_parameters import compute_M_rbcp
+from sfc.core.theory import compute_N
 from sfc.core.channel.SFCChannel import SFCChannel
+
+
+def _snr_linear_from_db(SNR_dB):
+    return 10.0 ** (float(SNR_dB) / 10.0)
+
+
+def _snr_db_from_linear(SNR):
+    return 10.0 * np.log10(max(float(SNR), np.finfo(float).tiny))
+
+
+def _resolve_N0(P, B, SNR_dB, N0):
+    """
+    Resolve N0 for this standalone debug helper.
+
+    Preferred:
+        pass N0 explicitly.
+
+    Backward-compatible:
+        if N0 is None, derive it from P, B, and SNR_dB using total-band SNR:
+
+            N0 = P / (B * SNR_total)
+    """
+
+    if P <= 0:
+        raise ValueError("P must be positive.")
+
+    if B <= 0:
+        raise ValueError("B must be positive.")
+
+    if N0 is not None:
+        if N0 <= 0:
+            raise ValueError("N0 must be positive when provided.")
+        return float(N0)
+
+    SNR_total = _snr_linear_from_db(SNR_dB)
+    if SNR_total <= 0:
+        raise ValueError("SNR_total must be positive.")
+
+    return float(P / (B * SNR_total))
+
+
+def _build_sensor_x_event(S, N):
+    """
+    Build the sensor-event association matrix.
+
+    Event ordering:
+    for each sensor s:
+        [ta events for N harmonics][tb events for N harmonics]
+
+    Total number of event IDs:
+        2 * N * S
+    """
+
+    num_event_ids = 2 * N * S
+    sensor_x_event = np.zeros((S, num_event_ids))
+
+    for s in range(S):
+        start = 2 * s * N
+        stop = 2 * (s + 1) * N
+        sensor_x_event[s, start:stop] = 1.0
+
+    return sensor_x_event
+
+
+def _prepare_frame_for_plot(arr):
+    """
+    Return a 2D array suitable for imshow.
+
+    Supports both:
+    - final-frame arrays with shape (rx_slots_total, R)
+    - older/intermediate arrays with shape (event_slots_total, L, R)
+
+    For 3D input, this helper flattens the first two axes only for debug
+    visualization.
+    """
+
+    arr = np.asarray(arr)
+
+    if arr.ndim == 2:
+        return arr
+
+    if arr.ndim == 3:
+        a, b, c = arr.shape
+        return arr.reshape(a * b, c)
+
+    raise ValueError(f"Expected 2D or 3D array for plotting, got shape={arr.shape}")
 
 
 def run_sfc_line_by_line_debug(
     S=1,
     P=1.0,
+    N0=None,
     B=14000,
     R=12,
     L=4,
@@ -92,8 +198,8 @@ def run_sfc_line_by_line_debug(
     threshold_harmonics=0.001,
     collision_mode="sum",
     channel_type="clean",
-    threshold=None,             # absolute threshold (optional)
-    threshold_factor=0.5,       # default physical threshold factor
+    threshold=None,
+    threshold_factor=0.5,
     detection_mode="threshold",
     score_threshold=None,
     plot=True,
@@ -104,26 +210,39 @@ def run_sfc_line_by_line_debug(
 
     Parameters
     ----------
-    S, P, B, R, L, SNR_dB : system/channel parameters
+    S, P, N0, B, R, L : system/channel parameters
+
+    SNR_dB : float
+        Total-band SNR in dB used only if N0 is None.
+
     W, tau, Tt : signal/time parameters
+
     peak_to_peak : float
         Target peak-to-peak value after filtering.
         If 0, keep the original filtered-signal peak-to-peak.
+
     distribution : {"uniform", "gaussian"}
         Raw-signal distribution.
+
     normalize_dft : bool
         Keep trusted Fourier normalization logic.
+
     normalization_target : float
         Target used by the trusted DFT normalization loop.
+
     dc_enabled : bool
         If False, remove DC before the phase pipeline.
+
     threshold_harmonics : float
         Threshold passed to the phase core.
+
     collision_mode, channel_type, threshold, threshold_factor,
     detection_mode, score_threshold
         SFC channel configuration.
+
     plot : bool
         If True, display diagnostic plots.
+
     seed : int
         Random seed.
 
@@ -136,19 +255,43 @@ def run_sfc_line_by_line_debug(
     rng = np.random.default_rng(seed)
 
     # ------------------------------------------------------------------
-    # Derived parameters
+    # Physical parameters
     # ------------------------------------------------------------------
-    SNR = 10 ** (SNR_dB / 10.0)
-    N = compute_N(W, tau)
-    M_rbcp = compute_M_rbcp(S, W, tau, B, SNR)
-    w0 = 2 * np.pi / tau
-    n_vec = np.arange(1, N + 1)
-    t = np.arange(0, tau, Tt)
+    N0 = _resolve_N0(P=P, B=B, SNR_dB=SNR_dB, N0=N0)
+    SNR_total = P / (B * N0)
+    SNR_total_dB = _snr_db_from_linear(SNR_total)
 
-    print(f"[INFO] SNR (dB) = {SNR_dB}")
-    print(f"[INFO] SNR (linear) = {SNR:.4e}")
+    # ------------------------------------------------------------------
+    # Derived theoretical parameters
+    # ------------------------------------------------------------------
+    N = compute_N(W, tau)
+
+    # RbCP is not used by the SFC branch, but is useful as a diagnostic.
+    # RbCP uses per-sensor B_s and SNR_s internally through P,N0.
+    M_rbcp = compute_M_rbcp(
+        S=S,
+        W=W,
+        tau=tau,
+        B=B,
+        P=P,
+        N0=N0,
+        bandwidth_allocation=None,
+        force_power_of_two=False,
+        rounding_mode="floor",
+    )
+
+    w0 = 2.0 * np.pi / tau
+    n_vec = np.arange(1, N + 1)
+    t = np.arange(0.0, tau, Tt)
+
+    print(f"[INFO] P = {P:.6e}")
+    print(f"[INFO] N0 = {N0:.6e}")
+    print(f"[INFO] B = {B:.6e}")
+    print(f"[INFO] SNR_total_dB = {SNR_total_dB:.6f}")
+    print(f"[INFO] SNR_total = {SNR_total:.6e}")
     print(f"[INFO] Derived N = {N}")
-    print(f"[INFO] Derived M_RbCP = {M_rbcp}")
+    print(f"[INFO] Diagnostic M_RbCP = {M_rbcp}")
+    print("[INFO] SFC uses total B, not B_s.")
 
     # ------------------------------------------------------------------
     # 1. Generate raw signal
@@ -165,7 +308,7 @@ def run_sfc_line_by_line_debug(
     #    Use W_eff consistent with target N:
     #        N = floor(W_eff * tau / 2)
     # ------------------------------------------------------------------
-    W_eff = 2 * N / tau
+    W_eff = 2.0 * N / tau
     x_filtered = filter_periodic(x_raw, W_eff, Tt, tau)
 
     # ------------------------------------------------------------------
@@ -246,7 +389,7 @@ def run_sfc_line_by_line_debug(
 
     # ------------------------------------------------------------------
     # 8. Build local cfg for the SFC channel
-    #    Representative-signal figure logic:
+    #    Representative-signal debug logic:
     #    assign all event IDs to sensor 0.
     # ------------------------------------------------------------------
     sensor_x_event = np.zeros((S, num_event_ids))
@@ -260,8 +403,6 @@ def run_sfc_line_by_line_debug(
         "score_threshold": L if score_threshold is None else score_threshold,
     }
 
-    # If threshold is explicitly given, use it.
-    # Otherwise derive threshold from threshold_factor inside the detector.
     if threshold is not None:
         channel_cfg["threshold"] = threshold
     else:
@@ -271,10 +412,15 @@ def run_sfc_line_by_line_debug(
         "system": {
             "S": S,
             "P": P,
+            "N0": N0,
             "B": B,
             "R": R,
             "L": L,
-            "SNR_dB": SNR_dB,
+            "SNR_dB": SNR_total_dB,
+        },
+        "signal": {
+            "tau": tau,
+            "W": W,
         },
         "channel": channel_cfg,
         "reproducibility": {
@@ -317,7 +463,7 @@ def run_sfc_line_by_line_debug(
     # 11. Reconstruct SFC signal
     # ------------------------------------------------------------------
     x_sfc = recover_signal(ta_rec, tb_rec, t, w0)
-    mse_sfc = np.mean((x_used_1d - x_sfc) ** 2)
+    mse_sfc = float(np.mean((x_used_1d - x_sfc) ** 2))
 
     print(f"[INFO] MSE_sfc = {mse_sfc:.6e}")
 
@@ -347,23 +493,26 @@ def run_sfc_line_by_line_debug(
         plt.show(block=True)
         plt.close()
 
+        superposed_for_plot = _prepare_frame_for_plot(out["superposed"])
+        y_for_plot = _prepare_frame_for_plot(out["y"])
+
         # Aggregate transmitted map
-        plt.figure(figsize=(8, 3))
-        plt.imshow(out["superposed"][0], cmap="gray_r", aspect="auto")
-        plt.title("Superposed transmitted map")
+        plt.figure(figsize=(8, 4))
+        plt.imshow(np.real(superposed_for_plot), cmap="gray_r", aspect="auto", origin="lower")
+        plt.title("Superposed transmitted frame")
         plt.xlabel("Resource index")
-        plt.ylabel("Sub-symbol index")
-        plt.colorbar()
+        plt.ylabel("Discrete simulation slot")
+        plt.colorbar(label="Amplitude")
         plt.show(block=True)
         plt.close()
 
         # Channel output magnitude
-        plt.figure(figsize=(8, 3))
-        plt.imshow(np.abs(out["y"][0]), cmap="viridis", aspect="auto")
+        plt.figure(figsize=(8, 4))
+        plt.imshow(np.abs(y_for_plot), cmap="viridis", aspect="auto", origin="lower")
         plt.title("Channel output magnitude |y|")
         plt.xlabel("Resource index")
-        plt.ylabel("Sub-symbol index")
-        plt.colorbar()
+        plt.ylabel("Discrete simulation slot")
+        plt.colorbar(label="Magnitude")
         plt.show(block=True)
         plt.close()
 
@@ -383,6 +532,10 @@ def run_sfc_line_by_line_debug(
         "x_sfc": x_sfc,
         "mse_sfc": mse_sfc,
         "channel_intermediates": out,
+        "N0": N0,
+        "SNR_total": SNR_total,
+        "SNR_total_dB": SNR_total_dB,
+        "M_rbcp_diagnostic": M_rbcp,
     }
 
 

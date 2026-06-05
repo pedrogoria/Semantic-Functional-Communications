@@ -1,0 +1,123 @@
+# tests/configs/cs_fdma_single_trial_debug.yaml
+
+description: "Single-trial debug for CS + FDMA using x(t) -> x[n] -> CS -> sinc reconstruction"
+
+monte_carlo:
+  seed: 47
+  interactions: 1
+
+reproducibility:
+  seed: 47
+
+output:
+  base_dir: "tests/results"
+  figure_dir: "cs_fdma_single_trial_debug"
+
+  save_figures: true
+
+  formats:
+    data: []
+    figure:
+      - png
+      - pdf
+
+data_format:
+  delimiter: "\t"
+
+system:
+  S: 1
+  B: 500.0
+
+  P: 1.0
+  N0: 0.03
+
+  R: 12
+  L: 4
+
+  bandwidth_allocation: null
+
+signal:
+  tau: 1.0
+  Tt: 0.001
+
+  W: 10.4
+
+  N_override: 5
+  n_periods: 1
+
+  distribution: gaussian
+  peak_to_peak: 12.0
+
+  normalize_dft: true
+  normalization_target: 3.99
+  threshold_harmonics: 0.001
+
+dc:
+  enabled: false
+
+quantization:
+  force_power_of_two: false
+  rounding_mode: floor
+
+benchmark:
+  # Shared by Benchmark and CS:
+  #
+  #   fs = effective_rate_factor * sampling_rate
+  #
+  # With sampling_rate = W and effective_rate_factor = 2:
+  #   fs = 2W
+  sampling_rate: 10.4
+  effective_rate_factor: 1.0
+
+cs:
+  # Each CS measurement is represented with this many bits.
+  # The same value is used as the channel cost per CS measurement unless
+  # bits_per_measurement is explicitly provided.
+  measurement_bits: 4
+
+  # Optional advanced override.
+  # bits_per_measurement: 12.0
+
+  quantize_measurements: true
+
+  measurement_quantization_mode: uniform_midrise
+
+  # For debugging, per_signal is convenient.
+  # For stricter physical interpretation, use fixed range.
+  measurement_quantization_range: per_signal
+
+  measurement_quantization_min: null
+  measurement_quantization_max: null
+  clip_quantization: true
+
+  sparsity: 10
+
+  basis: dct
+  sensing_matrix: gaussian
+
+  # Fixed seed so ideal and quantized paths use the same Phi.
+  random_state: 12345
+
+  normalize_dictionary_columns: true
+  store_true_representation: true
+
+debug:
+  sensor_index: 0
+
+  # Options:
+  #   random_filtered
+  #   synthetic_sparse_dct_samples
+  #
+  # Use synthetic_sparse_dct_samples to verify that CS works when x[n] is
+  # exactly sparse in the selected basis.
+  signal_mode: synthetic_sparse_dct_samples
+
+  synthetic_sparsity: 5
+  synthetic_allow_dc: false
+  synthetic_amplitude_mode: gaussian
+
+  # Optional validation override.
+  # If null, M comes from the channel budget.
+  n_measurements_override: null
+
+  top_k_coefficients: 20

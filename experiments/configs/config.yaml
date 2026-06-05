@@ -38,6 +38,7 @@
 # - Some older figure pipelines still accept signal.T as a legacy alias.
 # =============================================================================
 
+
 # -----------------------------------------------------------------------------
 # FIGURE / EXPERIMENT METADATA
 # -----------------------------------------------------------------------------
@@ -77,7 +78,17 @@ mode:
   run_rbcp_time: false
   run_sfc: false
 
-  # Semantic-based error detection.
+  # Pipeline-level switch for semantic-based error detection.
+  #
+  # If true, the pipeline applies SED after SFC detection.
+  #
+  # The SED follows manuscript sparse-pair logic:
+  #   - duplicate t_z^(s,n) -> invalid period
+  #   - ta without tb or tb without ta -> invalid period
+  #   - both ta and tb absent -> valid absent pair
+  #
+  # It does NOT require exactly 2*N*S events per period.
+  #
   # type: bool
   semantic_error_detection: false
 
@@ -100,23 +111,55 @@ system:
   # Average transmit power parameter.
   # type: float
   # valid: > 0
+  #
   # notes:
-  #   * In fixed-power regimes (Figure 6 / Figure 7-style), P is held constant.
-  #   * In fixed-SNR regimes (Figure 5-style), pipelines may derive P(B) pointwise.
+  #   * In fixed-power regimes, P is held constant.
+  #   * In fixed-SNR regimes, pipelines may derive P(B) pointwise.
   P: 1.0
 
   # Total system bandwidth.
   # type: float
   # valid: > 0
+  #
   # IMPORTANT:
   #   B always denotes TOTAL system bandwidth at the top config level.
   #   Per-sensor slices are derived through the core builder using
-  #   system.bandwidth_allocation (or equal split if null).
+  #   system.bandwidth_allocation, or equal split if null.
   B: 10000.0
 
-  # Number of resources / subcarriers.
+  # Number of resources / subcarriers used by SFC maps.
   # type: int
   # valid: >= 1
+  #
+  # IMPORTANT for theorem-consistent SFC maps:
+  #   The current SFC map generator partitions the R resources into L disjoint
+  #   row-resource groups D_1, ..., D_L.
+  #
+  #   Each map row l can only activate a resource from D_l.
+  #
+  #   Therefore, the number of theorem-valid maps is:
+  #
+  #       |D_1| * |D_2| * ... * |D_L|
+  #
+  #   with a balanced partition of R resources over L rows.
+  #
+  #   The number of event IDs required by the standard SFC Fourier/phase
+  #   representation is:
+  #
+  #       num_event_ids = 2 * N * S
+  #
+  #   Hence, valid configs must satisfy:
+  #
+  #       product_l |D_l| >= 2 * N * S
+  #
+  #   Example:
+  #       S = 12, N = 5, L = 4
+  #       required maps = 2*5*12 = 120
+  #
+  #       R = 12 -> partition [3,3,3,3] -> 81 maps  -> invalid
+  #       R = 16 -> partition [4,4,4,4] -> 256 maps -> valid
+  #
+  #   If this condition is not met, SFCChannel raises an AssertionError.
   R: 12
 
   # Number of temporal resources / sub-symbols / rows per SFC map.
@@ -133,8 +176,10 @@ system:
   # Noise parameter N0.
   # type: float
   # valid: > 0
+  #
   # remarks:
   #   The core uses the TOTAL system bandwidth B when relating SNR, P and N0:
+  #
   #       SNR = P / (B * N0)
   N0: 0.007
 
@@ -144,14 +189,18 @@ system:
 
   # Figure-5-style regime helper:
   # keep SNR_dB fixed and N0 fixed, derive:
+  #
   #   P(B) = SNR * B * N0
+  #
   # type: bool
   manuscript_faithful_power_model: false
   derive_P_from_fixed_N0: false
 
   # Figure-6 / Figure-7-style regime helper:
   # keep P fixed and N0 fixed, derive:
+  #
   #   SNR(B) = P / (B * N0)
+  #
   # type: bool
   fixed_power_model: false
   derive_snr_from_fixed_P_and_N0: false
@@ -162,13 +211,14 @@ system:
 
   # Fraction of total bandwidth assigned to each sensor.
   # type: list[float] | null
+  #
   # rules:
   #   * if null -> equal split among S sensors
   #   * if provided -> length must be S, entries >= 0, sum = 1
+  #
   # examples:
   #   null
   #   [0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125]
-  #   [0.25, 0.15, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
   bandwidth_allocation: null
 
 
@@ -179,8 +229,10 @@ signal:
   # Signal bandwidth used by the theory/core.
   # type: float
   # valid: > 0
+  #
   # remarks:
   #   If N_override is not supplied, the core derives:
+  #
   #       N = floor(W * tau / 2)
   W: 10.4
 
@@ -191,6 +243,7 @@ signal:
 
   # Legacy alias still accepted by some older figure pipelines.
   # type: float
+  #
   # recommendation:
   #   Prefer signal.tau in new configs.
   #   If both T and tau are present, keep them numerically consistent.
@@ -199,6 +252,7 @@ signal:
   # Time discretization step used in the simulations.
   # type: float
   # valid: > 0
+  #
   # practical guidance:
   #   smaller Tt -> more accurate waveform representation -> higher cost
   Tt: 0.01
@@ -207,7 +261,6 @@ signal:
   # type: int | null
   # valid if set: >= 1
   # examples: 3, 5
-  # used in: Figure 4 / 5 / 6 / 7 style pipelines
   N_override: null
 
   # Signal distribution for Monte Carlo generation.
@@ -221,8 +274,6 @@ signal:
   # type: float
   # valid: >= 0
   # examples: 0.0, 2.0, 4.0, 12.0
-  # remarks:
-  #   Many reproduction runs currently use 2.0 for absolute-MSE analyses.
   peak_to_peak: 2.0
 
   # Whether to use the Fourier-core normalization logic.
@@ -239,10 +290,20 @@ signal:
   # valid: >= 1
   dft_signal_periods: 1
 
+  # Number of periods used by SFC/fair-method pipelines.
+  # type: int
+  # valid: >= 1
+  n_periods: 1
+
   # Harmonic threshold used by PhaseCoefficientCore.
   # type: float
-  # valid: > 0
+  # valid: >= 0
   # typical: 1e-3
+  #
+  # Manuscript meaning:
+  #   If a Fourier coefficient is null/below threshold, the corresponding
+  #   t_a^(s,n) or t_b^(s,n) may be omitted. Therefore, downstream SED must
+  #   allow sparse absent pairs when both ta and tb are absent.
   threshold_harmonics: 0.001
 
 
@@ -260,9 +321,11 @@ dc:
 # GLOBAL QUANTIZATION POLICY (CORE-LEVEL)
 # -----------------------------------------------------------------------------
 quantization:
-  # Whether M / M_RbCP are constrained to powers of 2.
+  # Whether M / M_RbCP are constrained to power of 2.
   # type: bool
+  #
   # default in current aligned core: false
+  #
   # behavior:
   #   false -> free integer M, rounded by quantization.rounding_mode
   #   true  -> power-of-two-constrained M using the same rounding_mode on log2(M)
@@ -270,11 +333,14 @@ quantization:
 
   # Integer rounding mode used by the core when converting continuous M values.
   # type: str
+  #
   # supported values:
   #   "floor"
   #   "ceil"
   #   "round"
-  # default in current aligned core: "floor"
+  #
+  # default in current aligned core:
+  #   "floor"
   rounding_mode: "floor"
 
 
@@ -299,7 +365,7 @@ benchmark:
   # examples: 1.0, 2.0
   effective_rate_factor: 1.0
 
-  # Figure-2-specific benchmark bandwidth used in the Eq. (17) mapping between
+  # Figure-2-specific benchmark bandwidth used in the Eq. mapping between
   # M and M_RbCP. If not needed, can remain equal to signal.W.
   # type: float
   # valid: > 0
@@ -327,67 +393,294 @@ rbcp_time:
   enabled: false
 
   # Descriptive helper used in Figure 6 / Figure 7 style configs.
+  #
   # meaning:
   #     signal -> ta/tb -> events -> ta/tb -> signal
+  #
   # type: bool
   use_error_free_time_model: true
 
 
 # -----------------------------------------------------------------------------
-# CHANNEL / PHY SETTINGS
+# CHANNEL / PHY / SFC DETECTION SETTINGS
 # -----------------------------------------------------------------------------
 channel:
   # Channel type.
   # type: str
-  # currently used values in the stabilized pipelines:
-  #   "awgn"
-  #   "clean"
+  #
+  # supported values:
+  #   "awgn"  -> complex AWGN channel
+  #   "clean" -> no additive noise
   type: "awgn"
 
   # Collision superposition rule.
   # type: str
-  # currently used value:
+  #
+  # supported values:
+  #   "sum"    -> linear superposition of colliding chips
+  #   "binary" -> occupancy clipping after superposition
+  #
+  # Recommended for physical consistency:
   #   "sum"
   collision_mode: "sum"
 
-  # Detection mode used by SFCChannel.
+  # Local SFC detection mode used to generate map candidates.
   # type: str
-  # currently used value:
+  #
+  # supported values:
+  #   "strict"    -> accept candidate if score == L
+  #   "loose"     -> accept candidate if score > 0
+  #   "threshold" -> accept candidate if score >= score_threshold
+  #
+  # Recommended:
   #   "threshold"
   detection_mode: "threshold"
 
-  # Score threshold used by the detector.
-  # type: int | float
-  # common choice: equal to L
+  # Score threshold used by the local map detector.
+  # type: int | float | null
+  #
+  # If null, detector uses:
+  #   score_threshold = L
+  #
+  # Common choice:
+  #   score_threshold = L
+  #
+  # Meaning:
+  #   A candidate map is accepted locally only if all L active chips are detected.
   score_threshold: 4
 
-  # Threshold scaling used to derive the physical detector threshold.
+  # Physical threshold scaling used to derive the chip-detection threshold.
   # type: float
-  # valid: > 0
-  # common choice: 0.5
+  # valid: >= 0
+  #
+  # If channel.threshold is not explicitly provided, the detector uses:
+  #
+  #   threshold = threshold_factor * sqrt(E_chip)
+  #
+  # where:
+  #
+  #   E_chip = P*tau/(2*N*L)
+  #
+  # Common choice:
+  #   0.5
   threshold_factor: 0.5
+
+  # Optional explicit detector threshold.
+  # type: float | null
+  #
+  # If provided, overrides threshold_factor * sqrt(E_chip).
+  #
+  # Usually leave unset/null.
+  threshold: null
 
   # Optional explicit sensor-event association matrix.
   # type: matrix-like | null
-  # most experiments leave this unset and let pipelines build it internally.
+  #
+  # Most experiments leave this unset and let pipelines build it internally.
+  #
+  # Expected shape when provided:
+  #   (S, 2*N*S)
   sensor_x_event: null
+
+  # ---------------------------------------------------------------------------
+  # GLOBAL CANDIDATE SELECTION FOR SFC DETECTION
+  # ---------------------------------------------------------------------------
+
+  # Candidate-selection stage after local map detection.
+  # type: str
+  #
+  # supported values:
+  #   "global_frame_fit"
+  #       Default new behavior. The local detector generates candidates and
+  #       the global selector chooses a physically consistent subset by fitting
+  #       the received frame.
+  #
+  #   "none"
+  #   "local"
+  #   "local_only"
+  #       Disable global selection and recover the old local-only behavior.
+  #
+  # Recommended default:
+  #   "global_frame_fit"
+  candidate_selection: "global_frame_fit"
+
+  global:
+    # Whether the global detector may choose the empty decision for an event ID.
+    # type: bool
+    #
+    # The manuscript allows sparse transmission because t_a^(s,n) or t_b^(s,n)
+    # may be absent when the corresponding coefficient is null/below threshold.
+    #
+    # Therefore, the correct theoretical default is:
+    #   true
+    allow_empty: true
+
+    # Global selection strategy.
+    # type: str
+    #
+    # supported values:
+    #   "local_only"
+    #       Use only local candidates and minimize frame residual:
+    #           ||Y_obs - Y_hat||^2
+    #
+    #   "event_penalty"
+    #       Penalize the number of selected events:
+    #           ||Y_obs - Y_hat||^2 + lambda * |A|
+    #
+    #   "residual_rule"
+    #       Accept coordinate updates only if residual improvement exceeds
+    #       residual_threshold.
+    #
+    # Recommended first choice:
+    #   "local_only"
+    strategy: "local_only"
+
+    # Number of random restarts for global coordinate descent.
+    # type: int
+    # valid: >= 1
+    #
+    # Larger values improve robustness but increase runtime.
+    #
+    # Typical values:
+    #   50, 100, 500
+    restarts: 100
+
+    # Maximum coordinate-descent iterations per restart.
+    # type: int
+    # valid: >= 1
+    #
+    # Typical values:
+    #   50, 80, 100
+    max_iter: 80
+
+    # Seed for the global detector random restarts.
+    # type: int
+    #
+    # If omitted by specific YAMLs, the detector falls back to:
+    #   reproducibility.seed
+    # or:
+    #   monte_carlo.seed
+    seed: 47
+
+    # How to build the observed frame used by the global frame-fit objective.
+    # type: str
+    #
+    # supported values:
+    #   "abs"
+    #       observed_frame = abs(y) / sqrt(E_chip)
+    #       Recommended for AWGN because y is complex-valued.
+    #
+    #   "real"
+    #       observed_frame = real(y / sqrt(E_chip))
+    #       Useful for clean deterministic debugging.
+    #
+    #   "binary"
+    #       observed_frame = thresholded binary frame.
+    #
+    # Recommended default for experiments:
+    #   "abs"
+    observed_mode: "abs"
+
+    # Event penalty lambda used only when:
+    #   strategy: "event_penalty"
+    #
+    # Objective:
+    #   ||Y_obs - Y_hat||^2 + event_penalty * number_of_active_events
+    #
+    # type: float
+    # valid: >= 0
+    event_penalty: 0.0
+
+    # Residual-improvement threshold used only when:
+    #   strategy: "residual_rule"
+    #
+    # A coordinate update is accepted only if:
+    #   improvement > residual_threshold
+    #
+    # type: float
+    # valid: >= 0
+    residual_threshold: 0.0
 
 
 # -----------------------------------------------------------------------------
 # SEMANTIC-BASED ERROR DETECTION (SED)
 # -----------------------------------------------------------------------------
 sed:
-  # Whether semantic-based error detection is enabled.
+  # Whether semantic-based error detection is enabled in the pipeline.
   # type: bool
+  #
+  # This flag is usually read by figure pipelines through:
+  #
+  #   mode.semantic_error_detection
+  #
+  # or through this sed.enabled flag, depending on the pipeline.
+  #
+  # When enabled, SED is applied after SFC detection.
   enabled: false
 
   # If true:
-  #   invalid periods are discarded before reconstruction / MSE aggregation.
+  #   invalid periods are discarded before reconstruction / MSE aggregation by
+  #   zeroing the corresponding rows in corrected_events_est.
+  #
   # type: bool
+  #
+  # Default in semantic_error_detection.py:
+  #   true
   discard_invalid_periods: true
+
+  # SED theoretical logic.
+  #
+  # Current implementation follows the manuscript:
+  #
+  #   1. Nonunique t_z^(s,n)
+  #      For each event ID corresponding to one t_a^(s,n) or t_b^(s,n),
+  #      there must be at most one detected slot per period.
+  #
+  #      Error if:
+  #          count(event_id) > 1
+  #
+  #   2. Failure in the pair
+  #      For each sensor s and harmonic n, t_a^(s,n) and t_b^(s,n) must be
+  #      either both present or both absent.
+  #
+  #      Valid:
+  #          count(ta_id) = 0 and count(tb_id) = 0
+  #          count(ta_id) = 1 and count(tb_id) = 1
+  #
+  #      Invalid:
+  #          count(ta_id) = 1 and count(tb_id) = 0
+  #          count(ta_id) = 0 and count(tb_id) = 1
+  #
+  # IMPORTANT:
+  #   SED does NOT require exactly 2*N*S events per period.
+  #
+  #   This is manuscript-aligned because the transmitter may omit t_a^(s,n) or
+  #   t_b^(s,n) when the corresponding Fourier coefficient is null/below the
+  #   harmonic threshold.
+  #
+  #   Therefore, absent pairs are valid and their reconstruction terms should be
+  #   ignored.
+  mode: "sparse_pairs"
+
+  # Event-ID convention assumed by semantic_error_detection.py.
+  #
+  # For each sensor s:
+  #
+  #   [ta events for N harmonics][tb events for N harmonics]
+  #
+  # Hence:
+  #
+  #   ta_id = 2*s*N + n_idx
+  #   tb_id = 2*s*N + N + n_idx
+  #
+  # type: str
+  # current supported value:
+  #   "ta_block_then_tb_block"
+  event_id_ordering: "ta_block_then_tb_block"
 
   # Throughput counting policy used by the current Figure-7-style pipeline.
   # type: str
+  #
   # currently supported value in the aligned pipeline:
   #   "valid_periods_times_S_over_tau"
   throughput_mode: "valid_periods_times_S_over_tau"
@@ -528,7 +821,7 @@ plot:
   # Label remapping dictionary used by runners.
   label_map: {}
 
-  # Optional multi-panel layout helper (used by Figure 7).
+  # Optional multi-panel layout helper.
   panel_layout: "vertical"
 
   # Figure-7-style dedicated per-panel settings.

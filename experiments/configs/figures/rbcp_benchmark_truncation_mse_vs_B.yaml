@@ -34,7 +34,7 @@ system:
   L: 4
 
   # Figure uses the Figure-5-style regime:
-  # keep SNR fixed and N0 fixed, derive P(B)
+  # keep SNR per sensor fixed and N0 fixed, derive P(B)
   SNR_dB: -16.0
   N0: 0.007
 

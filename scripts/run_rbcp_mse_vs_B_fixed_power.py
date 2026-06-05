@@ -353,3 +353,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_rbcp_mse_vs_B_fixed_power import run_rbcp_mse_vs_B_fixed_power
+#
+# df_rbcp_fixed = run_rbcp_mse_vs_B_fixed_power(
+#     "experiments/configs/figures/rbcp_mse_vs_B_fixed_power.yaml"
+# )

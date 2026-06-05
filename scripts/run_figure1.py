@@ -457,3 +457,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_figure1 import run_fig01
+#
+# df1 = run_fig01("experiments/configs/figures/fig01.yaml")

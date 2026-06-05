@@ -34,7 +34,7 @@ import yaml
 import numpy as np
 
 from sfc.pipelines.rbcp_signal_representation import (
-    generate_rbcp_signal_representation,
+    generate_rbcp_signal_representation_data,
 )
 
 
@@ -241,7 +241,7 @@ def run_rbcp_signal_representation(config_path):
     print("[INFO] Output directory:", output_dir)
     print("[INFO] Starting simulation...\n")
 
-    data = generate_rbcp_signal_representation(cfg)
+    data = generate_rbcp_signal_representation_data(cfg)
 
     generate_plot(data, cfg, output_dir, timestamp)
 
@@ -268,3 +268,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# from scripts.run_rbcp_signal_representation import run_rbcp_signal_representation
+#
+# data_repr = run_rbcp_signal_representation(
+#     "experiments/configs/figures/rbcp_signal_representation.yaml"
+# )
