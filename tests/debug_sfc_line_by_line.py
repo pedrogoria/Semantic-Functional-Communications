@@ -180,29 +180,30 @@ def _prepare_frame_for_plot(arr):
 
 
 def run_sfc_line_by_line_debug(
-    S=1,
+    S=2,
     P=1.0,
     N0=None,
-    B=14000,
+    B=1000,
     R=12,
     L=4,
     SNR_dB=0,
-    W=10.0,
+    W=10.4,
     tau=1.0,
     Tt=0.01,
-    peak_to_peak=8.0,
+    peak_to_peak=12.0,
     distribution="uniform",
     normalize_dft=True,
     normalization_target=3.9,
     dc_enabled=False,
     threshold_harmonics=0.001,
     collision_mode="sum",
-    channel_type="clean",
-    threshold=None,
+    channel_type="awgn",
     threshold_factor=0.5,
     detection_mode="threshold",
-    score_threshold=None,
+    candidate_selection="global_frame_fit",
+    strategy="local_only",
     plot=True,
+    info=True,
     seed=12345,
 ):
     """
@@ -284,14 +285,15 @@ def run_sfc_line_by_line_debug(
     n_vec = np.arange(1, N + 1)
     t = np.arange(0.0, tau, Tt)
 
-    print(f"[INFO] P = {P:.6e}")
-    print(f"[INFO] N0 = {N0:.6e}")
-    print(f"[INFO] B = {B:.6e}")
-    print(f"[INFO] SNR_total_dB = {SNR_total_dB:.6f}")
-    print(f"[INFO] SNR_total = {SNR_total:.6e}")
-    print(f"[INFO] Derived N = {N}")
-    print(f"[INFO] Diagnostic M_RbCP = {M_rbcp}")
-    print("[INFO] SFC uses total B, not B_s.")
+    if info:
+        print(f"[INFO] P = {P:.6e}")
+        print(f"[INFO] N0 = {N0:.6e}")
+        print(f"[INFO] B = {B:.6e}")
+        print(f"[INFO] SNR_total_dB = {SNR_total_dB:.6f}")
+        print(f"[INFO] SNR_total = {SNR_total:.6e}")
+        print(f"[INFO] Derived N = {N}")
+        print(f"[INFO] Diagnostic M_RbCP = {M_rbcp}")
+        print("[INFO] SFC uses total B, not B_s.")
 
     # ------------------------------------------------------------------
     # 1. Generate raw signal
@@ -308,8 +310,7 @@ def run_sfc_line_by_line_debug(
     #    Use W_eff consistent with target N:
     #        N = floor(W_eff * tau / 2)
     # ------------------------------------------------------------------
-    W_eff = 2.0 * N / tau
-    x_filtered = filter_periodic(x_raw, W_eff, Tt, tau)
+    x_filtered = filter_periodic(x_raw, W, Tt, tau)
 
     # ------------------------------------------------------------------
     # 3. Optional peak-to-peak control after filtering
@@ -318,7 +319,8 @@ def run_sfc_line_by_line_debug(
     if peak_to_peak != 0 and current_p2p != 0:
         x_filtered = x_filtered * (peak_to_peak / current_p2p)
 
-    print(f"[INFO] Filtered peak-to-peak = {np.max(x_filtered) - np.min(x_filtered):.6e}")
+    if info:
+        print(f"[INFO] Filtered peak-to-peak = {np.max(x_filtered) - np.min(x_filtered):.6e}")
 
     # ------------------------------------------------------------------
     # 4. DC handling
@@ -329,8 +331,9 @@ def run_sfc_line_by_line_debug(
     else:
         x_zero_mean = x_filtered.copy()
 
-    print(f"[INFO] DC removed = {not dc_enabled}")
-    print(f"[INFO] DC value = {dc_value:.6e}")
+    if info:
+        print(f"[INFO] DC removed = {not dc_enabled}")
+        print(f"[INFO] DC value = {dc_value:.6e}")
 
     # ------------------------------------------------------------------
     # 5. Fourier coefficients with trusted normalization logic
@@ -350,7 +353,8 @@ def run_sfc_line_by_line_debug(
 
     x_used_1d = x_used[:, 0, 0]
     max_ab = np.max(an[0, :, 0] ** 2 + bn[0, :, 0] ** 2)
-    print(f"[INFO] max(an^2 + bn^2) = {max_ab:.6e}")
+    if info:
+        print(f"[INFO] max(an^2 + bn^2) = {max_ab:.6e}")
 
     # ------------------------------------------------------------------
     # 6. ta/tb using ONLY the complex-log formula
@@ -359,9 +363,10 @@ def run_sfc_line_by_line_debug(
     ta = np.real(ta)
     tb = np.real(tb)
 
-    print("[INFO] ta =", ta)
-    print("[INFO] tb =", tb)
-    print("[INFO] SFC branch uses NON-QUANTIZED ta/tb")
+    if info:
+        print("[INFO] ta =", ta)
+        print("[INFO] tb =", tb)
+        print("[INFO] SFC branch uses NON-QUANTIZED ta/tb")
 
     # ------------------------------------------------------------------
     # 7. ta/tb -> events
@@ -384,8 +389,9 @@ def run_sfc_line_by_line_debug(
     events = phase_core.ta_tb_to_events(ta_3d, tb_3d)
     num_event_ids = events.shape[1]
 
-    print(f"[INFO] events.shape = {events.shape}")
-    print(f"[INFO] sum(events) = {np.sum(events):.0f}")
+    if info:
+        print(f"[INFO] events.shape = {events.shape}")
+        print(f"[INFO] sum(events) = {np.sum(events):.0f}")
 
     # ------------------------------------------------------------------
     # 8. Build local cfg for the SFC channel
@@ -400,13 +406,13 @@ def run_sfc_line_by_line_debug(
         "collision_mode": collision_mode,
         "type": channel_type,
         "detection_mode": detection_mode,
-        "score_threshold": L if score_threshold is None else score_threshold,
+        "threshold_factor": threshold_factor,
+        "candidate_selection": candidate_selection,
+        "global": {
+            "allow_empty": True,
+            "strategy": strategy,
+        },
     }
-
-    if threshold is not None:
-        channel_cfg["threshold"] = threshold
-    else:
-        channel_cfg["threshold_factor"] = threshold_factor
 
     cfg_sfc = {
         "system": {
@@ -435,15 +441,18 @@ def run_sfc_line_by_line_debug(
     out = sfc_channel(events, return_intermediates=True)
     events_est = out["events_est"]
 
-    print("[INFO] events original:")
-    print(out["events"])
-    print("[INFO] events estimated:")
-    print(events_est)
+    if info:
+        print("[INFO] events original:")
+        print(out["events"])
+        print("[INFO] events estimated:")
+        print(events_est)
 
     true_ids = np.where(out["events"][0] == 1)[0]
     est_ids = np.where(events_est[0] == 1)[0]
-    print("[INFO] true_ids =", true_ids)
-    print("[INFO] est_ids  =", est_ids)
+
+    if info:
+        print("[INFO] true_ids =", true_ids)
+        print("[INFO] est_ids  =", est_ids)
 
     # ------------------------------------------------------------------
     # 10. events_est -> ta/tb_est
@@ -452,12 +461,13 @@ def run_sfc_line_by_line_debug(
     ta_rec = np.real(ta_rec[0, :, 0])
     tb_rec = np.real(tb_rec[0, :, 0])
 
-    print("[INFO] ta recovered =", ta_rec)
-    print("[INFO] tb recovered =", tb_rec)
-    print(f"[INFO] max |ta - ta_rec| = {np.max(np.abs(ta - ta_rec)):.6e}")
-    print(f"[INFO] max |tb - tb_rec| = {np.max(np.abs(tb - tb_rec)):.6e}")
-    print("[INFO] 9999 in ta_rec =", np.any(ta_rec == 9999))
-    print("[INFO] 9999 in tb_rec =", np.any(tb_rec == 9999))
+    if info:
+        print("[INFO] ta recovered =", ta_rec)
+        print("[INFO] tb recovered =", tb_rec)
+        print(f"[INFO] max |ta - ta_rec| = {np.max(np.abs(ta - ta_rec)):.6e}")
+        print(f"[INFO] max |tb - tb_rec| = {np.max(np.abs(tb - tb_rec)):.6e}")
+        print("[INFO] 9999 in ta_rec =", np.any(ta_rec == 9999))
+        print("[INFO] 9999 in tb_rec =", np.any(tb_rec == 9999))
 
     # ------------------------------------------------------------------
     # 11. Reconstruct SFC signal
@@ -465,7 +475,8 @@ def run_sfc_line_by_line_debug(
     x_sfc = recover_signal(ta_rec, tb_rec, t, w0)
     mse_sfc = float(np.mean((x_used_1d - x_sfc) ** 2))
 
-    print(f"[INFO] MSE_sfc = {mse_sfc:.6e}")
+    if info:
+        print(f"[INFO] MSE_sfc = {mse_sfc:.6e}")
 
     # ------------------------------------------------------------------
     # 12. Optional plots
@@ -536,6 +547,7 @@ def run_sfc_line_by_line_debug(
         "SNR_total": SNR_total,
         "SNR_total_dB": SNR_total_dB,
         "M_rbcp_diagnostic": M_rbcp,
+        "sfc_channel": sfc_channel,
     }
 
 

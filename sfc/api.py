@@ -412,7 +412,7 @@ def create_ppm_core(
     rolloff=0.99,
     span=12,
     eps_margin=1e-3,
-    interp_mode="linear",
+    interp_mode="sinc",
     periodic_replicas=10,
     clip_recovered_to_unit_interval=True,
     **options

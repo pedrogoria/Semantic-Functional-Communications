@@ -1122,7 +1122,7 @@ def _run_ppm_fdma_branch(
             rolloff=ppm_cfg.get("rolloff", 0.99),
             span=ppm_cfg.get("span", 12),
             eps_margin=ppm_cfg.get("eps_margin", 1e-3),
-            interp_mode=ppm_cfg.get("interp_mode", "linear"),
+            interp_mode=ppm_cfg.get("interp_mode", "sinc"),
             periodic_replicas=ppm_cfg.get("periodic_replicas", 10),
             clip_recovered_to_unit_interval=ppm_cfg.get(
                 "clip_recovered_to_unit_interval",

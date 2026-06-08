@@ -75,17 +75,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
+from sfc.core.filters import filter_periodic
+from sfc.core.system_parameters import build_derived_system_parameters
+from sfc.core.modulation.ppm import PPMCore
+from sfc.core.mac.fdma import FDMACore
+
 # ---------------------------------------------------------------------
 # Ensure project root is on sys.path
 # ---------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from sfc.core.filters import filter_periodic
-from sfc.core.system_parameters import build_derived_system_parameters
-from sfc.core.modulation.ppm import PPMCore
-from sfc.core.mac.fdma import FDMACore
 
 
 # =============================================================================
@@ -275,14 +275,13 @@ def generate_common_bandlimited_signals(
     else:
         raise ValueError("Invalid distribution")
 
-    W_eff = 2.0 * N / tau
     x_filtered = np.zeros_like(x_raw)
 
     for p in range(n_periods):
         for s in range(S):
             x_filtered[:, p, s] = filter_periodic(
                 x_raw[:, p, s],
-                W_eff,
+                params.W,
                 Tt,
                 tau
             )
@@ -691,7 +690,7 @@ def debug_ppm_single_trial(
         rolloff=rolloff,
         span=span,
         eps_margin=eps_margin,
-        interp_mode=ppm_cfg.get("interp_mode", "linear"),
+        interp_mode=ppm_cfg.get("interp_mode", "sinc"),
         periodic_replicas=PERIODIC_REPLICAS,
         clip_recovered_to_unit_interval=ppm_cfg.get(
             "clip_recovered_to_unit_interval",

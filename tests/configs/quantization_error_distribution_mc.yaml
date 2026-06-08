@@ -1,0 +1,149 @@
+# Monte Carlo sensitivity test for the RbCP uniform quantization-error assumption.
+#
+# Intended script:
+#
+#   tests/quantization_error_distribution_mc.py
+#
+# Run with:
+#
+#   python tests/quantization_error_distribution_mc.py \
+#     --config tests/configs/quantization_error_distribution_mc.yaml
+#
+# Output convention:
+#
+#   output.base_dir / output.figure_dir / YYYYMMDD_HHMMSS/
+#
+# For this configuration:
+#
+#   tests/results/quantization_error_distribution/YYYYMMDD_HHMMSS/
+
+monte_carlo:
+  seed: 20260605
+
+  # Number of independent outer Monte Carlo iterations.
+  #
+  # For each outer trial, the random_signal pipeline generates:
+  #
+  #   2 * N * S * n_periods
+  #
+  # normalized quantization-error samples.
+  #
+  # The random_coefficients pipeline generates the same number of normalized
+  # quantization-error samples.
+  #
+  # With the defaults below:
+  #
+  #   num_trials * 2 * N * S * n_periods
+  #   = 20000 * 2 * 5 * 1 * 1
+  #   = 200000
+  #
+  # samples per M_RbCP and per pipeline.
+  num_trials: 20
+
+system:
+  # Number of sensor nodes.
+  S: 1
+
+  # SFC/resource parameters required by PhaseCoefficientCore.
+  # They are not central to the quantization-error distribution itself, but the
+  # core phase object requires them.
+  R: 12
+  L: 4
+
+  # Communication bandwidth parameter required by PhaseCoefficientCore.
+  # It does not directly affect direct RbCP quantization error, but it is kept
+  # for consistency with the core constructor.
+  B: 14000.0
+
+signal:
+  # Number of Fourier harmonics N used in the RbCP representation.
+  N: 5
+
+  # Number of periods processed per outer Monte Carlo trial.
+  n_periods: 1
+
+  # Observation window duration tau.
+  #
+  # The fundamental angular frequency is:
+  #
+  #   omega0 = 2*pi/tau
+  tau: 1.0
+
+  # Dense-time sampling interval used by the random_signal pipeline.
+  Tt: 0.001
+
+  # Source-signal filtering bandwidth used by filter_periodic.
+  #
+  # IMPORTANT:
+  # This is the source bandwidth. It is not redefined from N.
+  W: 10.4
+
+  # Random signal distribution used by the random_signal pipeline.
+  #
+  # Options:
+  #   uniform
+  #   gaussian
+  #   normal
+  distribution: uniform
+
+  # Peak-to-peak control used before Fourier coefficient extraction.
+  #
+  # Set to 0.0 to disable.
+  peak_to_peak: 12.0
+
+  # DFT normalization options passed to FourierCoefficientCore.calc_an_bn_dft.
+  normalize_dft: true
+  normalization_target: 3.99
+
+  # Harmonic threshold passed to PhaseCoefficientCore.
+  threshold_harmonics: 0.001
+
+dc:
+  # If false, the DC component is removed before Fourier coefficient extraction.
+  enabled: false
+
+random_coefficients:
+  # Used only by the random_coefficients pipeline.
+  #
+  # Must be <= 2 to satisfy:
+  #
+  #   a_n^2 + b_n^2 <= 4.
+  #
+  # A value slightly below 2 avoids numerical edge cases at the feasibility
+  # boundary.
+  coefficient_radius_max: 1.95
+
+analysis:
+  # Pipelines to run.
+  #
+  # Options:
+  #   random_signal
+  #   random_coefficients
+  pipelines:
+    - random_signal
+    - random_coefficients
+
+  # Quantization-bin values used in the sensitivity analysis.
+  #
+  # Low values test the regime where the uniform-error approximation is expected
+  # to be less accurate. Larger values test the high-resolution regime.
+  m_rbcp_values: [2, 3, 4, 8, 16, 32, 64]
+
+  # Number of bins used to estimate empirical PDFs and histogram-based metrics,
+  # including KL divergence, reverse KL divergence, total variation, and
+  # Jensen-Shannon divergence.
+  histogram_bins: 80
+
+output:
+  # Results are intentionally stored inside tests/results.
+  base_dir: tests/results
+
+  # The timestamped folder is created inside this directory:
+  #
+  #   tests/results/quantization_error_distribution/YYYYMMDD_HHMMSS/
+  figure_dir: quantization_error_distribution
+
+  formats:
+    figure:
+      - png
+      - pdf

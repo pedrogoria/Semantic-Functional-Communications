@@ -319,7 +319,7 @@ def compute_M_from_M_rbcp(M_rbcp: float, W: float, tau: float) -> float:
     if N <= 0:
         raise ValueError("Computed N must be positive.")
 
-    return float(M_rbcp * (2.0 * N) / (tau * W))
+    return float(M_rbcp ** ((2.0 * N) / (tau * W)))
 
 
 # =============================================================================

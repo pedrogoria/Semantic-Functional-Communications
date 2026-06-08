@@ -283,14 +283,13 @@ def generate_common_bandlimited_signals(
     else:
         raise ValueError("Invalid distribution")
 
-    W_eff = 2.0 * N / tau
     x_filtered = np.zeros_like(x_raw)
 
     for p in range(n_periods):
         for s in range(S):
             x_filtered[:, p, s] = filter_periodic(
                 x_raw[:, p, s],
-                W_eff,
+                params.W,
                 Tt,
                 tau
             )

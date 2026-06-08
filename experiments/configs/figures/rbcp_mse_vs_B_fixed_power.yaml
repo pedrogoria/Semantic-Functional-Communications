@@ -44,7 +44,7 @@ system:
   fixed_power_model: true
   derive_snr_from_fixed_P_and_N0: true
 
-  P: 2.5
+  P: 1
   N0: 0.007
 
   # Placeholder; pipeline should overwrite this at each B-point
@@ -132,7 +132,6 @@ channel:
 
   detection_mode: "threshold"
   threshold_factor: 0.5
-  score_threshold: 4   # default = L
 
 # ----------------------------------------------------------------------
 # SWEEP PARAMETERS
@@ -140,16 +139,16 @@ channel:
 sweep:
   B:
     # Range chosen to match the scale shown in Figure 6.
-    start: 50
-    stop: 5001
-    step: 500
+    start: 500
+    stop: 40001
+    step: 2000
 
 # ----------------------------------------------------------------------
 # MONTE CARLO / AVERAGING
 # ----------------------------------------------------------------------
 monte_carlo:
   seed: 47
-  interactions: 2000
+  interactions: 20
 
 # ----------------------------------------------------------------------
 # METRICS

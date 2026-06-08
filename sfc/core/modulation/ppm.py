@@ -47,7 +47,7 @@ Notes
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -116,7 +116,7 @@ class PPMCore(ModulationCoreBase):
         rolloff: float = 0.99,
         span: int = 12,
         eps_margin: float = 1e-3,
-        interp_mode: str = "linear",
+        interp_mode: str = "sinc",
         periodic_replicas: int = 10,
         clip_recovered_to_unit_interval: bool = True,
         **kwargs
@@ -172,7 +172,7 @@ class PPMCore(ModulationCoreBase):
         self,
         x: np.ndarray,
         **kwargs
-    ) -> tuple[np.ndarray, NormalizationState]:
+    ) -> Tuple[np.ndarray, NormalizationState]:
         """
         Normalize each (period, sensor) waveform into:
 
@@ -256,7 +256,7 @@ class PPMCore(ModulationCoreBase):
         x: np.ndarray,
         t: np.ndarray,
         **kwargs
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Sample the normalized continuous-time message at the symbol rate fc.
         """

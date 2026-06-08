@@ -1,0 +1,19 @@
+\begin{table*}[!t]
+\centering
+\scriptsize
+\caption{Distributional metrics for the normalized RbCP phase-shift quantization error. For each value of $M_{\rm RbCP}$, the empirical distribution of $E_{\rm norm}=(T-\widehat{T})/(\ell_n/2)$ is compared with the reference uniform distribution $\mathcal{U}[-1,1]$. The reported metrics include the sample mean, sample variance, Kolmogorov--Smirnov distance, Wasserstein-1 distance, total variation distance, Kullback--Leibler divergence, and Jensen--Shannon divergence.}
+\label{tab:quantization_error_distribution}
+\begin{tabular}{ccccccccc}
+\toprule
+$M_{\rm RbCP}$ & $N_{\rm err}$ & $\widehat{\mu}_E$ & $\widehat{\sigma}_E^2$ & $D_{\rm KS}$ & $W_1$ & $D_{\rm TV}$ & $D_{\rm KL}$ (bits) & $D_{\rm JS}$ (bits) \\
+\midrule
+$2$ & $200000$ & $-2.05\times 10^{-3}$ & $0.3333$ & $2.73\times 10^{-3}$ & $2.06\times 10^{-3}$ & $7.36\times 10^{-3}$ & $2.55\times 10^{-4}$ & $6.37\times 10^{-5}$ \\
+$3$ & $200000$ & $1.83\times 10^{-3}$ & $0.3344$ & $2.49\times 10^{-3}$ & $2.02\times 10^{-3}$ & $8.20\times 10^{-3}$ & $2.95\times 10^{-4}$ & $7.38\times 10^{-5}$ \\
+$4$ & $200000$ & $2.20\times 10^{-4}$ & $0.3339$ & $1.36\times 10^{-3}$ & $8.86\times 10^{-4}$ & $7.59\times 10^{-3}$ & $2.47\times 10^{-4}$ & $6.19\times 10^{-5}$ \\
+$8$ & $200000$ & $5.61\times 10^{-4}$ & $0.3335$ & $1.23\times 10^{-3}$ & $7.81\times 10^{-4}$ & $6.62\times 10^{-3}$ & $1.94\times 10^{-4}$ & $4.85\times 10^{-5}$ \\
+$16$ & $200000$ & $-4.52\times 10^{-4}$ & $0.3323$ & $1.71\times 10^{-3}$ & $1.22\times 10^{-3}$ & $6.68\times 10^{-3}$ & $1.86\times 10^{-4}$ & $4.65\times 10^{-5}$ \\
+$32$ & $200000$ & $-5.99\times 10^{-4}$ & $0.3337$ & $1.89\times 10^{-3}$ & $9.65\times 10^{-4}$ & $7.48\times 10^{-3}$ & $2.48\times 10^{-4}$ & $6.20\times 10^{-5}$ \\
+$64$ & $200000$ & $4.43\times 10^{-4}$ & $0.3341$ & $1.21\times 10^{-3}$ & $9.31\times 10^{-4}$ & $6.65\times 10^{-3}$ & $1.99\times 10^{-4}$ & $4.97\times 10^{-5}$ \\
+\bottomrule
+\end{tabular}
+\end{table*}

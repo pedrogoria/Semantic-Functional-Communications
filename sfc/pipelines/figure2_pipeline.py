@@ -298,7 +298,8 @@ def _compute_benchmark(M_rbcp, cfg):
         tau=T
     )
 
-    mse = 1.0 / (12.0 * (M ** 2))
+    p2p = cfg["benchmark"]["peak_to_peak"]
+    mse = (p2p ** 2) / (12.0 * (M ** 2))
 
     return M, mse
 

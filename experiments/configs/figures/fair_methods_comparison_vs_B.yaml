@@ -306,7 +306,7 @@ ppm:
 
   rec_pulse: 0.0
   eps_margin: 0.001
-  interp_mode: linear
+  interp_mode: sinc
   periodic_replicas: 10
   clip_recovered_to_unit_interval: true
 

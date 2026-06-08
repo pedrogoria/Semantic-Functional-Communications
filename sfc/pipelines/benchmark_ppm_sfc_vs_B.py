@@ -708,7 +708,7 @@ def _run_ppm_fdma_stack(cfg, params, x_ref, t, periodic_replicas=10, rng=None):
         rolloff=rolloff,
         span=span,
         eps_margin=eps_margin,
-        interp_mode=ppm_cfg.get("interp_mode", "linear"),
+        interp_mode=ppm_cfg.get("interp_mode", "sinc"),
         periodic_replicas=periodic_replicas,
         clip_recovered_to_unit_interval=ppm_cfg.get(
             "clip_recovered_to_unit_interval",
