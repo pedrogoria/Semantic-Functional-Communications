@@ -12,6 +12,7 @@ The detector has two stages:
 1. Local candidate generation
    --------------------------
    The received frame is thresholded and scanned with L-row sliding windows.
+
    For each candidate start slot t0 and each reference map, a score is computed:
 
        score = sum(y_bin[t0:t0+L, :] * reference_map)
@@ -37,6 +38,30 @@ The detector has two stages:
        || observed_frame - reconstructed_frame ||^2
 
    with optional event penalty or residual-improvement rule.
+
+Physical-scale convention
+-------------------------
+The SFC physical channel produces a matched-filter/resource-output frame:
+
+    y = sqrt(E_chip) * superposed + n
+
+where:
+
+    E_chip = P tau / (2 N L)
+
+and:
+
+    n ~ CN(0, N0)
+
+The detector therefore uses a physical threshold:
+
+    threshold = threshold_factor * sqrt(E_chip)
+
+unless an explicit threshold is provided in the YAML.
+
+The detector does NOT generate noise. It also does NOT use SNR as an operational
+noise parameter. SNR is retained only for diagnostics and channel-capacity
+reporting.
 
 YAML interface
 --------------
@@ -86,7 +111,6 @@ class MapDetector:
         cfg : dict
             Configuration dictionary.
         """
-
         self.cfg = cfg
         det_cfg = cfg.get("channel", {})
 
@@ -96,22 +120,46 @@ class MapDetector:
         # - loose
         # - threshold
         # ------------------------------------------------------------------
-        self.mode = det_cfg.get("detection_mode", "threshold")
+        self.mode = str(det_cfg.get("detection_mode", "threshold")).lower()
+
+        valid_modes = {"strict", "loose", "threshold"}
+        if self.mode not in valid_modes:
+            raise ValueError(
+                f"Invalid detection_mode: {self.mode}. "
+                f"Expected one of {sorted(valid_modes)}."
+            )
 
         # Optional score threshold in map-matching domain.
         # If absent, use L at runtime.
         self.score_threshold = det_cfg.get("score_threshold", None)
 
+        if self.score_threshold is not None:
+            self.score_threshold = int(self.score_threshold)
+            if self.score_threshold < 1:
+                raise ValueError("channel.score_threshold must be >= 1.")
+
         # ------------------------------------------------------------------
         # Global candidate-selection configuration.
         #
-        # Default is now global_frame_fit, with empty decision allowed.
-        # Use candidate_selection="none" to recover the old local-only detector.
+        # Default is global_frame_fit, with empty decision allowed.
+        # Use candidate_selection="none" to recover old local-only behavior.
         # ------------------------------------------------------------------
-        self.candidate_selection = det_cfg.get(
-            "candidate_selection",
+        self.candidate_selection = str(
+            det_cfg.get("candidate_selection", "global_frame_fit")
+        ).lower()
+
+        valid_candidate_selection = {
+            "none",
+            "local",
+            "local_only",
             "global_frame_fit",
-        )
+        }
+
+        if self.candidate_selection not in valid_candidate_selection:
+            raise ValueError(
+                f"Invalid candidate_selection: {self.candidate_selection}. "
+                f"Expected one of {sorted(valid_candidate_selection)}."
+            )
 
         global_cfg = det_cfg.get("global", {})
 
@@ -191,6 +239,7 @@ class MapDetector:
         self.R = int(self.params.R)
 
         # Classical wideband reference SNR, useful for diagnostics only.
+        # It is not used as the detector's operational noise parameter.
         self.SNR = float(self.params.SNR)
         self.SNR_dB = float(self.params.SNR_dB)
 
@@ -210,6 +259,9 @@ class MapDetector:
         if self.L < 1:
             raise ValueError("MapDetector requires L >= 1.")
 
+        if self.R < 1:
+            raise ValueError("MapDetector requires R >= 1.")
+
         if self.P <= 0:
             raise ValueError("MapDetector requires P > 0.")
 
@@ -222,6 +274,16 @@ class MapDetector:
         # ------------------------------------------------------------------
         # SFC matched-filter/resource-output energy normalization.
         # Same convention as physical_channel.py.
+        #
+        # Each sensor transmits:
+        #     2N events per period
+        #
+        # Each event map has:
+        #     L active chips
+        #
+        # Therefore:
+        #     E_sensor = P * tau
+        #     E_chip   = E_sensor / (2 * N * L)
         # ------------------------------------------------------------------
         self.E_sensor = self.P * self.tau
         self.num_events_per_sensor = 2 * self.N
@@ -232,14 +294,28 @@ class MapDetector:
 
         self.sfc_signal_level = float(np.sqrt(self.E_chip))
 
+        if self.sfc_signal_level <= 0:
+            raise ValueError("sfc_signal_level must be positive.")
+
         self.sfc_pulse_amplitude = float(
             np.sqrt((self.tau * self.P * self.B) / (4.0 * self.L * self.R * self.N))
         )
 
         # ------------------------------------------------------------------
         # Threshold configuration.
+        #
+        # If explicit threshold is not supplied, use:
+        #
+        #     threshold = threshold_factor * sqrt(E_chip)
+        #
+        # This is consistent with the physical matched-filter output:
+        #
+        #     y = sqrt(E_chip) * superposed + n.
         # ------------------------------------------------------------------
         self.threshold_factor = float(det_cfg.get("threshold_factor", 0.5))
+
+        if self.threshold_factor < 0:
+            raise ValueError("channel.threshold_factor must be nonnegative.")
 
         if "threshold" in det_cfg:
             self.threshold = float(det_cfg["threshold"])
@@ -248,15 +324,18 @@ class MapDetector:
             self.threshold = float(self.threshold_factor * self.sfc_signal_level)
             self.threshold_source = "threshold_factor_times_sfc_signal_level"
 
+        if self.threshold < 0:
+            raise ValueError("channel.threshold must be nonnegative.")
+
         # Last-run diagnostics.
         self.last_global_objective = None
         self.last_global_active_events = None
         self.last_global_restarts_used = None
         self.last_global_exact_solution_found = None
 
-    # ======================================================================
+    # =========================================================================
     # PUBLIC DETECTION METHOD
-    # ======================================================================
+    # =========================================================================
 
     def detect(self, y, reference_maps=None):
         """
@@ -289,14 +368,20 @@ class MapDetector:
                 estimated per-event maps with shape:
                     (event_slots_total, num_event_ids, L, R)
         """
-
         y = np.asarray(y)
 
-        assert len(y.shape) == 2, \
-            "y must have shape (rx_slots_total, R)"
+        if y.ndim != 2:
+            raise ValueError("y must have shape (rx_slots_total, R).")
+
+        if y.shape[1] != self.R:
+            raise ValueError(
+                f"y.shape[1] must equal R={self.R}, got {y.shape[1]}."
+            )
 
         # ------------------------------------------------------------------
         # Threshold the magnitude of the complex matched-filter output.
+        #
+        # y is physical-scale. The threshold is physical-scale too.
         # ------------------------------------------------------------------
         y_bin = (np.abs(y) > self.threshold).astype(float)
 
@@ -305,13 +390,22 @@ class MapDetector:
 
         reference_maps = np.asarray(reference_maps, dtype=float)
 
-        assert len(reference_maps.shape) == 3, \
-            "reference_maps must have shape (num_event_ids, L, R)"
+        if reference_maps.ndim != 3:
+            raise ValueError(
+                "reference_maps must have shape (num_event_ids, L, R)."
+            )
 
         num_event_ids, L, R = reference_maps.shape
 
-        assert y_bin.shape[1] == R, \
-            "y.shape[1] must match reference_maps.shape[2]"
+        if L != self.L:
+            raise ValueError(
+                f"reference_maps.shape[1] must equal L={self.L}, got {L}."
+            )
+
+        if R != self.R:
+            raise ValueError(
+                f"reference_maps.shape[2] must equal R={self.R}, got {R}."
+            )
 
         rx_slots_total = y_bin.shape[0]
         event_slots_total = rx_slots_total - L + 1
@@ -357,15 +451,14 @@ class MapDetector:
             f"Unknown candidate_selection: {self.candidate_selection}"
         )
 
-    # ======================================================================
+    # =========================================================================
     # LOCAL CANDIDATE DETECTION
-    # ======================================================================
+    # =========================================================================
 
     def _local_candidate_detection(self, y_bin, reference_maps):
         """
         Generate local map candidates by sliding-window support matching.
         """
-
         num_event_ids, L, R = reference_maps.shape
         rx_slots_total = y_bin.shape[0]
         event_slots_total = rx_slots_total - L + 1
@@ -405,9 +498,9 @@ class MapDetector:
 
         return maps_est
 
-    # ======================================================================
+    # =========================================================================
     # GLOBAL FRAME-FIT SELECTION
-    # ======================================================================
+    # =========================================================================
 
     def _build_observed_frame(self, y, y_bin):
         """
@@ -423,8 +516,14 @@ class MapDetector:
 
         binary:
             observed = y_bin
-        """
 
+        Notes
+        -----
+        The reconstructed frame used by the selector is dimensionless because it
+        is constructed from reference maps. Therefore, abs/real observed modes
+        divide by sfc_signal_level to place the physical received frame back in
+        the dimensionless map-superposition scale.
+        """
         if self.global_observed_mode == "abs":
             return np.abs(y) / self.sfc_signal_level
 
@@ -443,7 +542,6 @@ class MapDetector:
         """
         Convert candidate map tensor into candidate slots per event ID.
         """
-
         event_slots_total, num_event_ids, _, _ = maps_candidates.shape
 
         candidate_slots = []
@@ -464,7 +562,6 @@ class MapDetector:
         """
         Convert chosen slot vector into event matrix.
         """
-
         num_event_ids = len(chosen)
         events = np.zeros((event_slots_total, num_event_ids), dtype=float)
 
@@ -479,7 +576,6 @@ class MapDetector:
         """
         Convert chosen slot vector into maps_est tensor.
         """
-
         num_event_ids, L, R = reference_maps.shape
 
         maps_est = np.zeros(
@@ -498,7 +594,6 @@ class MapDetector:
         """
         Build reconstructed frame from chosen event slots.
         """
-
         num_event_ids, L, R = reference_maps.shape
         frame = np.zeros((event_slots_total + L - 1, R), dtype=float)
 
@@ -512,7 +607,6 @@ class MapDetector:
         """
         Compute global objective according to selected strategy.
         """
-
         residual_cost = float(np.sum((observed_frame - reconstructed_frame) ** 2))
 
         if self.global_strategy == "event_penalty":
@@ -548,8 +642,7 @@ class MapDetector:
             Same squared residual objective, but each coordinate update is only
             accepted if the improvement is larger than residual_threshold.
         """
-
-        event_slots_total, num_event_ids, L, R = maps_candidates.shape
+        event_slots_total, num_event_ids, _, _ = maps_candidates.shape
 
         candidate_slots = self._candidate_slots_from_maps(maps_candidates)
 
@@ -577,8 +670,7 @@ class MapDetector:
                     continue
 
                 if restart == 0:
-                    # Deterministic first initialization:
-                    # use first candidate, unless empty-only behavior is needed.
+                    # Deterministic first initialization.
                     chosen[event_id] = int(slots[0])
                 else:
                     if self.global_allow_empty:
@@ -592,6 +684,7 @@ class MapDetector:
                 candidate_slots=candidate_slots,
                 observed_frame=observed_frame,
                 reference_maps=reference_maps,
+                rng=rng,
             )
 
             active_count = int(np.sum(chosen >= 0))
@@ -604,6 +697,11 @@ class MapDetector:
             if best_obj < 1e-12:
                 exact_solution_found = True
                 break
+
+        if best_chosen is None:
+            best_chosen = np.full(num_event_ids, -1, dtype=int)
+            best_obj = float(np.sum(observed_frame ** 2))
+            best_active_count = 0
 
         maps_selected = self._maps_from_chosen(
             chosen=best_chosen,
@@ -624,12 +722,16 @@ class MapDetector:
         candidate_slots,
         observed_frame,
         reference_maps,
+        rng,
     ):
         """
         Coordinate-descent improvement of a chosen slot vector.
-        """
 
-        num_event_ids, L, R = reference_maps.shape
+        The RNG is passed from _global_frame_fit_selection so that random
+        restarts and coordinate orders do not reset to the same sequence on
+        every restart.
+        """
+        num_event_ids, L, _ = reference_maps.shape
         event_slots_total = observed_frame.shape[0] - L + 1
 
         current_frame = self._frame_from_chosen(
@@ -644,8 +746,6 @@ class MapDetector:
             reconstructed_frame=current_frame,
             active_count=current_active,
         )
-
-        rng = np.random.default_rng(self.global_seed)
 
         for _ in range(self.global_max_iter):
             improved = False
@@ -686,18 +786,18 @@ class MapDetector:
                     if cand_slot >= 0:
                         trial_frame[cand_slot:cand_slot + L, :] += reference_maps[event_id]
 
-                    trial_chosen_active = current_active
+                    trial_active = current_active
 
                     if old_slot >= 0:
-                        trial_chosen_active -= 1
+                        trial_active -= 1
 
                     if cand_slot >= 0:
-                        trial_chosen_active += 1
+                        trial_active += 1
 
                     trial_obj = self._objective(
                         observed_frame=observed_frame,
                         reconstructed_frame=trial_frame,
-                        active_count=trial_chosen_active,
+                        active_count=trial_active,
                     )
 
                     improvement = current_obj - trial_obj
@@ -732,15 +832,14 @@ class MapDetector:
 
         return chosen, float(current_obj)
 
-    # ======================================================================
+    # =========================================================================
     # DIAGNOSTICS
-    # ======================================================================
+    # =========================================================================
 
     def diagnostics(self):
         """
         Return detector diagnostic quantities.
         """
-
         return {
             "mode": self.mode,
             "threshold": self.threshold,
@@ -777,3 +876,8 @@ class MapDetector:
             "sfc_signal_level": self.sfc_signal_level,
             "sfc_pulse_amplitude": self.sfc_pulse_amplitude,
         }
+
+
+__all__ = [
+    "MapDetector",
+]

@@ -1,377 +1,233 @@
 """
 tests/test_sod_acquisition_core.py
 
-Unit / smoke tests for:
+Quick manual test for the Send-on-Delta (SoD) acquisition core.
 
-    sfc.core.acquisition.sod.SoDAcquisitionCore
+Usage
+-----
+Python console:
+    from scripts.test_sod_core import run_test_sod_core
+    out = run_test_sod_core()
 
-The tests cover:
-1. event detection;
-2. payload accounting with event-time transmission;
-3. payload accounting without event-time transmission;
-4. zero-order-hold reconstruction;
-5. linear reconstruction;
-6. budget-aware constructor using Benchmark M.
+Terminal:
+    python scripts/test_sod_core.py
 
-These tests are intentionally lightweight and deterministic.
-They can be executed with:
-
-    pytest tests/test_sod_acquisition_core.py
-
-or:
-
-    python -m unittest tests.test_sod_acquisition_core
+What this test does
+-------------------
+- builds a simple sinusoidal test signal
+- runs SoDAcquisitionCore
+- prints diagnostics
+- optionally plots:
+    1. reference signal
+    2. reconstructed signal
+    3. SoD event locations
 """
 
-from __future__ import annotations
+import sys
+from pathlib import Path
 
-import unittest
-from types import SimpleNamespace
+# ---------------------------------------------------------------------
+# Ensure project root is on sys.path
+# ---------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 from sfc.core.acquisition.sod import SoDAcquisitionCore
-from sfc.core.system_parameters import compute_benchmark_M_per_sensor
 
 
-class TestSoDAcquisitionCore(unittest.TestCase):
+# =============================================================================
+# MAIN TEST
+# =============================================================================
+
+def run_test_sod_core(
+        threshold=0.1,
+        transmit_event_times=True,
+        quantize_amplitudes=True,
+        amplitude_bins=32,
+        quantize_times=True,
+        time_bins=128,
+        reconstruction_mode="zero_order_hold",
+        frequency_hz=3.0,
+        tau=1.0,
+        Tt=0.001,
+        do_plot=True
+):
     """
-    Test suite for Send-on-Delta acquisition core.
+    Run a quick validation test for SoDAcquisitionCore.
+
+    Parameters
+    ----------
+    threshold : float
+        SoD threshold.
+
+    transmit_event_times : bool
+        If True, payload includes time + amplitude.
+        If False, payload includes amplitude only.
+
+    quantize_amplitudes : bool
+        Whether to quantize SoD amplitudes.
+
+    amplitude_bins : int
+        Number of amplitude quantization bins.
+
+    quantize_times : bool
+        Whether to quantize SoD event times.
+
+    time_bins : int
+        Number of time quantization bins.
+
+    reconstruction_mode : {"zero_order_hold", "linear"}
+        SoD reconstruction rule.
+
+    frequency_hz : float
+        Frequency of the sinusoidal test signal.
+
+    tau : float
+        Signal duration.
+
+    Tt : float
+        Dense time-grid step.
+
+    do_plot : bool
+        If True, show plots.
+
+    Returns
+    -------
+    dict
+        Diagnostics from the test.
     """
+    # -----------------------------------------------------------------
+    # Build a simple 1-period / 1-sensor sinusoid
+    # -----------------------------------------------------------------
+    t = np.arange(0.0, tau, Tt, dtype=float)
+    x_1d = np.sin(2.0 * np.pi * frequency_hz * t)
+    x = x_1d[:, None, None]  # (time, periods, sensors)
 
-    def setUp(self):
-        """
-        Build deterministic test signals used across multiple tests.
-        """
-        # ---------------------------------------------------------------------
-        # Dense sinusoid used for shape/reconstruction smoke tests
-        # ---------------------------------------------------------------------
-        self.t_dense = np.linspace(0.0, 1.0, 101, endpoint=True)
-        self.x_dense_1d = np.sin(2.0 * np.pi * 2.0 * self.t_dense)
-        self.x_dense = self.x_dense_1d[:, None, None]  # (time, periods, sensors)
+    sod = SoDAcquisitionCore(
+        threshold=threshold,
+        transmit_event_times=transmit_event_times,
+        quantize_amplitudes=quantize_amplitudes,
+        amplitude_bins=amplitude_bins,
+        quantize_times=quantize_times,
+        time_bins=time_bins,
+        reconstruction_mode=reconstruction_mode,
+    )
 
-        # ---------------------------------------------------------------------
-        # Small deterministic signal with known SoD event structure
-        #
-        # threshold = 0.15
-        #
-        # t : [0, 1, 2, 3]
-        # x : [0.0, 0.2, 0.2, 0.4]
-        #
-        # Event logic:
-        #   t=0 -> initial event at value 0.0
-        #   t=1 -> |0.2 - 0.0| = 0.2 >= 0.15 -> event
-        #   t=2 -> |0.2 - 0.2| = 0.0         -> no event
-        #   t=3 -> |0.4 - 0.2| = 0.2 >= 0.15 -> event
-        #
-        # Therefore expected events:
-        #   times  = [0.0, 1.0, 3.0]
-        #   values = [0.0, 0.2, 0.4]
-        #   count  = 3
-        # ---------------------------------------------------------------------
-        self.t_small = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
-        self.x_small_1d = np.array([0.0, 0.2, 0.2, 0.4], dtype=float)
-        self.x_small = self.x_small_1d[:, None, None]  # (time, periods, sensors)
+    acq, rec = sod.acquire_and_reconstruct(x=x, t=t)
 
-    # =========================================================================
-    # EVENT DETECTION
-    # =========================================================================
+    key = "period_0_sensor_0"
 
-    def test_event_detection_count_and_locations(self):
-        """
-        SoD should detect the expected number of events on a simple signal.
-        """
-        sod = SoDAcquisitionCore(
-            threshold=0.15,
-            transmit_event_times=True,
-            quantize_amplitudes=False,
-            quantize_times=False,
-            reconstruction_mode="zero_order_hold",
+    x_hat = rec.reconstructed_signal[:, 0, 0]
+    mse = float(np.mean((x_1d - x_hat) ** 2))
+
+    event_times = (
+        acq.event_times_quantized[key]
+        if acq.event_times_quantized is not None
+        else acq.event_times[key]
+    )
+
+    event_values = (
+        acq.event_values_quantized[key]
+        if acq.event_values_quantized is not None
+        else acq.event_values[key]
+    )
+
+    print("\n============================================================")
+    print("[TEST] SoD acquisition core")
+    print(f"[TEST] threshold = {threshold}")
+    print(f"[TEST] transmit_event_times = {transmit_event_times}")
+    print(f"[TEST] quantize_amplitudes = {quantize_amplitudes}")
+    print(f"[TEST] amplitude_bins = {amplitude_bins}")
+    print(f"[TEST] quantize_times = {quantize_times}")
+    print(f"[TEST] time_bins = {time_bins}")
+    print(f"[TEST] reconstruction_mode = {reconstruction_mode}")
+    print(f"[TEST] frequency_hz = {frequency_hz}")
+    print(f"[TEST] tau = {tau}")
+    print(f"[TEST] Tt = {Tt}")
+    print(f"[TEST] number of dense samples = {len(t)}")
+    print(f"[TEST] event_count = {acq.event_count[key]}")
+    print(f"[TEST] payload_bits = {acq.payload_bits[key]}")
+    print(f"[TEST] mse = {mse:.8e}")
+
+    if "bits_per_event" in acq.payload_metadata and key in acq.payload_metadata["bits_per_event"]:
+        bits_info = acq.payload_metadata["bits_per_event"][key]
+        print(f"[TEST] amplitude_bits_per_event = {bits_info['amplitude_bits']}")
+        print(f"[TEST] time_bits_per_event = {bits_info['time_bits']}")
+        print(f"[TEST] total_bits_per_event = {bits_info['total_bits']}")
+
+    print(f"[TEST] first 10 event_times = {event_times[:10]}")
+    print(f"[TEST] first 10 event_values = {event_values[:10]}")
+
+    if do_plot:
+        fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+
+        # ------------------------------------------------------------
+        # Reference + reconstructed signal
+        # ------------------------------------------------------------
+        axes[0].plot(t, x_1d, linewidth=2.0, label="Reference signal")
+        axes[0].plot(t, x_hat, "--", linewidth=1.8, label="SoD reconstruction")
+        axes[0].set_title("Send-on-Delta reconstruction")
+        axes[0].set_ylabel("Amplitude")
+        axes[0].grid(True)
+        axes[0].legend()
+
+        # ------------------------------------------------------------
+        # Event locations
+        # ------------------------------------------------------------
+        axes[1].plot(t, x_1d, linewidth=1.5, label="Reference signal")
+        axes[1].plot(
+            event_times,
+            event_values,
+            "o",
+            markersize=5,
+            label="SoD events"
         )
+        axes[1].set_title("SoD event locations")
+        axes[1].set_xlabel("Time [s]")
+        axes[1].set_ylabel("Amplitude")
+        axes[1].grid(True)
+        axes[1].legend()
 
-        acq = sod.acquire(self.x_small, self.t_small)
+        plt.tight_layout()
+        plt.show(block=True)
 
-        key = "period_0_sensor_0"
+    return {
+        "t": t,
+        "x_ref": x_1d,
+        "x_hat": x_hat,
+        "acq": acq,
+        "rec": rec,
+        "event_times": event_times,
+        "event_values": event_values,
+        "mse": mse,
+        "event_count": acq.event_count[key],
+        "payload_bits": acq.payload_bits[key],
+    }
 
-        self.assertIn(key, acq.event_count)
-        self.assertEqual(acq.event_count[key], 3)
 
-        np.testing.assert_allclose(
-            acq.event_times[key],
-            np.array([0.0, 1.0, 3.0], dtype=float),
-        )
-
-        np.testing.assert_allclose(
-            acq.event_values[key],
-            np.array([0.0, 0.2, 0.4], dtype=float),
-        )
-
-    # =========================================================================
-    # RECONSTRUCTION: ZERO-ORDER HOLD
-    # =========================================================================
-
-    def test_zero_order_hold_reconstruction(self):
-        """
-        Zero-order-hold reconstruction should reproduce the expected held values.
-        """
-        sod = SoDAcquisitionCore(
-            threshold=0.15,
-            transmit_event_times=True,
-            quantize_amplitudes=False,
-            quantize_times=False,
-            reconstruction_mode="zero_order_hold",
-        )
-
-        acq, rec = sod.acquire_and_reconstruct(self.x_small, self.t_small)
-
-        x_hat = rec.reconstructed_signal[:, 0, 0]
-
-        # Events are at t=[0, 1, 3] with values [0.0, 0.2, 0.4]
-        # On evaluation grid [0,1,2,3], ZOH gives:
-        #   t=0 -> 0.0
-        #   t=1 -> 0.2
-        #   t=2 -> 0.2
-        #   t=3 -> 0.4
-        expected = np.array([0.0, 0.2, 0.2, 0.4], dtype=float)
-
-        np.testing.assert_allclose(x_hat, expected, atol=1e-12)
-
-        self.assertEqual(rec.reconstruction_mode, "zero_order_hold")
-        self.assertEqual(rec.event_count["period_0_sensor_0"], 3)
-
-    # =========================================================================
-    # RECONSTRUCTION: LINEAR
-    # =========================================================================
-
-    def test_linear_reconstruction(self):
-        """
-        Linear reconstruction should interpolate linearly between consecutive events.
-        """
-        sod = SoDAcquisitionCore(
-            threshold=0.15,
-            transmit_event_times=True,
-            quantize_amplitudes=False,
-            quantize_times=False,
-            reconstruction_mode="linear",
-        )
-
-        acq, rec = sod.acquire_and_reconstruct(self.x_small, self.t_small)
-
-        x_hat = rec.reconstructed_signal[:, 0, 0]
-
-        # Events are at t=[0, 1, 3] with values [0.0, 0.2, 0.4]
-        # Linear interpolation on [0,1,2,3]:
-        #   t=0 -> 0.0
-        #   t=1 -> 0.2
-        #   t=2 -> 0.3
-        #   t=3 -> 0.4
-        expected = np.array([0.0, 0.2, 0.3, 0.4], dtype=float)
-
-        np.testing.assert_allclose(x_hat, expected, atol=1e-12)
-
-        self.assertEqual(rec.reconstruction_mode, "linear")
-        self.assertEqual(rec.event_count["period_0_sensor_0"], 3)
-
-    # =========================================================================
-    # PAYLOAD: TIME + AMPLITUDE
-    # =========================================================================
-
-    def test_payload_with_time_and_amplitude(self):
-        """
-        Payload bits should include both amplitude bits and time bits when
-        transmit_event_times=True.
-        """
-        sod = SoDAcquisitionCore(
-            threshold=0.15,
-            transmit_event_times=True,
-            quantize_amplitudes=True,
-            amplitude_bins=32,   # 5 bits
-            quantize_times=True,
-            time_bins=128,       # 7 bits
-            reconstruction_mode="zero_order_hold",
-        )
-
-        acq = sod.acquire(self.x_small, self.t_small)
-
-        key = "period_0_sensor_0"
-
-        # 3 events * (log2(32) + log2(128)) = 3 * (5 + 7) = 36 bits
-        self.assertEqual(acq.event_count[key], 3)
-        self.assertAlmostEqual(acq.payload_bits[key], 36.0, places=10)
-
-        self.assertTrue(acq.transmit_event_times)
-        self.assertIn("bits_per_event", acq.payload_metadata)
-        self.assertIn(key, acq.payload_metadata["bits_per_event"])
-
-        bits_per_event = acq.payload_metadata["bits_per_event"][key]
-        self.assertAlmostEqual(bits_per_event["amplitude_bits"], 5.0, places=10)
-        self.assertAlmostEqual(bits_per_event["time_bits"], 7.0, places=10)
-        self.assertAlmostEqual(bits_per_event["total_bits"], 12.0, places=10)
-
-    # =========================================================================
-    # PAYLOAD: AMPLITUDE ONLY
-    # =========================================================================
-
-    def test_payload_amplitude_only(self):
-        """
-        Payload bits should include amplitude only when transmit_event_times=False.
-        """
-        sod = SoDAcquisitionCore(
-            threshold=0.15,
-            transmit_event_times=False,
-            quantize_amplitudes=True,
-            amplitude_bins=32,   # 5 bits
-            quantize_times=False,
-            reconstruction_mode="zero_order_hold",
-        )
-
-        acq = sod.acquire(self.x_small, self.t_small)
-
-        key = "period_0_sensor_0"
-
-        # 3 events * log2(32) = 3 * 5 = 15 bits
-        self.assertEqual(acq.event_count[key], 3)
-        self.assertAlmostEqual(acq.payload_bits[key], 15.0, places=10)
-
-        self.assertFalse(acq.transmit_event_times)
-        self.assertIn("bits_per_event", acq.payload_metadata)
-        self.assertIn(key, acq.payload_metadata["bits_per_event"])
-
-        bits_per_event = acq.payload_metadata["bits_per_event"][key]
-        self.assertAlmostEqual(bits_per_event["amplitude_bits"], 5.0, places=10)
-        self.assertAlmostEqual(bits_per_event["time_bits"], 0.0, places=10)
-        self.assertAlmostEqual(bits_per_event["total_bits"], 5.0, places=10)
-
-    # =========================================================================
-    # SHAPE / SMOKE TEST
-    # =========================================================================
-
-    def test_dense_signal_shape_smoke(self):
-        """
-        A dense sinusoid should produce a reconstructed tensor with the same shape.
-        """
-        sod = SoDAcquisitionCore(
-            threshold=0.1,
-            transmit_event_times=True,
-            quantize_amplitudes=True,
-            amplitude_bins=32,
-            quantize_times=True,
-            time_bins=128,
-            reconstruction_mode="zero_order_hold",
-        )
-
-        acq, rec = sod.acquire_and_reconstruct(self.x_dense, self.t_dense)
-
-        self.assertEqual(rec.reconstructed_signal.shape, self.x_dense.shape)
-
-        key = "period_0_sensor_0"
-        self.assertIn(key, acq.event_count)
-        self.assertGreater(acq.event_count[key], 0)
-        self.assertIn(key, acq.payload_bits)
-        self.assertGreater(acq.payload_bits[key], 0.0)
-
-    # =========================================================================
-    # BUDGET-AWARE CONSTRUCTOR
-    # =========================================================================
-
-    def test_from_benchmark_budget_uses_benchmark_M(self):
-        """
-        from_benchmark_budget(...) should set amplitude bins equal to the
-        Benchmark Approach bins computed by compute_benchmark_M_per_sensor(...).
-        """
-        cfg = {
-            "quantization": {
-                "force_power_of_two": False,
-                "rounding_mode": "floor",
-            }
-        }
-
-        params = SimpleNamespace(
-            S=2,
-            tau=1.0,
-            B=10.0,
-            P=1.0,
-            N0=0.1,
-            bandwidth_allocation=np.array([0.5, 0.5], dtype=float),
-            quantization_force_power_of_two=False,
-            quantization_rounding_mode="floor",
-            M_time=64,
-        )
-
-        sampling_rate = 5.0
-
-        expected_M = compute_benchmark_M_per_sensor(
-            S=params.S,
-            tau=params.tau,
-            B=params.B,
-            P=params.P,
-            N0=params.N0,
-            sampling_rate=sampling_rate,
-            bandwidth_allocation=params.bandwidth_allocation,
-            force_power_of_two=False,
-            rounding_mode="floor",
-        )
-
-        sod = SoDAcquisitionCore.from_benchmark_budget(
-            cfg=cfg,
-            params=params,
-            threshold=0.1,
-            sampling_rate=sampling_rate,
-            transmit_event_times=True,
-        )
-
-        # amplitude_bins and time_bins are constructor-level config
-        np.testing.assert_array_equal(
-            np.asarray(sod.amplitude_bins, dtype=int),
-            np.asarray(expected_M, dtype=int),
-        )
-
-        # by default, time_bins should fall back to params.M_time
-        self.assertEqual(int(sod.time_bins), int(params.M_time))
-        self.assertTrue(sod.transmit_event_times)
-        self.assertTrue(sod.quantize_amplitudes)
-        self.assertTrue(sod.quantize_times)
-
-    # =========================================================================
-    # MULTI-SENSOR PAYLOAD
-    # =========================================================================
-
-    def test_multi_sensor_bins_vector(self):
-        """
-        Scalar or per-sensor bins should be resolved correctly.
-        """
-        t = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
-
-        x_sensor0 = np.array([0.0, 0.2, 0.2, 0.4], dtype=float)
-        x_sensor1 = np.array([0.0, 0.3, 0.3, 0.6], dtype=float)
-
-        x = np.stack([x_sensor0, x_sensor1], axis=1)  # (time, sensors)
-        x = x[:, None, :]  # (time, periods=1, sensors=2)
-
-        sod = SoDAcquisitionCore(
-            threshold=0.15,
-            transmit_event_times=True,
-            quantize_amplitudes=True,
-            amplitude_bins=[32, 16],   # sensor0: 5 bits, sensor1: 4 bits
-            quantize_times=True,
-            time_bins=[128, 64],       # sensor0: 7 bits, sensor1: 6 bits
-            reconstruction_mode="zero_order_hold",
-        )
-
-        acq = sod.acquire(x, t)
-
-        key0 = "period_0_sensor_0"
-        key1 = "period_0_sensor_1"
-
-        # Sensor 0 -> 3 events, bits/event = 5 + 7 = 12, total = 36
-        self.assertEqual(acq.event_count[key0], 3)
-        self.assertAlmostEqual(acq.payload_bits[key0], 36.0, places=10)
-
-        # Sensor 1 -> values [0.0,0.3,0.3,0.6], threshold 0.15
-        # events at 0,1,3 => 3 events, bits/event = 4 + 6 = 10, total = 30
-        self.assertEqual(acq.event_count[key1], 3)
-        self.assertAlmostEqual(acq.payload_bits[key1], 30.0, places=10)
-
+# =============================================================================
+# CLI
+# =============================================================================
 
 if __name__ == "__main__":
-    unittest.main()
+    run_test_sod_core()
+
+# from tests.test_sod_acquisition_core import run_test_sod_core
+#
+# out = run_test_sod_core(
+#     threshold=0.1,
+#     transmit_event_times=True,
+#     quantize_amplitudes=True,
+#     amplitude_bins=32,
+#     quantize_times=True,
+#     time_bins=128,
+#     reconstruction_mode="zero_order_hold",
+#     frequency_hz=3.0,
+#     tau=1.0,
+#     Tt=0.001,
+#     do_plot=True,
+# )

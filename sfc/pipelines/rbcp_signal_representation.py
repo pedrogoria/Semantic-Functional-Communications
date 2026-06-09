@@ -1,7 +1,5 @@
 """
-sfc/pipelines/rbcp_signal_representation.py
-
-RbCP signal representation vs Benchmark + SFC using physical system parameters.
+sfc/pipelines/rbcp_signal physical system parameters.sfc/pipelines/rbcp_signal_representation.py
 
 This module produces:
 
@@ -31,10 +29,10 @@ IMPORTANT
 For this figure, we propagate one representative signal through the SFC stack.
 
 That means:
-- the figure still plots one signal
-- but M_RbCP is derived using the full system-level S and bandwidth sharing
+- the figure still plots one signal;
+- but M_RbCP is derived using the full system-level S and bandwidth sharing;
 - all event IDs of this representative signal are assigned locally to sensor 0
-  in a figure-specific sensor_x_event used only inside this pipeline
+  in a figure-specific sensor_x_event used only inside this pipeline.
 
 SFC branch
 ----------
@@ -48,14 +46,14 @@ and NOT with:
 
 That is:
 
-- x_rbcp uses quantized ta/tb
-- x_sfc uses non-quantized ta/tb and relies on the SFC event/channel stack
+- x_rbcp uses quantized ta/tb;
+- x_sfc uses non-quantized ta/tb and relies on the SFC event/channel stack.
 
 Bandwidth sharing
 -----------------
 The total bandwidth B is the total system bandwidth.
 
-Only the communication-budget-based quantities use per-sensor bandwidth slices:
+Only communication-budget-based quantities use per-sensor bandwidth slices:
 
 - M_RbCP
 - Benchmark / Nyquist M
@@ -72,6 +70,27 @@ and therefore the corresponding sensor-0 SNR:
 If no bandwidth allocation is provided in the YAML, the split is equal among
 all S sensors.
 
+Noise convention
+----------------
+This pipeline itself does not generate AWGN locally.
+
+If the SFC branch uses channel.type='awgn', physical scaling and noise are
+handled inside:
+
+    sfc.core.channel.SFCChannel
+    sfc.core.channel.physical_channel.PhysicalChannel
+
+The physical-channel convention is:
+
+    y = sqrt(E_chip) * superposed + n
+
+with:
+
+    n ~ CN(0, N0)
+
+Thus, simulated SFC noise uses N0 directly at the matched-filter/resource-output
+level. It does not use B_s * N0 as the generated noise variance.
+
 IMPORTANT SOURCE-BANDWIDTH CONVENTION
 -------------------------------------
 The source signal is filtered using the configured source bandwidth:
@@ -85,6 +104,17 @@ The pipeline must NOT redefine the filtering bandwidth from N using:
 The role of N is to define the number of representation harmonics.
 The role of W is to define the source-signal bandwidth used by the signal
 filter.
+
+Core-use policy
+---------------
+- Filtering uses sfc.core.filters.filter_periodic.
+- Benchmark sample-to-continuous reconstruction uses
+  sfc.core.filters.sinc_reconstruct_from_samples.
+- Fourier coefficients use sfc.core.fourier.FourierCoefficientCore.
+- Phase coefficients use sfc.core.phase_cof.PhaseCoefficientCore.
+- ta/tb quantization uses sfc.core.quantization.quantize_ta_tb.
+- Harmonic reconstruction uses sfc.core.reconstruction.recover_signal.
+- SFC channel simulation uses sfc.core.channel.SFCChannel.
 """
 
 from __future__ import annotations
@@ -93,17 +123,26 @@ import copy
 
 import numpy as np
 
-from sfc.core.filters import filter_periodic
+from sfc.core.channel.SFCChannel import SFCChannel
+from sfc.core.filters import (
+    filter_periodic,
+    sinc_reconstruct_from_samples,
+)
 from sfc.core.fourier import FourierCoefficientCore
 from sfc.core.phase_cof import PhaseCoefficientCore
 from sfc.core.quantization import quantize_ta_tb
 from sfc.core.reconstruction import recover_signal
-from sfc.core.channel.SFCChannel import SFCChannel
-
 from sfc.core.system_parameters import (
     build_derived_system_parameters,
     compute_benchmark_M_single_sensor,
 )
+
+
+# =============================================================================
+# GLOBAL SETTINGS
+# =============================================================================
+
+PERIODIC_REPLICAS = 10
 
 
 # =============================================================================
@@ -146,8 +185,12 @@ def generate_rbcp_signal_representation_data(cfg):
         - M_rbcp
         - M_benchmark
     """
+    seed = cfg.get("reproducibility", {}).get(
+        "seed",
+        cfg.get("monte_carlo", {}).get("seed", 12345),
+    )
+    rng = np.random.default_rng(seed)
 
-    rng = np.random.default_rng(cfg["reproducibility"]["seed"])
     params = build_derived_system_parameters(cfg)
 
     # Figure uses one representative signal only.
@@ -161,6 +204,7 @@ def generate_rbcp_signal_representation_data(cfg):
     n_time = len(t)
 
     print("[INFO] Running rbcp_signal_representation")
+    print(f"[INFO] seed = {seed}")
     print(f"[INFO] S = {params.S}")
     print(f"[INFO] P = {params.P}")
     print(f"[INFO] N0 = {params.N0}")
@@ -175,7 +219,10 @@ def generate_rbcp_signal_representation_data(cfg):
     print(f"[INFO] M_RbCP = {params.M_rbcp}")
     print(f"[INFO] M_RbCP per sensor = {params.M_rbcp_per_sensor}")
     print(f"[INFO] B_per_sensor = {params.B_per_sensor}")
-    print(f"[INFO] quantization_force_power_of_two = {params.quantization_force_power_of_two}")
+    print(
+        f"[INFO] quantization_force_power_of_two = "
+        f"{params.quantization_force_power_of_two}"
+    )
     print(f"[INFO] quantization_rounding_mode = {params.quantization_rounding_mode}")
 
     # -------------------------------------------------------------------------
@@ -184,7 +231,7 @@ def generate_rbcp_signal_representation_data(cfg):
     x_raw = _generate_representative_signal(
         cfg=cfg,
         rng=rng,
-        num_time_samples=n_time
+        num_time_samples=n_time,
     )
 
     # Keep tensor convention for trusted Fourier/phase cores:
@@ -199,7 +246,7 @@ def generate_rbcp_signal_representation_data(cfg):
         cfg=cfg,
         params=params,
         tau=tau,
-        Tt=Tt
+        Tt=Tt,
     )
 
     # -------------------------------------------------------------------------
@@ -207,7 +254,7 @@ def generate_rbcp_signal_representation_data(cfg):
     # -------------------------------------------------------------------------
     x_filtered_3d = _apply_peak_to_peak_control(
         x_filtered_3d,
-        cfg["signal"].get("peak_to_peak", 0.0)
+        cfg["signal"].get("peak_to_peak", 0.0),
     )
 
     # -------------------------------------------------------------------------
@@ -217,7 +264,7 @@ def generate_rbcp_signal_representation_data(cfg):
         x_filtered=x_filtered_3d,
         tau=tau,
         Tt=Tt,
-        dc_enabled=cfg.get("dc", {}).get("enabled", False)
+        dc_enabled=cfg.get("dc", {}).get("enabled", False),
     )
 
     # -------------------------------------------------------------------------
@@ -229,7 +276,7 @@ def generate_rbcp_signal_representation_data(cfg):
         N=N,
         Tt=Tt,
         normalize_dft=cfg["signal"].get("normalize_dft", True),
-        normalization_target=cfg["signal"].get("normalization_target", 3.99)
+        normalization_target=cfg["signal"].get("normalization_target", 3.99),
     )
 
     x_used_1d = x_used[:, 0, 0]
@@ -244,7 +291,7 @@ def generate_rbcp_signal_representation_data(cfg):
         N=N,
         cfg=cfg,
         params=params,
-        n_periods=n_periods
+        n_periods=n_periods,
     )
 
     # Extract 1D phase vectors for the representative signal.
@@ -258,14 +305,14 @@ def generate_rbcp_signal_representation_data(cfg):
         ta_1d,
         tb_1d,
         w0,
-        params.M_rbcp
+        params.M_rbcp,
     )
 
     x_rbcp = recover_signal(
         ta_q,
         tb_q,
         t,
-        w0
+        w0,
     )
 
     mse_rbcp = float(np.mean((x_used_1d - x_rbcp) ** 2))
@@ -284,7 +331,7 @@ def generate_rbcp_signal_representation_data(cfg):
             params=params,
             N=N,
             t=t,
-            sfc_enabled=True
+            sfc_enabled=True,
         )
         mse_sfc = float(np.mean((x_used_1d - x_sfc) ** 2))
 
@@ -296,10 +343,14 @@ def generate_rbcp_signal_representation_data(cfg):
         x_ref=x_used_1d,
         t=t,
         cfg=cfg,
-        params=params
+        params=params,
     )
 
-    mse_benchmark = float(np.mean((x_used_1d - x_benchmark) ** 2))
+    mse_benchmark = (
+        float(np.mean((x_used_1d - x_benchmark) ** 2))
+        if np.all(np.isfinite(x_benchmark))
+        else np.nan
+    )
 
     return {
         "t": t,
@@ -330,7 +381,6 @@ def _generate_representative_signal(cfg, rng, num_time_samples):
     """
     Generate one representative 1D signal.
     """
-
     dist = cfg["signal"]["distribution"]
 
     if dist == "uniform":
@@ -346,7 +396,7 @@ def _filter_signal_tensor(x_raw_3d, cfg, params, tau, Tt):
     """
     Band-limit the representative signal tensor using configured signal.W.
 
-    IMPORTANT:
+    IMPORTANT
     ---------
     The source filter bandwidth must come from:
 
@@ -359,7 +409,6 @@ def _filter_signal_tensor(x_raw_3d, cfg, params, tau, Tt):
     N controls the number of representation harmonics. W controls the
     source-signal bandwidth.
     """
-
     W_filter = float(cfg["signal"].get("W", params.W))
 
     if W_filter <= 0:
@@ -376,7 +425,7 @@ def _filter_signal_tensor(x_raw_3d, cfg, params, tau, Tt):
                 x_raw_3d[:, p, s],
                 W_filter,
                 Tt,
-                tau
+                tau,
             )
 
     return x_filtered
@@ -386,7 +435,6 @@ def _apply_peak_to_peak_control(x_filtered, peak_to_peak):
     """
     Apply peak-to-peak control independently per (period, sensor).
     """
-
     if peak_to_peak == 0:
         return x_filtered
 
@@ -406,7 +454,6 @@ def _apply_dc_handling(x_filtered, tau, Tt, dc_enabled):
     """
     Remove DC component unless dc_enabled is True.
     """
-
     x_zero_mean = np.zeros_like(x_filtered)
     _, n_periods, S = x_filtered.shape
 
@@ -431,23 +478,22 @@ def _compute_fourier_coefficients(
     N,
     Tt,
     normalize_dft,
-    normalization_target
+    normalization_target,
 ):
     """
     Compute Fourier coefficients for the representative signal.
     """
-
     fourier_core = FourierCoefficientCore(
         T=tau,
         harmonics=N,
-        sensor_nodes=1
+        sensor_nodes=1,
     )
 
     an, bn, x_used = fourier_core.calc_an_bn_dft(
         x_zero_mean,
         Tt,
         normalize=normalize_dft,
-        norm=normalization_target
+        norm=normalization_target,
     )
 
     return an, bn, x_used
@@ -457,7 +503,6 @@ def _compute_phase_coefficients(an, bn, tau, N, cfg, params, n_periods):
     """
     Compute ta/tb for the representative signal only.
     """
-
     phase_core = PhaseCoefficientCore(
         T=tau,
         harmonics=N,
@@ -467,7 +512,7 @@ def _compute_phase_coefficients(an, bn, tau, N, cfg, params, n_periods):
         bandwidth=params.B,
         detect_errors=False,
         periods=n_periods,
-        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
+        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001),
     )
 
     ta, tb = phase_core.calc_ta_tb(an, bn)
@@ -492,7 +537,6 @@ def _run_sfc_branch(ta, tb, cfg, params, N, t, sfc_enabled=True):
     - Event IDs belong to the representative signal only (2N IDs).
     - Those IDs are assigned to sensor 0 in a figure-specific sensor_x_event.
     """
-
     if not sfc_enabled:
         return np.full_like(t, np.nan, dtype=float)
 
@@ -508,10 +552,10 @@ def _run_sfc_branch(ta, tb, cfg, params, N, t, sfc_enabled=True):
         bandwidth=params.B,
         detect_errors=False,
         periods=n_periods,
-        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
+        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001),
     )
 
-    # Representative-signal events: shape based on 1 signal only.
+    # Representative-signal events: shape based on one signal only.
     events = phase_core.ta_tb_to_events(ta, tb)
 
     # Build one SFC channel using a figure-specific sensor_x_event.
@@ -528,7 +572,7 @@ def _run_sfc_branch(ta, tb, cfg, params, N, t, sfc_enabled=True):
         ta_rec[0, :, 0],
         tb_rec[0, :, 0],
         t,
-        w0
+        w0,
     )
 
     return x_sfc
@@ -555,7 +599,6 @@ def _build_representative_sfc_channel(cfg, params, N):
         row 0 -> ones
         rows 1..S-1 -> zeros
     """
-
     cfg_sfc = copy.deepcopy(cfg)
 
     if "channel" not in cfg_sfc:
@@ -565,21 +608,24 @@ def _build_representative_sfc_channel(cfg, params, N):
     sensor_x_event[0, :] = 1.0
 
     cfg_sfc["channel"]["sensor_x_event"] = sensor_x_event
-    cfg_sfc["channel"]["collision_mode"] = cfg_sfc["channel"].get("collision_mode", "sum")
+    cfg_sfc["channel"]["collision_mode"] = cfg_sfc["channel"].get(
+        "collision_mode",
+        "sum",
+    )
     cfg_sfc["channel"]["type"] = cfg_sfc["channel"].get("type", "awgn")
     cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get(
         "detection_mode",
-        "threshold"
+        "threshold",
     )
     cfg_sfc["channel"]["score_threshold"] = cfg_sfc["channel"].get(
         "score_threshold",
-        cfg_sfc["system"]["L"]
+        cfg_sfc["system"]["L"],
     )
 
     if "threshold" not in cfg_sfc["channel"]:
         cfg_sfc["channel"]["threshold_factor"] = cfg_sfc["channel"].get(
             "threshold_factor",
-            0.5
+            0.5,
         )
 
     if "reproducibility" not in cfg_sfc:
@@ -587,10 +633,11 @@ def _build_representative_sfc_channel(cfg, params, N):
 
     if "seed" not in cfg_sfc["reproducibility"]:
         cfg_sfc["reproducibility"]["seed"] = cfg.get(
-            "reproducibility", {}
+            "reproducibility",
+            {},
         ).get(
             "seed",
-            cfg.get("monte_carlo", {}).get("seed", 12345)
+            cfg.get("monte_carlo", {}).get("seed", 12345),
         )
 
     return SFCChannel(cfg_sfc)
@@ -617,10 +664,13 @@ def _run_benchmark_branch(x_ref, t, cfg, params):
     The number of bins M is obtained from the core, using the current default
     quantization policy (free integer by default).
     """
+    if not cfg.get("mode", {}).get("run_benchmark", True):
+        return np.full_like(t, np.nan, dtype=float), np.nan
 
     benchmark_cfg = cfg.get("benchmark", {})
     sampling_rate = float(benchmark_cfg.get("sampling_rate", params.W))
     effective_rate_factor = float(benchmark_cfg.get("effective_rate_factor", 1.0))
+    effective_sampling_rate = effective_rate_factor * sampling_rate
 
     B_sensor = float(params.B_per_sensor[0])
 
@@ -629,52 +679,74 @@ def _run_benchmark_branch(x_ref, t, cfg, params):
         B_sensor=B_sensor,
         P=params.P,
         N0=params.N0,
-        sampling_rate=effective_rate_factor * sampling_rate,
+        sampling_rate=effective_sampling_rate,
         force_power_of_two=params.quantization_force_power_of_two,
-        rounding_mode=params.quantization_rounding_mode
+        rounding_mode=params.quantization_rounding_mode,
+    )
+
+    periodic_replicas = int(
+        benchmark_cfg.get(
+            "periodic_replicas",
+            PERIODIC_REPLICAS,
+        )
     )
 
     x_hat = _benchmark_sample_quantize_reconstruct(
         x_ref=x_ref,
         t=t,
-        sampling_rate=sampling_rate,
-        M=M
+        sampling_rate=effective_sampling_rate,
+        M=M,
+        periodic_replicas=periodic_replicas,
     )
 
     return x_hat, M
 
 
-def _benchmark_sample_quantize_reconstruct(x_ref, t, sampling_rate, M):
+def _benchmark_sample_quantize_reconstruct(
+    x_ref,
+    t,
+    sampling_rate,
+    M,
+    periodic_replicas=PERIODIC_REPLICAS,
+):
     """
     Benchmark reconstruction using:
     1. uniform sampling
     2. uniform scalar quantization with M bins
-    3. sinc reconstruction
+    3. core periodic sinc reconstruction
 
     This implementation does NOT require M to be a power of 2.
     """
-
     M = int(M)
 
     if M < 2:
         return np.full_like(t, np.nan, dtype=float)
 
-    tau = t[-1] + (t[1] - t[0])
+    if len(t) < 2:
+        raise ValueError("t must contain at least two samples.")
 
-    Ts = 1.0 / sampling_rate
+    dt = float(t[1] - t[0])
+    tau = float(t[-1] + dt)
+
+    fs = float(sampling_rate)
+
+    if fs <= 0:
+        raise ValueError("sampling_rate must be positive.")
+
+    Ts = 1.0 / fs
     t_samples = np.arange(0.0, tau, Ts)
 
     # Sample the reference signal on the sampling grid.
     x_samples = np.interp(t_samples, t, x_ref)
 
     # Uniform quantization over the signal dynamic range.
-    x_min = np.min(x_ref)
-    x_max = np.max(x_ref)
+    x_min = float(np.min(x_ref))
+    x_max = float(np.max(x_ref))
 
     if np.isclose(x_max, x_min):
         return np.full_like(t, x_min, dtype=float)
 
-    delta = (x_max - x_min) / M
+    delta = (x_max - x_min) / float(M)
 
     if not np.isfinite(delta) or np.isclose(delta, 0.0):
         # Extremely large M: quantization error is numerically negligible.
@@ -685,16 +757,19 @@ def _benchmark_sample_quantize_reconstruct(x_ref, t, sampling_rate, M):
         idx = np.clip(idx, 0, M - 1)
         xq = x_min + (idx + 0.5) * delta
 
-    # Sinc reconstruction:
-    # y(t) = sum_k xq[k] * sinc(fs * t - k)
-    fs = sampling_rate
-    k = np.arange(len(xq))
-    x_hat = np.zeros_like(t, dtype=float)
+    # Core sample-to-continuous reconstruction.
+    xq_tensor = xq[:, None, None]
 
-    for i, ti in enumerate(t):
-        x_hat[i] = np.sum(xq * np.sinc(fs * ti - k))
+    x_hat_tensor = sinc_reconstruct_from_samples(
+        x_samples=xq_tensor,
+        t_samples=t_samples,
+        t_eval=t,
+        tau=tau,
+        sample_period=Ts,
+        periodic_replicas=periodic_replicas,
+    )
 
-    return x_hat
+    return np.asarray(x_hat_tensor[:, 0, 0], dtype=float)
 
 
 __all__ = [

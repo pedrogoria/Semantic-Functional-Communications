@@ -1,0 +1,50 @@
+system:
+  S: 1
+  B: 2500.0
+  P: 1.0
+  N0: 0.01
+  R: 12
+  L: 4
+  bandwidth_allocation: null
+
+signal:
+  distribution: uniform
+  W: 10.0
+  tau: 1.0
+  Tt: 0.001
+  peak_to_peak: 2.0
+  n_periods: 1
+
+benchmark:
+  sampling_rate: 10.0
+  effective_rate_factor: 1.0
+
+quantization:
+  force_power_of_two: false
+  rounding_mode: floor
+
+sod:
+  threshold: 0.1
+  transmit_event_times: true
+  time_bins: null
+  reconstruction_mode: zero_order_hold
+  initial_event: true
+  periodic_replicas: 10
+
+debug:
+  seed: 42
+  sensor_index: 0
+
+output:
+  base_dir: tests/results
+  figure_dir: debug_sod_full_system
+
+  formats:
+    figure:
+      - png
+      - pdf
+
+  save_config_copy: true
+  save_metadata: true
+  save_arrays: true
+  save_plot: true

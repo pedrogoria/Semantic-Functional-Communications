@@ -18,70 +18,42 @@ Compared methods
 - SFC
 - SFC + SED
 
-Outputs
--------
-By default, all outputs are saved under:
+Output structure
+----------------
+This runner follows the project output convention:
 
-    data/results/fair_methods_comparison_vs_B/
+    output.base_dir / output.figure_dir / YYYYMMDD_HHMMSS/
+
+Example:
+
+    data/results/fair_methods_comparison_vs_B/20260525_154501/
+
+All generated artifacts are saved inside that timestamped directory.
 
 Files generated
 ---------------
-- fair_methods_comparison_vs_B.dat
-- fair_methods_comparison_vs_B.csv
-- fair_methods_comparison_vs_B.yaml
-- fair_methods_comparison_vs_B_metadata.json
-- fair_methods_comparison_vs_B.png
-- fair_methods_comparison_vs_B.pdf
-- fair_methods_comparison_vs_B_diagnostics.png
-- fair_methods_comparison_vs_B_diagnostics.pdf
-
-Usage
------
-Python console:
-
-    from scripts.run_fair_methods_comparison_vs_B import run_fair_methods_comparison_vs_B
-
-    df = run_fair_methods_comparison_vs_B(
-        config_path="experiments/configs/figures/fair_methods_comparison_vs_B.yaml"
-    )
-
-Terminal:
-
-    python scripts/run_fair_methods_comparison_vs_B.py \
-        --config experiments/configs/figures/fair_methods_comparison_vs_B.yaml
-
-Optional output directory override:
-
-    python scripts/run_fair_methods_comparison_vs_B.py \
-        --config experiments/configs/figures/fair_methods_comparison_vs_B.yaml \
-        --output-dir data/results/fair_methods_comparison_vs_B_test
+- fair_methods_comparison_vs_B_<timestamp>.dat
+- fair_methods_comparison_vs_B_<timestamp>.csv
+- fair_methods_comparison_vs_B_<timestamp>.yaml
+- fair_methods_comparison_vs_B_<timestamp>_metadata.json
+- fair_methods_comparison_vs_B_<timestamp>.png
+- fair_methods_comparison_vs_B_<timestamp>.pdf
+- fair_methods_comparison_vs_B_<timestamp>_diagnostics.png
+- fair_methods_comparison_vs_B_<timestamp>_diagnostics.pdf
 """
 
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
+import datetime
 import json
+import os
 import platform
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict
-
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import yaml
-
-# =============================================================================
-# PIPELINE IMPORTS
-# =============================================================================
-
-from sfc.pipelines.fair_methods_comparison_vs_B import (
-    generate_fair_methods_comparison_vs_B_data,
-    save_dat_file,
-)
+from typing import Any
 
 # =============================================================================
 # PATH HANDLING
@@ -92,103 +64,123 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import yaml
+
+
 # =============================================================================
-# DEFAULTS
+# PIPELINE IMPORTS
+# =============================================================================
+
+from sfc.pipelines.fair_methods_comparison_vs_B import (
+    generate_fair_methods_comparison_vs_B_data,
+    save_dat_file,
+)
+
+
+# =============================================================================
+# DEFAULT CONFIG
 # =============================================================================
 
 DEFAULT_CONFIG_PATH = (
-        PROJECT_ROOT
-        / "experiments"
-        / "configs"
-        / "figures"
-        / "fair_methods_comparison_vs_B.yaml"
-)
-
-DEFAULT_OUTPUT_DIR = (
-        PROJECT_ROOT
-        / "data"
-        / "results"
-        / "fair_methods_comparison_vs_B"
+    PROJECT_ROOT
+    / "experiments"
+    / "configs"
+    / "figures"
+    / "fair_methods_comparison_vs_B.yaml"
 )
 
 BASE_NAME = "fair_methods_comparison_vs_B"
 
 
 # =============================================================================
-# I/O HELPERS
+# YAML
 # =============================================================================
 
 def load_yaml_config(config_path: str | Path) -> dict:
     """
     Load YAML config.
     """
-
     config_path = Path(config_path)
 
     if not config_path.is_file():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     with config_path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    if cfg is None:
+        raise ValueError(f"YAML config is empty: {config_path}")
+
+    return cfg
 
 
-def copy_config_to_results(
-        config_path: str | Path,
-        output_dir: str | Path,
-        base_name: str = BASE_NAME,
-) -> Path:
+# =============================================================================
+# OUTPUT DIR
+# =============================================================================
+
+def prepare_output_dir(cfg):
     """
-    Copy YAML config into the output directory.
+    Prepare timestamped output directory using the project convention:
+
+        base_dir / figure_dir / YYYYMMDD_HHMMSS
     """
+    output_cfg = cfg["output"]
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    config_path = Path(config_path)
-    output_dir = Path(output_dir)
+    base_dir = Path(output_cfg["base_dir"])
+    if not base_dir.is_absolute():
+        base_dir = PROJECT_ROOT / base_dir
 
-    copied_config_path = output_dir / f"{base_name}.yaml"
-    shutil.copyfile(config_path, copied_config_path)
+    output_dir = base_dir / output_cfg["figure_dir"] / timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    return copied_config_path
+    return str(output_dir), timestamp
 
 
-def _git_commit_hash() -> str | None:
+# =============================================================================
+# GIT META
+# =============================================================================
+
+def get_git_commit():
     """
     Return current git commit hash if available.
     """
-
     try:
-        out = subprocess.check_output(
+        return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
             cwd=str(PROJECT_ROOT),
             stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return out.strip()
+        ).decode("utf-8").strip()
     except Exception:
-        return None
+        return "unknown"
 
 
-def _git_is_dirty() -> bool | None:
+def get_git_dirty():
     """
-    Return whether the git working tree is dirty, if available.
+    Return whether git working tree has uncommitted changes.
     """
-
     try:
         out = subprocess.check_output(
             ["git", "status", "--porcelain"],
             cwd=str(PROJECT_ROOT),
             stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return bool(out.strip())
+        ).decode("utf-8").strip()
+        return bool(out)
     except Exception:
         return None
 
+
+# =============================================================================
+# JSON SAFE
+# =============================================================================
 
 def _json_safe_value(value: Any):
     """
     Convert numpy/pandas values into JSON-safe objects.
     """
-
     if isinstance(value, (np.integer,)):
         return int(value)
 
@@ -196,6 +188,9 @@ def _json_safe_value(value: Any):
         if np.isfinite(value):
             return float(value)
         return None
+
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
 
     if isinstance(value, np.ndarray):
         return value.tolist()
@@ -209,31 +204,67 @@ def _json_safe_value(value: Any):
     return value
 
 
-def save_metadata_json(
-        metadata_path: str | Path,
-        *,
-        config_path: str | Path,
-        output_dir: str | Path,
-        df: pd.DataFrame,
-        generated_files: Dict[str, str],
-):
-    """
-    Save run metadata as JSON.
-    """
+# =============================================================================
+# DATA SAVE
+# =============================================================================
 
-    metadata_path = Path(metadata_path)
+def save_data(df, cfg, output_dir, timestamp):
+    """
+    Save the generated dataset in the requested formats.
+    """
+    data_cfg = cfg["output"].get("formats", {}).get("data", ["dat"])
+    delimiter = cfg.get("data_format", {}).get("delimiter", "\t")
+
+    base_name = f"{BASE_NAME}_{timestamp}"
+
+    generated = {}
+
+    for fmt in data_cfg:
+        path = os.path.join(output_dir, f"{base_name}.{fmt}")
+
+        if fmt == "dat":
+            save_dat_file(df, path, delimiter=delimiter)
+        elif fmt == "csv":
+            df.to_csv(path, index=False, float_format="%.8e")
+        else:
+            raise ValueError(f"Unsupported data format: {fmt}")
+
+        generated[fmt] = path
+
+    return generated
+
+
+def save_config_copy(config_path, output_dir, timestamp):
+    """
+    Copy YAML config into output directory.
+    """
+    dst = os.path.join(output_dir, f"{BASE_NAME}_{timestamp}.yaml")
+    shutil.copyfile(config_path, dst)
+    return dst
+
+
+def save_metadata(df, cfg, config_path, output_dir, timestamp, generated_files):
+    """
+    Save metadata JSON.
+    """
+    _ = cfg
+
+    metadata_path = os.path.join(
+        output_dir,
+        f"{BASE_NAME}_{timestamp}_metadata.json",
+    )
 
     metadata = {
-        "created_at_utc": _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "created_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
         "project_root": str(PROJECT_ROOT),
-        "config_path": str(Path(config_path)),
-        "output_dir": str(Path(output_dir)),
+        "config_path": str(config_path),
+        "output_dir": str(output_dir),
         "python_version": sys.version,
         "platform": platform.platform(),
-        "git_commit": _git_commit_hash(),
-        "git_dirty": _git_is_dirty(),
-        "num_rows": int(len(df)),
+        "git_commit": get_git_commit(),
+        "git_dirty": get_git_dirty(),
         "columns": list(df.columns),
+        "num_rows": int(len(df)),
         "generated_files": generated_files,
         "summary": {},
     }
@@ -249,8 +280,10 @@ def save_metadata_json(
                 "mean": _json_safe_value(finite.mean()),
             }
 
-    with metadata_path.open("w", encoding="utf-8") as f:
+    with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
+
+    return metadata_path
 
 
 # =============================================================================
@@ -260,24 +293,20 @@ def save_metadata_json(
 def print_result_diagnostics(df: pd.DataFrame):
     """
     Print important result diagnostics explicitly.
-
-    This function exists because pandas head() may hide relevant columns,
-    especially M_benchmark_min / M_benchmark_max.
     """
-
     print("\n[INFO] Benchmark + FDMA diagnostics:")
 
     benchmark_cols = [
         "B",
         "M_benchmark_min",
+        "M_benchmark_mean",
         "M_benchmark_max",
         "mse_benchmark_fdma",
     ]
+    benchmark_cols = [c for c in benchmark_cols if c in df.columns]
 
-    existing_benchmark_cols = [c for c in benchmark_cols if c in df.columns]
-
-    if existing_benchmark_cols:
-        print(df[existing_benchmark_cols].to_string(index=False))
+    if benchmark_cols:
+        print(df[benchmark_cols].to_string(index=False))
     else:
         print("[WARN] Benchmark columns not found in DataFrame.")
 
@@ -293,11 +322,10 @@ def print_result_diagnostics(df: pd.DataFrame):
         "mse_sfc",
         "mse_sfc_sed",
     ]
+    mse_cols = [c for c in mse_cols if c in df.columns]
 
-    existing_mse_cols = [c for c in mse_cols if c in df.columns]
-
-    if existing_mse_cols:
-        print(df[existing_mse_cols].to_string(index=False))
+    if mse_cols:
+        print(df[mse_cols].to_string(index=False))
     else:
         print("[WARN] MSE columns not found in DataFrame.")
 
@@ -306,6 +334,7 @@ def print_result_diagnostics(df: pd.DataFrame):
     resource_cols = [
         "B",
         "M_benchmark_min",
+        "M_benchmark_mean",
         "M_benchmark_max",
         "M_rbcp",
         "M_time",
@@ -315,11 +344,10 @@ def print_result_diagnostics(df: pd.DataFrame):
         "ppm_fs_msg_max",
         "sfc_sed_valid_fraction",
     ]
+    resource_cols = [c for c in resource_cols if c in df.columns]
 
-    existing_resource_cols = [c for c in resource_cols if c in df.columns]
-
-    if existing_resource_cols:
-        print(df[existing_resource_cols].to_string(index=False))
+    if resource_cols:
+        print(df[resource_cols].to_string(index=False))
     else:
         print("[WARN] Resource columns not found in DataFrame.")
 
@@ -332,7 +360,6 @@ def _finite_positive(values) -> np.ndarray:
     """
     Return finite positive values.
     """
-
     arr = np.asarray(values, dtype=float)
     return arr[np.isfinite(arr) & (arr > 0)]
 
@@ -341,7 +368,6 @@ def _set_log_ylim(ax, series_list):
     """
     Set log-scale limits from finite positive data.
     """
-
     values = []
 
     for y in series_list:
@@ -361,18 +387,10 @@ def _set_log_ylim(ax, series_list):
     )
 
 
-def plot_main_mse_figure(
-        df: pd.DataFrame,
-        output_dir: str | Path,
-        base_name: str = BASE_NAME,
-        show: bool = False,
-) -> dict:
+def plot_main_mse_figure(df, cfg, output_dir, timestamp, show=False):
     """
-    Plot main MSE figure and save PNG/PDF.
+    Plot main MSE figure and save in requested formats.
     """
-
-    output_dir = Path(output_dir)
-
     if "B" not in df.columns:
         raise ValueError("Cannot plot main figure. Missing required column: B")
 
@@ -428,35 +446,32 @@ def plot_main_mse_figure(
 
     fig.tight_layout()
 
-    png_path = output_dir / f"{base_name}.png"
-    pdf_path = output_dir / f"{base_name}.pdf"
+    formats = cfg["output"].get("formats", {}).get("figure", ["png", "pdf"])
+    base_name = f"{BASE_NAME}_{timestamp}"
+    generated = {}
 
-    fig.savefig(png_path, dpi=300)
-    fig.savefig(pdf_path)
+    for fmt in formats:
+        path = os.path.join(output_dir, f"{base_name}.{fmt}")
+        if fmt == "png":
+            fig.savefig(path, dpi=300)
+        elif fmt == "pdf":
+            fig.savefig(path)
+        else:
+            raise ValueError(f"Unsupported figure format: {fmt}")
+        generated[f"main_{fmt}"] = path
 
     if show:
         plt.show()
     else:
         plt.close(fig)
 
-    return {
-        "main_png": str(png_path),
-        "main_pdf": str(pdf_path),
-    }
+    return generated
 
 
-def plot_diagnostics_figure(
-        df: pd.DataFrame,
-        output_dir: str | Path,
-        base_name: str = BASE_NAME,
-        show: bool = False,
-) -> dict:
+def plot_diagnostics_figure(df, cfg, output_dir, timestamp, show=False):
     """
-    Plot diagnostics figure and save PNG/PDF.
+    Plot diagnostics figure and save in requested formats.
     """
-
-    output_dir = Path(output_dir)
-
     if "B" not in df.columns:
         raise ValueError("Column 'B' is required for diagnostics plot.")
 
@@ -465,7 +480,7 @@ def plot_diagnostics_figure(
     fig, axes = plt.subplots(4, 1, figsize=(7.6, 10.2), sharex=True)
 
     # -------------------------------------------------------------------------
-    # 1. Benchmark quantization bins.
+    # 1. Benchmark quantization bins
     # -------------------------------------------------------------------------
     if "M_benchmark_min" in df.columns and "M_benchmark_max" in df.columns:
         M_min = np.asarray(pd.to_numeric(df["M_benchmark_min"], errors="coerce"), dtype=float)
@@ -493,7 +508,7 @@ def plot_diagnostics_figure(
     axes[0].legend(loc="best", frameon=True)
 
     # -------------------------------------------------------------------------
-    # 2. CS measurements.
+    # 2. CS measurements
     # -------------------------------------------------------------------------
     if "cs_measurements_min" in df.columns and "cs_measurements_max" in df.columns:
         axes[1].plot(
@@ -518,7 +533,7 @@ def plot_diagnostics_figure(
     axes[1].legend(loc="best", frameon=True)
 
     # -------------------------------------------------------------------------
-    # 3. PPM fs_msg.
+    # 3. PPM fs_msg
     # -------------------------------------------------------------------------
     if "ppm_fs_msg_min" in df.columns and "ppm_fs_msg_max" in df.columns:
         axes[2].plot(
@@ -543,7 +558,7 @@ def plot_diagnostics_figure(
     axes[2].legend(loc="best", frameon=True)
 
     # -------------------------------------------------------------------------
-    # 4. M_time / M_rbcp and SFC+SED valid fraction.
+    # 4. M_time / M_rbcp and SFC+SED valid fraction
     # -------------------------------------------------------------------------
     lines = []
     labels = []
@@ -603,21 +618,26 @@ def plot_diagnostics_figure(
 
     fig.tight_layout()
 
-    png_path = output_dir / f"{base_name}_diagnostics.png"
-    pdf_path = output_dir / f"{base_name}_diagnostics.pdf"
+    formats = cfg["output"].get("formats", {}).get("figure", ["png", "pdf"])
+    base_name = f"{BASE_NAME}_{timestamp}_diagnostics"
+    generated = {}
 
-    fig.savefig(png_path, dpi=300)
-    fig.savefig(pdf_path)
+    for fmt in formats:
+        path = os.path.join(output_dir, f"{base_name}.{fmt}")
+        if fmt == "png":
+            fig.savefig(path, dpi=300)
+        elif fmt == "pdf":
+            fig.savefig(path)
+        else:
+            raise ValueError(f"Unsupported figure format: {fmt}")
+        generated[f"diagnostics_{fmt}"] = path
 
     if show:
         plt.show()
     else:
         plt.close(fig)
 
-    return {
-        "diagnostics_png": str(png_path),
-        "diagnostics_pdf": str(pdf_path),
-    }
+    return generated
 
 
 # =============================================================================
@@ -625,89 +645,72 @@ def plot_diagnostics_figure(
 # =============================================================================
 
 def run_fair_methods_comparison_vs_B(
-        config_path: str | Path = DEFAULT_CONFIG_PATH,
-        output_dir: str | Path = DEFAULT_OUTPUT_DIR,
-        base_name: str = BASE_NAME,
-        copy_config: bool = True,
-        make_plots: bool = True,
-        show_plots: bool = False,
+    config_path: str | Path = DEFAULT_CONFIG_PATH,
+    show_plots: bool = False,
 ) -> pd.DataFrame:
     """
-    Run fair methods comparison versus B.
+    Run fair methods comparison versus B following the project output convention.
     """
-
     config_path = Path(config_path)
-    output_dir = Path(output_dir)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    dat_path = output_dir / f"{base_name}.dat"
-    csv_path = output_dir / f"{base_name}.csv"
-    metadata_path = output_dir / f"{base_name}_metadata.json"
 
     print("\n[RUN FAIR METHODS COMPARISON VS B]")
     print(f"[INFO] Project root: {PROJECT_ROOT}")
     print(f"[INFO] Config path: {config_path}")
-    print(f"[INFO] Output directory: {output_dir}")
 
     cfg = load_yaml_config(config_path)
+
+    output_dir, timestamp = prepare_output_dir(cfg)
+
+    print(f"[INFO] Output directory: {output_dir}")
+    print(f"[INFO] Timestamp: {timestamp}")
 
     df = generate_fair_methods_comparison_vs_B_data(cfg)
 
     print_result_diagnostics(df)
 
-    save_dat_file(
-        df=df,
-        path=str(dat_path),
-        delimiter="\t",
-    )
+    generated_files = {}
 
-    df.to_csv(
-        csv_path,
-        index=False,
-        float_format="%.8e",
-    )
+    data_files = save_data(df, cfg, output_dir, timestamp)
+    generated_files.update(data_files)
 
-    generated_files = {
-        "dat": str(dat_path),
-        "csv": str(csv_path),
-    }
+    copied_config_path = save_config_copy(config_path, output_dir, timestamp)
+    generated_files["config"] = copied_config_path
 
-    if copy_config:
-        copied_config_path = copy_config_to_results(
-            config_path=config_path,
-            output_dir=output_dir,
-            base_name=base_name,
-        )
-        generated_files["config"] = str(copied_config_path)
-
-    if make_plots:
+    if cfg["output"].get("save_figures", True):
         main_figs = plot_main_mse_figure(
             df=df,
+            cfg=cfg,
             output_dir=output_dir,
-            base_name=base_name,
+            timestamp=timestamp,
             show=show_plots,
         )
+        generated_files.update(main_figs)
 
         diagnostic_figs = plot_diagnostics_figure(
             df=df,
+            cfg=cfg,
             output_dir=output_dir,
-            base_name=base_name,
+            timestamp=timestamp,
             show=show_plots,
         )
-
-        generated_files.update(main_figs)
         generated_files.update(diagnostic_figs)
 
-    save_metadata_json(
-        metadata_path=metadata_path,
+    metadata_filename = os.path.join(
+        output_dir,
+        f"{BASE_NAME}_{timestamp}_metadata.json",
+    )
+    generated_files["metadata"] = metadata_filename
+
+    metadata_path = save_metadata(
+        df=df,
+        cfg=cfg,
         config_path=config_path,
         output_dir=output_dir,
-        df=df,
+        timestamp=timestamp,
         generated_files=generated_files,
     )
 
-    generated_files["metadata"] = str(metadata_path)
+    generated_files["metadata"] = metadata_path
 
     print("\n[INFO] Generated files:")
     for key, path in generated_files.items():
@@ -735,55 +738,26 @@ def main():
         "--config",
         type=str,
         default=str(DEFAULT_CONFIG_PATH),
-        help="Path to YAML config."
-    )
-
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=str(DEFAULT_OUTPUT_DIR),
-        help="Directory where data, metadata, config copy, and figures are saved."
-    )
-
-    parser.add_argument(
-        "--base-name",
-        type=str,
-        default=BASE_NAME,
-        help="Base filename for generated artifacts."
-    )
-
-    parser.add_argument(
-        "--no-copy-config",
-        action="store_true",
-        help="Do not copy the YAML config into the output directory."
-    )
-
-    parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Do not generate figures."
+        help="Path to YAML config.",
     )
 
     parser.add_argument(
         "--show",
         action="store_true",
-        help="Show figures interactively."
+        help="Show figures interactively.",
     )
 
     args = parser.parse_args()
 
     run_fair_methods_comparison_vs_B(
         config_path=args.config,
-        output_dir=args.output_dir,
-        base_name=args.base_name,
-        copy_config=not args.no_copy_config,
-        make_plots=not args.no_plot,
         show_plots=args.show,
     )
 
 
 if __name__ == "__main__":
     main()
+
 
 # from scripts.run_fair_methods_comparison_vs_B import run_fair_methods_comparison_vs_B
 #

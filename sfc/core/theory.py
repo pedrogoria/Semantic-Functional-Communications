@@ -651,6 +651,276 @@ def compute_benchmark_bits_per_sample_per_sensor(
 
 
 # =============================================================================
+# GENERIC PAYLOAD-BUDGET QUANTIZATION BINS
+# =============================================================================
+
+def compute_M_from_payload_budget_single_sensor(
+    available_bits: float,
+    n_items: int,
+    fields_per_item: int = 1,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor",
+) -> int:
+    """
+    Compute the feasible number of quantization bins per transmitted field
+    under a generic payload budget.
+
+    This helper is intended for methods whose number of transmitted objects per
+    period is not fixed a priori, e.g., Send-on-Delta (SoD), event-triggered
+    sampling, FRI parameter reporting, or other adaptive baselines.
+
+    Constraint
+    ----------
+    Let:
+        available_bits = R_s = C_s * tau
+        n_items        = number of transmitted objects in one period
+        fields_per_item = number of scalar fields transmitted per object
+
+    If each scalar field uses the same number of bins M, then:
+
+        n_items * fields_per_item * log2(M) <= available_bits
+
+    Therefore:
+
+        M <= 2^(available_bits / (n_items * fields_per_item))
+
+    Parameters
+    ----------
+    available_bits : float
+        Available payload budget in bits for one sensor over one period.
+
+    n_items : int
+        Number of transmitted objects over the period.
+
+    fields_per_item : int, optional
+        Number of scalar fields transmitted per object.
+        Examples:
+            - SoD amplitude-only: fields_per_item = 1
+            - SoD time + amplitude: fields_per_item = 2
+
+    force_power_of_two : bool, optional
+        If True, constrain M to a power of two.
+
+    rounding_mode : {"floor", "ceil", "round"}, optional
+        Integer rounding rule used by _finalize_M(...).
+
+    Returns
+    -------
+    int
+        Feasible number of bins per scalar transmitted field.
+
+    Notes
+    -----
+    If n_items == 0, no payload is transmitted. In this degenerate case the
+    returned M is 1 because the bin count is irrelevant but must remain a valid
+    positive integer.
+    """
+    available_bits = float(available_bits)
+    n_items = int(n_items)
+    fields_per_item = int(fields_per_item)
+
+    if available_bits < 0:
+        raise ValueError("available_bits must be nonnegative.")
+
+    if n_items < 0:
+        raise ValueError("n_items must be nonnegative.")
+
+    if fields_per_item < 1:
+        raise ValueError("fields_per_item must be >= 1.")
+
+    if n_items == 0 or np.isclose(available_bits, 0.0):
+        return 1
+
+    exponent = available_bits / float(n_items * fields_per_item)
+    M_continuous = 2.0 ** exponent
+
+    return _finalize_M(
+        M_continuous=M_continuous,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode,
+    )
+
+
+def compute_M_from_payload_budget_per_sensor(
+    available_bits_per_sensor,
+    n_items_per_sensor,
+    fields_per_item: int = 1,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor",
+) -> np.ndarray:
+    """
+    Compute feasible quantization bins per sensor under a generic payload budget.
+
+    This is the vectorized per-sensor version of
+    compute_M_from_payload_budget_single_sensor(...).
+
+    Parameters
+    ----------
+    available_bits_per_sensor : array-like
+        Available bits per sensor over one period.
+
+    n_items_per_sensor : array-like
+        Number of transmitted objects per sensor over one period.
+
+    fields_per_item : int, optional
+        Number of scalar transmitted fields per object.
+
+    force_power_of_two : bool, optional
+        If True, constrain M to powers of two.
+
+    rounding_mode : {"floor", "ceil", "round"}, optional
+        Integer rounding rule.
+
+    Returns
+    -------
+    np.ndarray
+        Per-sensor feasible M values.
+    """
+    available_bits_per_sensor = np.asarray(
+        available_bits_per_sensor,
+        dtype=float
+    ).reshape(-1)
+
+    n_items_per_sensor = np.asarray(
+        n_items_per_sensor,
+        dtype=int
+    ).reshape(-1)
+
+    if len(available_bits_per_sensor) != len(n_items_per_sensor):
+        raise ValueError(
+            "available_bits_per_sensor and n_items_per_sensor must have "
+            "the same length."
+        )
+
+    return np.array([
+        compute_M_from_payload_budget_single_sensor(
+            available_bits=available_bits_per_sensor[s],
+            n_items=n_items_per_sensor[s],
+            fields_per_item=fields_per_item,
+            force_power_of_two=force_power_of_two,
+            rounding_mode=rounding_mode,
+        )
+        for s in range(len(available_bits_per_sensor))
+    ], dtype=object)
+
+
+# =============================================================================
+# SEND-ON-DELTA PAYLOAD-BUDGET QUANTIZATION BINS
+# =============================================================================
+
+def compute_M_sod_single_sensor(
+    available_bits: float,
+    event_count: int,
+    transmit_event_times: bool = True,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor",
+) -> int:
+    """
+    Compute feasible SoD quantization bins for one sensor.
+
+    The SoD event count is signal-dependent. Therefore, unlike the Benchmark
+    Approach, the number of bins cannot be fixed solely from the sampling rate.
+    It must be computed after the SoD event count is known.
+
+    If transmit_event_times=True, each event carries:
+        - event time
+        - event amplitude
+
+    Thus:
+        fields_per_event = 2
+
+    If transmit_event_times=False, the optimistic amplitude-only convention is
+    used, and each event carries only:
+        - event amplitude
+
+    Thus:
+        fields_per_event = 1
+
+    Constraint
+    ----------
+        event_count * fields_per_event * log2(M_SoD) <= available_bits
+
+    Therefore:
+        M_SoD <= 2^(available_bits / (event_count * fields_per_event))
+
+    Parameters
+    ----------
+    available_bits : float
+        Available payload budget for the sensor over one period.
+
+    event_count : int
+        Number of SoD events generated by the sensor in one period.
+
+    transmit_event_times : bool, optional
+        If True, compute bins assuming time + amplitude per event.
+        If False, compute bins assuming amplitude-only payload.
+
+    force_power_of_two : bool, optional
+        If True, constrain M to powers of two.
+
+    rounding_mode : {"floor", "ceil", "round"}, optional
+        Integer rounding rule.
+
+    Returns
+    -------
+    int
+        Feasible number of bins for each transmitted SoD scalar field.
+    """
+    fields_per_event = 2 if bool(transmit_event_times) else 1
+
+    return compute_M_from_payload_budget_single_sensor(
+        available_bits=available_bits,
+        n_items=event_count,
+        fields_per_item=fields_per_event,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode,
+    )
+
+
+def compute_M_sod_per_sensor(
+    available_bits_per_sensor,
+    event_count_per_sensor,
+    transmit_event_times: bool = True,
+    force_power_of_two: bool = False,
+    rounding_mode: str = "floor",
+) -> np.ndarray:
+    """
+    Compute feasible SoD quantization bins per sensor.
+
+    Parameters
+    ----------
+    available_bits_per_sensor : array-like
+        Available payload bits per sensor over one period.
+
+    event_count_per_sensor : array-like
+        Number of SoD events per sensor over one period.
+
+    transmit_event_times : bool, optional
+        If True, each SoD event carries time + amplitude.
+        If False, each SoD event carries amplitude only.
+
+    force_power_of_two : bool, optional
+        If True, constrain M to powers of two.
+
+    rounding_mode : {"floor", "ceil", "round"}, optional
+        Integer rounding rule.
+
+    Returns
+    -------
+    np.ndarray
+        Per-sensor feasible SoD M values.
+    """
+    fields_per_event = 2 if bool(transmit_event_times) else 1
+
+    return compute_M_from_payload_budget_per_sensor(
+        available_bits_per_sensor=available_bits_per_sensor,
+        n_items_per_sensor=event_count_per_sensor,
+        fields_per_item=fields_per_event,
+        force_power_of_two=force_power_of_two,
+        rounding_mode=rounding_mode,
+    )
+
+# =============================================================================
 # SFC TIME / SLOT RELATIONS
 # =============================================================================
 
@@ -1070,6 +1340,15 @@ __all__ = [
     "compute_benchmark_M_per_sensor",
     "compute_benchmark_bits_per_sample_single_sensor",
     "compute_benchmark_bits_per_sample_per_sensor",
+
+    # generic payload-budget quantization
+    "compute_M_from_payload_budget_single_sensor",
+    "compute_M_from_payload_budget_per_sensor",
+
+    # SoD feasible bins
+    "compute_M_sod_single_sensor",
+    "compute_M_sod_per_sensor",
+
 
     # SFC time / slot relations
     "compute_M_time",

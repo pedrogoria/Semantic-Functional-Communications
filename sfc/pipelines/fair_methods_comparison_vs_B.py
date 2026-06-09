@@ -19,97 +19,61 @@ The project-wide convention is:
 
     P  = average transmit power per sensor
     B  = total system bandwidth
-    N0 = universal noise spectral-density / noise parameter
+    N0 = direct simulation-domain noise variance parameter
 
-Derived quantities:
+For channel capacity / quantization-budget calculations:
 
-    B_s     = alpha_s * B
-    SNR_s   = P / (B_s * N0)
-    C_s     = B_s * log2(1 + SNR_s)
+    B_s   = alpha_s * B
+    SNR_s = P / (B_s * N0)
+    C_s   = B_s * log2(1 + SNR_s)
 
-CS + FDMA convention in this pipeline
--------------------------------------
-The CS branch uses the physically clearer chain:
+For physical noise simulation:
 
-    x(t) -> x[n] -> y = Phi x[n] -> q = Q(y) -> y_tilde
-         -> x_hat[n] -> x_hat(t)
+    noise is generated from N0 directly.
 
-where:
+The simulation does NOT use:
 
-    x(t)
-        dense numerical reference signal.
+    B_s * N0
 
-    x[n]
-        uniform samples of x(t), sampled at the same rate used by the
-        Benchmark branch.
+as the generated waveform/resource-domain noise variance.
 
-    y
-        CS measurements.
+The reason is that simulated signals are already represented at their sampled,
+waveform, matched-filter, or resource-output level. In that domain, N0 is the
+direct noise variance parameter. If a fixed-SNR experiment is desired while
+sweeping B, N0(B) must be resolved first, and then all simulated channels use
+that resolved N0 directly.
 
-    q
-        quantized CS measurement indices, if quantization is enabled.
+Physical-budget regimes
+-----------------------
+Two physical-budget regimes are supported through the YAML:
 
-    x_hat[n]
-        recovered sample vector.
+1. fixed_P_and_N0
+   - keep P fixed
+   - keep N0 fixed
+   - derive:
+         SNR(B) = P / (B * N0)
 
-    x_hat(t)
-        sinc reconstruction from x_hat[n].
+2. fixed_P_and_SNR
+   - keep P fixed
+   - keep SNR fixed
+   - derive:
+         N0(B) = P / (B * SNR)
 
-SFC:
-    - each sensor has average power P over the period tau
-    - SFC does not use per-sensor FDMA bandwidth B_s
-    - SFC uses the total event-time grid associated with total bandwidth B
-    - SFC pulse amplitudes/energies must be normalized so that each sensor
-      satisfies average transmit power P
-    - SFC detection should be parameterized by pulse energy and N0, not by
-      the scalar SNR_total = P / (B N0) alone
-
-Fair CS budget rule
--------------------
-In this version, the CS branch tries to transmit all samples x[n] whenever the
-channel budget allows it.
-
-Let:
-
-    N_s = number of uniform samples per period
-    C_s = per-sensor Shannon capacity
-    tau = signal period
-    bits_available = C_s * tau
-
-If possible:
-
-    M_s = N_s
-    measurement_bits_s = floor(bits_available / N_s)
-
-If measurement_bits_s < 1, then the channel cannot carry all N_s measurements
-even with one bit per measurement. In that case:
-
-    measurement_bits_s = 1
-    M_s = floor(bits_available)
-
-If M_s < 1, the CS branch for that sensor is infeasible.
-
-The OMP sparsity is not a channel quantity. Here it is set to the largest
-possible effective value:
-
-    K_eff = min(M_s, N_s)
-
-This favors CS by allowing the receiver to use as many active coefficients as
-the measurement system can support.
-
-Important source-bandwidth convention
--------------------------------------
-The source signal is filtered using the configured source bandwidth:
-
-    signal.W
-
-The pipeline must NOT redefine the filtering bandwidth from N using:
-
-    W_eff = 2 * N / tau
-
-The role of N is to define the number of representation harmonics.
-The role of W is to define the source-signal bandwidth used by the signal
-filter.
+Important implementation rules
+------------------------------
+- Channel-budget formulas should come from sfc.core.system_parameters,
+  sfc.core.mac.fdma, or sfc.core.theory.
+- Scalar quantization should use core quantization functions.
+- Sample-to-continuous sinc reconstruction should use:
+      sfc.core.filters.sinc_reconstruct_from_samples
+- Physical AWGN should use:
+      sfc.core.channel.physical_channel.apply_awgn
+- Do not implement local quantizers, local sinc reconstruction, or local AWGN
+  formulas in this file.
+- Adaptive methods must compute their number of bins from channel capacity and
+  number of transmitted objects.
+- SFC has its native physical/resource-output convention and does not use FDMA
+  B_s directly for its event/channel model.
 """
 
 from __future__ import annotations
@@ -122,8 +86,13 @@ import pandas as pd
 
 from sfc.core.acquisition.cs import CSAcquisitionCore
 from sfc.core.channel.SFCChannel import SFCChannel
-from sfc.core.filters import filter_periodic
+from sfc.core.channel.physical_channel import apply_awgn
+from sfc.core.filters import (
+    filter_periodic,
+    sinc_reconstruct_from_samples,
+)
 from sfc.core.fourier import FourierCoefficientCore
+from sfc.core.mac.fdma import FDMACore
 from sfc.core.modulation.ppm import PPMCore
 from sfc.core.phase_cof import PhaseCoefficientCore
 from sfc.core.quantization import quantize_ta_tb
@@ -133,6 +102,19 @@ from sfc.core.system_parameters import (
     build_derived_system_parameters,
     compute_benchmark_M_per_sensor,
 )
+from sfc.core.theory import (
+    compute_N0,
+    compute_sensor_snr,
+    compute_snr_db,
+    compute_snr_linear,
+)
+
+
+# =============================================================================
+# GLOBAL FAIR-COMPARISON CHOICES
+# =============================================================================
+
+PERIODIC_REPLICAS = 10
 
 
 # =============================================================================
@@ -142,13 +124,23 @@ from sfc.core.system_parameters import (
 def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFrame:
     """
     Generate fair-methods comparison data versus total bandwidth B.
-    """
 
+    Parameters
+    ----------
+    cfg : dict
+        Parsed YAML configuration.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Dataset with one row per B point.
+    """
     rng = np.random.default_rng(cfg["monte_carlo"]["seed"])
 
     print("[INFO] Starting fair_methods_comparison_vs_B data generation")
     print(f"[INFO] Monte Carlo seed = {cfg['monte_carlo']['seed']}")
     print(f"[INFO] Trials per B = {cfg['monte_carlo']['interactions']}")
+    print(f"[INFO] periodic_replicas = {PERIODIC_REPLICAS}")
 
     b_cfg = cfg["sweep"]["B"]
     b_start = float(b_cfg["start"])
@@ -167,6 +159,12 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
         cfg_B = copy.deepcopy(cfg)
         cfg_B["system"]["B"] = float(B)
 
+        # ---------------------------------------------------------------------
+        # Resolve selected physical-budget regime before building parameters.
+        # This is important for fixed_P_and_SNR, where N0 depends on B.
+        # ---------------------------------------------------------------------
+        _apply_power_model(cfg_B)
+
         params = build_derived_system_parameters(cfg_B)
 
         N = int(cfg_B["signal"].get("N_override", params.N))
@@ -174,7 +172,7 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
 
         mse_benchmark_fdma, M_benchmark_per_sensor = _run_benchmark_fdma_branch(
             cfg=cfg_B,
-            params=params
+            params=params,
         )
 
         M_benchmark_arr = np.asarray(M_benchmark_per_sensor, dtype=object)
@@ -197,6 +195,7 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
 
         print("\n[INFO] ------------------------------------------------------------")
         print(f"[INFO] B_total = {params.B:.6e}")
+        print(f"[INFO] power_model.mode = {cfg_B.get('power_model', {}).get('mode', 'fixed_P_and_N0')}")
         print(f"[INFO] P_per_sensor = {params.P:.6e}")
         print(f"[INFO] N0 = {params.N0:.6e}")
         print(f"[INFO] S = {params.S}")
@@ -248,7 +247,7 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
             sfc_channel = _build_sfc_channel_for_B(
                 cfg_B=cfg_B,
                 N=N,
-                S=params.S
+                S=params.S,
             )
 
         for i in range(n_trials):
@@ -257,7 +256,7 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
                 rng=rng,
                 params=params,
                 N=N,
-                sfc_channel=sfc_channel
+                sfc_channel=sfc_channel,
             )
 
             if np.isfinite(trial["mse_cs_fdma"]):
@@ -396,6 +395,7 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
 
         results.append({
             "B": float(B),
+            "N0": float(params.N0),
             "SNR_total": float(params.SNR),
             "SNR_total_dB": float(params.SNR_dB),
             "SNR_sensor_min": float(np.min(params.SNR_per_sensor)),
@@ -434,6 +434,57 @@ def generate_fair_methods_comparison_vs_B_data(cfg: Dict[str, Any]) -> pd.DataFr
 
 
 # =============================================================================
+# POWER MODEL
+# =============================================================================
+
+def _apply_power_model(cfg: Dict[str, Any]):
+    """
+    Resolve the selected physical-budget regime in-place.
+
+    This function uses sfc.core.theory helpers and does not reimplement the
+    formulas locally.
+    """
+    mode = cfg.get("power_model", {}).get("mode", "fixed_P_and_N0")
+
+    if mode == "fixed_P_and_N0":
+        cfg["system"]["SNR_dB"] = _derive_snr_db_from_fixed_P_and_N0(cfg)
+        return
+
+    if mode == "fixed_P_and_SNR":
+        cfg["system"]["N0"] = _derive_n0_from_fixed_P_and_snr(cfg)
+        return
+
+    raise ValueError(
+        f"Unsupported power_model.mode: {mode}. "
+        f"Supported modes are 'fixed_P_and_N0' and 'fixed_P_and_SNR'."
+    )
+
+
+def _derive_snr_db_from_fixed_P_and_N0(cfg: Dict[str, Any]) -> float:
+    """
+    Derive reference SNR_dB(B) from fixed P and fixed N0.
+    """
+    P = float(cfg["system"]["P"])
+    B = float(cfg["system"]["B"])
+    N0 = float(cfg["system"]["N0"])
+
+    snr = compute_sensor_snr(P=P, B_sensor=B, N0=N0)
+    return compute_snr_db(snr)
+
+
+def _derive_n0_from_fixed_P_and_snr(cfg: Dict[str, Any]) -> float:
+    """
+    Derive N0(B) from fixed P and fixed reference SNR.
+    """
+    P = float(cfg["system"]["P"])
+    B = float(cfg["system"]["B"])
+    SNR_dB = float(cfg["system"]["SNR_dB"])
+
+    snr = compute_snr_linear(SNR_dB)
+    return compute_N0(P=P, B=B, SNR=snr)
+
+
+# =============================================================================
 # ONE MONTE CARLO TRIAL
 # =============================================================================
 
@@ -442,16 +493,15 @@ def _run_one_trial(
     rng: np.random.Generator,
     params,
     N: int,
-    sfc_channel: Optional[SFCChannel] = None
+    sfc_channel: Optional[SFCChannel] = None,
 ) -> Dict[str, Any]:
     """
     Run one fair-comparison Monte Carlo trial.
     """
-
     n_periods = int(
         cfg.get("signal", {}).get(
             "n_periods",
-            cfg.get("simulation", {}).get("n_periods", 1)
+            cfg.get("simulation", {}).get("n_periods", 1),
         )
     )
 
@@ -466,7 +516,7 @@ def _run_one_trial(
         params=params,
         N=N,
         t=t,
-        n_periods=n_periods
+        n_periods=n_periods,
     )
 
     mse_cs_fdma = np.nan
@@ -500,7 +550,7 @@ def _run_one_trial(
             t=t,
             cfg=cfg,
             params=params,
-            rng=rng
+            rng=rng,
         )
 
     if cfg.get("mode", {}).get("run_ppm_fdma", True):
@@ -509,7 +559,7 @@ def _run_one_trial(
             t=t,
             cfg=cfg,
             params=params,
-            rng=rng
+            rng=rng,
         )
 
     if cfg.get("mode", {}).get("run_rbcp", True):
@@ -519,7 +569,7 @@ def _run_one_trial(
             cfg=cfg,
             params=params,
             N=N,
-            M=params.M_rbcp
+            M=params.M_rbcp,
         )
 
     if cfg.get("mode", {}).get("run_rbcp_time", True):
@@ -529,7 +579,7 @@ def _run_one_trial(
             cfg=cfg,
             params=params,
             N=N,
-            M=params.M_time
+            M=params.M_time,
         )
 
     run_sfc = cfg.get("mode", {}).get("run_sfc", True)
@@ -544,7 +594,7 @@ def _run_one_trial(
             N=N,
             sfc_channel=sfc_channel,
             run_native_sfc=run_sfc,
-            run_sfc_sed=run_sfc_sed
+            run_sfc_sed=run_sfc_sed,
         )
 
     return {
@@ -575,7 +625,7 @@ def _generate_common_source(
     params,
     N: int,
     t: np.ndarray,
-    n_periods: int
+    n_periods: int,
 ) -> np.ndarray:
     """
     Generate common band-limited source signals.
@@ -583,7 +633,6 @@ def _generate_common_source(
     Output shape:
         (time, periods, sensors)
     """
-
     _ = N
 
     Tt = cfg["signal"]["Tt"]
@@ -613,7 +662,7 @@ def _generate_common_source(
                 x_raw[:, p, s],
                 W_filter,
                 Tt,
-                tau
+                tau,
             )
 
     peak_to_peak = cfg["signal"].get("peak_to_peak", 0.0)
@@ -621,7 +670,9 @@ def _generate_common_source(
     if peak_to_peak != 0:
         for p in range(n_periods):
             for s in range(S):
-                current_p2p = np.max(x_filtered[:, p, s]) - np.min(x_filtered[:, p, s])
+                current_p2p = np.max(x_filtered[:, p, s]) - np.min(
+                    x_filtered[:, p, s]
+                )
                 if current_p2p != 0:
                     x_filtered[:, p, s] *= peak_to_peak / current_p2p
 
@@ -640,7 +691,7 @@ def _generate_common_source(
 
 
 # =============================================================================
-# SAMPLING / SINC HELPERS
+# SAMPLING HELPERS
 # =============================================================================
 
 def _resolve_benchmark_sampling_rate(cfg: Dict[str, Any], params) -> float:
@@ -650,7 +701,6 @@ def _resolve_benchmark_sampling_rate(cfg: Dict[str, Any], params) -> float:
     Convention:
         fs = effective_rate_factor * sampling_rate
     """
-
     benchmark_cfg = cfg.get("benchmark", {})
     sampling_rate = float(benchmark_cfg.get("sampling_rate", params.W))
     effective_rate_factor = float(benchmark_cfg.get("effective_rate_factor", 2.0))
@@ -667,12 +717,11 @@ def _sample_signal_tensor_uniform(
     x_ref: np.ndarray,
     t_dense: np.ndarray,
     tau: float,
-    fs: float
+    fs: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Uniformly sample a dense signal tensor.
     """
-
     Ts = 1.0 / fs
     t_samples = np.arange(0.0, tau, Ts)
 
@@ -684,54 +733,10 @@ def _sample_signal_tensor_uniform(
             x_samples[:, p, s] = np.interp(
                 t_samples,
                 t_dense,
-                x_ref[:, p, s]
+                x_ref[:, p, s],
             )
 
     return t_samples, x_samples
-
-
-def _sinc_reconstruct_from_samples(
-    x_samples_1d: np.ndarray,
-    t_eval: np.ndarray,
-    fs: float
-) -> np.ndarray:
-    """
-    Reconstruct continuous-time signal from uniform samples using sinc.
-    """
-
-    x_samples_1d = np.asarray(x_samples_1d, dtype=float)
-    t_eval = np.asarray(t_eval, dtype=float)
-
-    n = np.arange(len(x_samples_1d))
-    x_hat = np.zeros_like(t_eval, dtype=float)
-
-    for i, ti in enumerate(t_eval):
-        x_hat[i] = np.sum(x_samples_1d * np.sinc(fs * ti - n))
-
-    return x_hat
-
-
-def _sinc_reconstruct_tensor(
-    x_samples: np.ndarray,
-    t_eval: np.ndarray,
-    fs: float
-) -> np.ndarray:
-    """
-    Apply sinc reconstruction to tensor.
-    """
-
-    _, n_periods, S = x_samples.shape
-    x_hat = np.zeros((len(t_eval), n_periods, S), dtype=float)
-
-    for p in range(n_periods):
-        for s in range(S):
-            x_hat[:, p, s] = _sinc_reconstruct_from_samples(
-                x_samples[:, p, s],
-                t_eval,
-                fs
-            )
-
-    return x_hat
 
 
 # =============================================================================
@@ -743,25 +748,24 @@ def _compute_phase_coefficients_from_reference(
     Tt: float,
     cfg: Dict[str, Any],
     params,
-    N: int
+    N: int,
 ):
     """
     Compute ta/tb and phase core from a source tensor.
     """
-
     n_periods = x_ref.shape[1]
 
     fourier_core = FourierCoefficientCore(
         T=params.tau,
         harmonics=N,
-        sensor_nodes=params.S
+        sensor_nodes=params.S,
     )
 
     an, bn, _ = fourier_core.calc_an_bn_dft(
         x_ref,
         Tt,
         normalize=cfg["signal"].get("normalize_dft", True),
-        norm=cfg["signal"].get("normalization_target", 3.99)
+        norm=cfg["signal"].get("normalization_target", 3.99),
     )
 
     phase_core = PhaseCoefficientCore(
@@ -773,7 +777,7 @@ def _compute_phase_coefficients_from_reference(
         bandwidth=params.B,
         detect_errors=False,
         periods=n_periods,
-        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
+        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001),
     )
 
     ta, tb = phase_core.calc_ta_tb(an, bn)
@@ -785,12 +789,11 @@ def _reconstruct_from_ta_tb(
     ta: np.ndarray,
     tb: np.ndarray,
     t: np.ndarray,
-    params
+    params,
 ) -> np.ndarray:
     """
-    Reconstruct signal tensor from ta/tb.
+    Reconstruct signal tensor from ta/tb using native functional reconstruction.
     """
-
     ta = np.asarray(ta)
     tb = np.asarray(tb)
 
@@ -811,7 +814,7 @@ def _reconstruct_from_ta_tb(
                 ta[p, :, s],
                 tb[p, :, s],
                 t,
-                w0
+                w0,
             )
 
     return x_hat
@@ -821,12 +824,11 @@ def _quantize_ta_tb_tensor(
     ta: np.ndarray,
     tb: np.ndarray,
     w0: float,
-    M: int
+    M: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Quantize ta/tb tensors period-by-period and sensor-by-sensor.
+    Quantize ta/tb tensors period-by-period and sensor-by-sensor using core.
     """
-
     ta = np.asarray(ta, dtype=float)
     tb = np.asarray(tb, dtype=float)
 
@@ -847,7 +849,7 @@ def _quantize_ta_tb_tensor(
                 ta[p, :, s],
                 tb[p, :, s],
                 w0,
-                M
+                M,
             )
 
     return ta_q, tb_q
@@ -859,12 +861,14 @@ def _quantize_ta_tb_tensor(
 
 def _run_benchmark_fdma_branch(
     cfg: Dict[str, Any],
-    params
+    params,
 ) -> Tuple[float, np.ndarray]:
     """
     Run analytical Benchmark + FDMA branch.
-    """
 
+    This branch reports the quantization MSE implied by the Benchmark scalar
+    quantizer under the channel capacity budget.
+    """
     if not cfg.get("mode", {}).get("run_benchmark_fdma", True):
         return np.nan, np.array([], dtype=object)
 
@@ -930,15 +934,18 @@ def _run_cs_fdma_branch(
     t: np.ndarray,
     cfg: Dict[str, Any],
     params,
-    rng: np.random.Generator
+    rng: np.random.Generator,
 ) -> Tuple[float, List[int], List[float], List[int], List[int], List[int], List[float]]:
     """
     Run CS + FDMA branch.
 
     Model:
         x(t) -> uniform samples x[n] -> CS -> x_hat[n] -> sinc -> x_hat(t)
-    """
 
+    The CS channel budget is derived from FDMACore capacity. This branch does
+    not simulate AWGN on the CS measurements; it uses the Shannon capacity to
+    choose how many measurements and how many bits per measurement can be sent.
+    """
     cs_cfg = cfg.get("cs", {})
 
     basis = cs_cfg.get("basis", "dct")
@@ -959,7 +966,7 @@ def _run_cs_fdma_branch(
         x_ref=x_ref,
         t_dense=t,
         tau=params.tau,
-        fs=fs
+        fs=fs,
     )
 
     n_samples, _, S = x_samples.shape
@@ -973,23 +980,37 @@ def _run_cs_fdma_branch(
     sparsity_eff_per_sensor: List[int] = []
     quantized_fraction_per_sensor: List[float] = []
 
+    fdma_core = FDMACore(
+        S=params.S,
+        B_total=params.B,
+        P_per_sensor=params.P,
+        tau=params.tau,
+        bandwidth_allocation=params.bandwidth_allocation,
+        N0=params.N0,
+        normalize_sensor_power=False,
+        return_nonorthogonal_sum_preview=False,
+    )
+
+    capacity_per_sensor = np.asarray(
+        fdma_core.get_capacity_per_sensor(),
+        dtype=float,
+    )
+
     for s in range(S):
-        B_sensor = float(params.B_per_sensor[s])
-        snr_sensor = float(params.P / (B_sensor * params.N0))
-        capacity_sensor = B_sensor * np.log2(1.0 + snr_sensor)
-        bits_per_cycle = capacity_sensor * params.tau
+        bits_per_cycle = float(capacity_per_sensor[s] * params.tau)
 
         # ---------------------------------------------------------------------
         # Fair CS allocation:
         #
         # 1. Try to transmit all samples x[n]:
-        #       M = n_samples
+        #       n_measurements = n_samples
         #
-        # 2. Use the largest integer measurement_bits allowed by the channel:
+        # 2. Use the largest integer measurement_bits allowed:
         #       measurement_bits = floor(bits_per_cycle / n_samples)
         #
-        # 3. If not even 1 bit/sample is possible, use 1 bit and reduce M:
-        #       M = floor(bits_per_cycle)
+        # 3. If not even 1 bit/sample is possible, use 1 bit and reduce
+        #    n_measurements:
+        #       n_measurements = floor(bits_per_cycle)
         # ---------------------------------------------------------------------
         measurement_bits_full = int(np.floor(bits_per_cycle / n_samples))
 
@@ -1001,7 +1022,6 @@ def _run_cs_fdma_branch(
             n_measurements = int(np.floor(bits_per_cycle))
 
             if n_measurements < 1:
-                # Channel cannot carry even one 1-bit measurement.
                 return (
                     np.nan,
                     measurements_per_sensor,
@@ -1015,7 +1035,7 @@ def _run_cs_fdma_branch(
             n_measurements = min(n_measurements, n_samples)
 
         # K is not a channel parameter. Here we use the largest effective
-        # sparsity that the measurement system can support.
+        # sparsity the measurement system can support.
         sparsity_eff = min(n_measurements, n_samples)
 
         measurements_per_sensor.append(int(n_measurements))
@@ -1050,17 +1070,22 @@ def _run_cs_fdma_branch(
 
         acq = cs_core.acquire(
             x=x_sensor_samples,
-            t=t_samples
+            t=t_samples,
         )
 
         rec = cs_core.reconstruct(acq)
 
         x_hat_samples[:, :, s:s + 1] = rec.reconstructed_signal
 
-    x_hat_dense = _sinc_reconstruct_tensor(
+    sample_period = 1.0 / fs
+
+    x_hat_dense = sinc_reconstruct_from_samples(
         x_samples=x_hat_samples,
+        t_samples=t_samples,
         t_eval=t,
-        fs=fs
+        tau=params.tau,
+        sample_period=sample_period,
+        periodic_replicas=PERIODIC_REPLICAS,
     )
 
     mse = float(np.mean((x_ref - x_hat_dense) ** 2))
@@ -1085,12 +1110,16 @@ def _run_ppm_fdma_branch(
     t: np.ndarray,
     cfg: Dict[str, Any],
     params,
-    rng: np.random.Generator
+    rng: np.random.Generator,
 ) -> Tuple[float, List[float]]:
     """
     Run PPM + FDMA branch.
-    """
 
+    The physical AWGN is generated from N0 directly through apply_awgn(...).
+
+    This branch does not use SNR as an operational channel input and does not
+    use B_s * N0 as the generated noise power.
+    """
     ppm_cfg = cfg.get("ppm", {})
     _, _, S = x_ref.shape
     Tt = float(cfg["signal"]["Tt"])
@@ -1100,13 +1129,12 @@ def _run_ppm_fdma_branch(
 
     for s in range(S):
         B_sensor = float(params.B_per_sensor[s])
-        snr_sensor = float(params.P / (B_sensor * params.N0))
 
         timing = _resolve_ppm_timing_from_B_sensor(
             ppm_cfg=ppm_cfg,
             params=params,
             B_sensor=B_sensor,
-            Tt=Tt
+            Tt=Tt,
         )
 
         fs_msg = timing["fs_msg"]
@@ -1123,10 +1151,10 @@ def _run_ppm_fdma_branch(
             span=ppm_cfg.get("span", 12),
             eps_margin=ppm_cfg.get("eps_margin", 1e-3),
             interp_mode=ppm_cfg.get("interp_mode", "sinc"),
-            periodic_replicas=ppm_cfg.get("periodic_replicas", 10),
+            periodic_replicas=ppm_cfg.get("periodic_replicas", PERIODIC_REPLICAS),
             clip_recovered_to_unit_interval=ppm_cfg.get(
                 "clip_recovered_to_unit_interval",
-                True
+                True,
             ),
         )
 
@@ -1134,7 +1162,7 @@ def _run_ppm_fdma_branch(
 
         mod_result = ppm_core.modulate(
             x=x_sensor,
-            t=t
+            t=t,
         )
 
         tx = np.array(mod_result.tx_waveform, dtype=float, copy=True)
@@ -1142,20 +1170,28 @@ def _run_ppm_fdma_branch(
         if ppm_cfg.get("normalize_sensor_power", True):
             tx = _normalize_tensor_power(
                 tx,
-                target_power=params.P
+                target_power=params.P,
             )
 
-        rx = _add_awgn_from_snr(
-            x=tx,
-            snr_linear=snr_sensor,
-            rng=rng
+        # ---------------------------------------------------------------------
+        # Core AWGN call.
+        #
+        # N0 is used directly as the simulation-domain noise variance.
+        # No B_s * N0.
+        # No SNR-derived noise power.
+        # ---------------------------------------------------------------------
+        rx = apply_awgn(
+            signal=tx,
+            N0=params.N0,
+            complex_noise=np.iscomplexobj(tx),
+            rng=rng,
         )
 
         demod_result = ppm_core.demodulate(
             y=rx,
             t=t,
             modulation_result=mod_result,
-            reconstruct_continuous=True
+            reconstruct_continuous=True,
         )
 
         if demod_result.recovered_continuous is None:
@@ -1172,12 +1208,11 @@ def _resolve_ppm_timing_from_B_sensor(
     ppm_cfg: Dict[str, Any],
     params,
     B_sensor: float,
-    Tt: Optional[float] = None
+    Tt: Optional[float] = None,
 ) -> Dict[str, float]:
     """
     Resolve PPM timing from the per-sensor FDMA bandwidth and numerical time grid.
     """
-
     if B_sensor <= 0:
         raise ValueError("B_sensor must be positive.")
 
@@ -1220,12 +1255,12 @@ def _resolve_ppm_timing_from_B_sensor(
         fs_msg = min(
             requested_fs_msg,
             max_fs_msg_from_B_sensor,
-            max_fs_msg_from_time_grid
+            max_fs_msg_from_time_grid,
         )
     else:
         fs_msg = min(
             requested_fs_msg,
-            max_fs_msg_from_time_grid
+            max_fs_msg_from_time_grid,
         )
 
     if fs_msg <= 0:
@@ -1263,12 +1298,11 @@ def _run_rbcp_branch(
     cfg: Dict[str, Any],
     params,
     N: int,
-    M
+    M,
 ) -> float:
     """
     Run RbCP-style direct phase quantization/reconstruction.
     """
-
     if M is None:
         return np.nan
 
@@ -1284,7 +1318,7 @@ def _run_rbcp_branch(
         Tt=Tt,
         cfg=cfg,
         params=params,
-        N=N
+        N=N,
     )
 
     w0 = 2.0 * np.pi / params.tau
@@ -1293,14 +1327,14 @@ def _run_rbcp_branch(
         ta=ta,
         tb=tb,
         w0=w0,
-        M=M
+        M=M,
     )
 
     x_hat = _reconstruct_from_ta_tb(
         ta=ta_q,
         tb=tb_q,
         t=t,
-        params=params
+        params=params,
     )
 
     return float(np.mean((x_ref - x_hat) ** 2))
@@ -1318,12 +1352,11 @@ def _run_sfc_family_branch(
     N: int,
     sfc_channel: Optional[SFCChannel],
     run_native_sfc: bool,
-    run_sfc_sed: bool
+    run_sfc_sed: bool,
 ) -> Tuple[float, float, float]:
     """
     Run native SFC and SFC+SED using the same detected event matrix.
     """
-
     if sfc_channel is None:
         return np.nan, np.nan, np.nan
 
@@ -1335,7 +1368,7 @@ def _run_sfc_family_branch(
         Tt=Tt,
         cfg=cfg,
         params=params,
-        N=N
+        N=N,
     )
 
     events = phase_core.ta_tb_to_events(ta, tb)
@@ -1354,7 +1387,7 @@ def _run_sfc_family_branch(
             t=t,
             params=params,
             phase_core=phase_core,
-            period_valid_mask=None
+            period_valid_mask=None,
         )
 
     if run_sfc_sed:
@@ -1373,7 +1406,10 @@ def _run_sfc_family_branch(
             period_slots=period_slots,
             N=N,
             sensor_x_event=_build_sensor_x_event(params.S, N),
-            discard_invalid_periods=cfg.get("sed", {}).get("discard_invalid_periods", True)
+            discard_invalid_periods=cfg.get("sed", {}).get(
+                "discard_invalid_periods",
+                True,
+            ),
         )
 
         corrected_events_est, period_valid_mask = _extract_sed_outputs(sed_result)
@@ -1386,7 +1422,7 @@ def _run_sfc_family_branch(
                 t=t,
                 params=params,
                 phase_core=phase_core,
-                period_valid_mask=period_valid_mask
+                period_valid_mask=period_valid_mask,
             )
         else:
             mse_sfc_sed = np.nan
@@ -1400,14 +1436,13 @@ def _mse_from_sfc_events(
     t: np.ndarray,
     params,
     phase_core: PhaseCoefficientCore,
-    period_valid_mask: Optional[np.ndarray] = None
+    period_valid_mask: Optional[np.ndarray] = None,
 ) -> float:
     """
     Convert event estimates to ta/tb, reconstruct, and compute MSE.
 
     If period_valid_mask is provided, only valid periods enter the MSE.
     """
-
     ta_rec, tb_rec = phase_core.event_to_ta_tb(events_for_rec)
 
     ta_rec = np.real(ta_rec)
@@ -1417,7 +1452,7 @@ def _mse_from_sfc_events(
         ta=ta_rec,
         tb=tb_rec,
         t=t,
-        params=params
+        params=params,
     )
 
     if period_valid_mask is None:
@@ -1438,30 +1473,35 @@ def _mse_from_sfc_events(
 def _build_sfc_channel_for_B(
     cfg_B: Dict[str, Any],
     N: int,
-    S: int
+    S: int,
 ) -> SFCChannel:
     """
     Build SFCChannel for the current B point.
     """
-
     cfg_sfc = copy.deepcopy(cfg_B)
 
     if "channel" not in cfg_sfc:
         cfg_sfc["channel"] = {}
 
     cfg_sfc["channel"]["sensor_x_event"] = _build_sensor_x_event(S, N)
-    cfg_sfc["channel"]["collision_mode"] = cfg_sfc["channel"].get("collision_mode", "sum")
+    cfg_sfc["channel"]["collision_mode"] = cfg_sfc["channel"].get(
+        "collision_mode",
+        "sum",
+    )
     cfg_sfc["channel"]["type"] = cfg_sfc["channel"].get("type", "awgn")
-    cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get("detection_mode", "threshold")
+    cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get(
+        "detection_mode",
+        "threshold",
+    )
     cfg_sfc["channel"]["score_threshold"] = cfg_sfc["channel"].get(
         "score_threshold",
-        cfg_sfc["system"]["L"]
+        cfg_sfc["system"]["L"],
     )
 
     if "threshold" not in cfg_sfc["channel"]:
         cfg_sfc["channel"]["threshold_factor"] = cfg_sfc["channel"].get(
             "threshold_factor",
-            0.5
+            0.5,
         )
 
     if "reproducibility" not in cfg_sfc:
@@ -1469,10 +1509,11 @@ def _build_sfc_channel_for_B(
 
     if "seed" not in cfg_sfc["reproducibility"]:
         cfg_sfc["reproducibility"]["seed"] = cfg_B.get(
-            "reproducibility", {}
+            "reproducibility",
+            {},
         ).get(
             "seed",
-            cfg_B.get("monte_carlo", {}).get("seed", 12345)
+            cfg_B.get("monte_carlo", {}).get("seed", 12345),
         )
 
     return SFCChannel(cfg_sfc)
@@ -1482,7 +1523,6 @@ def _build_sensor_x_event(S: int, N: int) -> np.ndarray:
     """
     Build sensor-event association matrix.
     """
-
     num_event_ids = 2 * N * S
     sensor_x_event = np.zeros((S, num_event_ids), dtype=float)
 
@@ -1498,7 +1538,6 @@ def _extract_sed_outputs(sed_result):
     """
     Extract corrected_events_est and period_valid_mask from SED output.
     """
-
     if isinstance(sed_result, dict):
         corrected_events_est = sed_result["corrected_events_est"]
         period_valid_mask = np.asarray(sed_result["period_valid_mask"], dtype=bool)
@@ -1516,12 +1555,14 @@ def _extract_sed_outputs(sed_result):
 
 def _normalize_tensor_power(
     x: np.ndarray,
-    target_power: float
+    target_power: float,
 ) -> np.ndarray:
     """
     Normalize average power of a single-sensor tensor to target_power.
-    """
 
+    This is kept local because it is a simple waveform scaling step. Physical
+    AWGN itself is still applied through the core apply_awgn(...).
+    """
     if target_power <= 0:
         raise ValueError("target_power must be positive.")
 
@@ -1534,35 +1575,10 @@ def _normalize_tensor_power(
     return x * np.sqrt(target_power / p)
 
 
-def _add_awgn_from_snr(
-    x: np.ndarray,
-    snr_linear: float,
-    rng: np.random.Generator
-) -> np.ndarray:
-    """
-    Add AWGN using target SNR in linear scale.
-    """
-
-    if snr_linear <= 0:
-        raise ValueError("snr_linear must be positive.")
-
-    x = np.asarray(x, dtype=float)
-    p_signal = np.mean(x ** 2)
-
-    if np.isclose(p_signal, 0.0):
-        return np.array(x, copy=True)
-
-    p_noise = p_signal / snr_linear
-    noise = rng.normal(0.0, np.sqrt(p_noise), size=x.shape)
-
-    return x + noise
-
-
 def _print_metric(name: str, value: float):
     """
     Print metric with NaN-safe formatting.
     """
-
     if np.isfinite(value):
         print(f"[INFO] {name} = {value:.8e}")
     else:
@@ -1573,7 +1589,6 @@ def _safe_min_int(values) -> int:
     """
     Return minimum of integer-like values as Python int.
     """
-
     values = list(values)
 
     if len(values) == 0:
@@ -1586,7 +1601,6 @@ def _safe_max_int(values) -> int:
     """
     Return maximum of integer-like values as Python int.
     """
-
     values = list(values)
 
     if len(values) == 0:
@@ -1599,7 +1613,6 @@ def _safe_mean_float(values) -> float:
     """
     Return mean of integer-like values as float.
     """
-
     values = [int(v) for v in list(values)]
 
     if len(values) == 0:
@@ -1612,7 +1625,6 @@ def _fits_int64(value) -> bool:
     """
     Return True if value fits signed int64.
     """
-
     try:
         v = int(value)
     except Exception:
@@ -1625,7 +1637,6 @@ def _safe_table_value(value):
     """
     Return value as int if it fits int64, otherwise as string.
     """
-
     if isinstance(value, float) and np.isnan(value):
         return np.nan
 
@@ -1642,17 +1653,16 @@ def _safe_table_value(value):
 def save_dat_file(
     df: pd.DataFrame,
     path: str,
-    delimiter: str = "\t"
+    delimiter: str = "\t",
 ):
     """
     Save the dataset to a .dat-compatible tabular file.
     """
-
     df.to_csv(
         path,
         sep=delimiter,
         index=False,
-        float_format="%.8e"
+        float_format="%.8e",
     )
 
 

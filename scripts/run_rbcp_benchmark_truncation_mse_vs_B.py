@@ -1,38 +1,71 @@
 """
 scripts/run_rbcp_benchmark_truncation_mse_vs_B.py
 
-Runner for the truncation-comparison figure:
+Runner for the truncation-com config;Runner for the truncation-comparison figure:
+- runs the truncation-comparison pipeline;
+- saves the dataset;
+- saves metadata and a copy of the config;
+- generates the main MSE plot;
+- generates a diagnostics plot for M and M_RbCP.
 
-    MSE versus B for:
+This runner:
+     MSE versus B for:
     - Benchmark (free M)
     - Benchmark (power-of-two M)
     - RbCP (free M_RbCP)
     - RbCP (power-of-two M_RbCP)
 
-This runner:
-- reads the YAML config
-- runs the truncation-comparison pipeline
-- saves the .dat output
-- saves metadata and a copy of the config
-- generates the main MSE plot
-- generates a diagnostics plot for M and M_RbCP
+Output structure
+----------------
+This runner follows the project output convention:
+
+    output.base_dir / output.figure_dir / YYYYMMDD_HHMMSS/
+
+Example:
+
+    data/results/rbcp_benchmark_truncation_mse_vs_B/20260525_154501/
 
 Usage (Python Console - PyCharm)
 --------------------------------
-from scripts.run_rbcp_benchmark_truncation_mse_vs_B import run_rbcp_benchmark_truncation_mse_vs_B
+from scripts.run_rbcp_benchmark_truncation_mse_vs_B import (
+    run_rbcp_benchmark_truncation_mse_vs_B,
+)
 
 df = run_rbcp_benchmark_truncation_mse_vs_B(
     "experiments/configs/figures/rbcp_benchmark_truncation_mse_vs_B.yaml"
 )
+
+Usage (terminal)
+----------------
+python scripts/run_rbcp_benchmark_truncation_mse_vs_B.py \\
+    --config experiments/configs/figures/rbcp_benchmark_truncation_mse_vs_B.yaml
 """
+
+from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
+import platform
 import shutil
 import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+# =============================================================================
+# PATH HANDLING
+# =============================================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import yaml
 
 from sfc.pipelines.rbcp_benchmark_truncation_mse_vs_B import (
@@ -42,12 +75,40 @@ from sfc.pipelines.rbcp_benchmark_truncation_mse_vs_B import (
 
 
 # =============================================================================
+# CONSTANTS
+# =============================================================================
+
+BASE_NAME = "rbcp_benchmark_truncation_mse_vs_B"
+
+DEFAULT_CONFIG_PATH = (
+    PROJECT_ROOT
+    / "experiments"
+    / "configs"
+    / "figures"
+    / "rbcp_benchmark_truncation_mse_vs_B.yaml"
+)
+
+
+# =============================================================================
 # CONFIG
 # =============================================================================
 
 def load_config(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+    """
+    Load YAML config.
+    """
+    path = Path(path)
+
+    if not path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if cfg is None:
+        raise ValueError(f"YAML config is empty: {path}")
+
+    return cfg
 
 
 # =============================================================================
@@ -55,18 +116,25 @@ def load_config(path):
 # =============================================================================
 
 def prepare_output_dir(cfg):
+    """
+    Prepare timestamped output directory using the project convention:
+
+        output.base_dir / output.figure_dir / YYYYMMDD_HHMMSS
+    """
     output_cfg = cfg["output"]
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    output_dir = os.path.join(
-        output_cfg["base_dir"],
-        output_cfg["figure_dir"],
-        timestamp
-    )
+    base_dir = Path(output_cfg["base_dir"])
 
-    os.makedirs(output_dir, exist_ok=True)
+    if not base_dir.is_absolute():
+        base_dir = PROJECT_ROOT / base_dir
 
-    return output_dir, timestamp
+    figure_dir = output_cfg.get("figure_dir", BASE_NAME)
+
+    output_dir = base_dir / figure_dir / timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    return str(output_dir), timestamp
 
 
 # =============================================================================
@@ -74,13 +142,63 @@ def prepare_output_dir(cfg):
 # =============================================================================
 
 def get_git_commit():
+    """
+    Return current git commit hash if available.
+    """
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL
+            cwd=str(PROJECT_ROOT),
+            stderr=subprocess.DEVNULL,
         ).decode("utf-8").strip()
     except Exception:
         return "unknown"
+
+
+def get_git_dirty():
+    """
+    Return whether git working tree has uncommitted changes.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=str(PROJECT_ROOT),
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8").strip()
+        return bool(out)
+    except Exception:
+        return None
+
+
+# =============================================================================
+# JSON SAFE
+# =============================================================================
+
+def _json_safe_value(value: Any):
+    """
+    Convert numpy/pandas values into JSON-safe objects.
+    """
+    if isinstance(value, (np.integer,)):
+        return int(value)
+
+    if isinstance(value, (np.floating,)):
+        if np.isfinite(value):
+            return float(value)
+        return None
+
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    return value
 
 
 # =============================================================================
@@ -91,11 +209,11 @@ def save_data(df, cfg, output_dir, timestamp):
     """
     Save the generated dataset in the requested formats.
     """
-
     data_cfg = cfg["output"].get("formats", {}).get("data", ["dat"])
     delimiter = cfg.get("data_format", {}).get("delimiter", "\t")
 
-    base_name = f"rbcp_benchmark_truncation_mse_vs_B_{timestamp}"
+    base_name = f"{BASE_NAME}_{timestamp}"
+    generated = {}
 
     for fmt in data_cfg:
         path = os.path.join(output_dir, f"{base_name}.{fmt}")
@@ -103,104 +221,176 @@ def save_data(df, cfg, output_dir, timestamp):
         if fmt == "dat":
             save_dat_file(df, path, delimiter=delimiter)
         elif fmt == "csv":
-            df.to_csv(path, index=False)
+            df.to_csv(path, index=False, float_format="%.8e")
         else:
             raise ValueError(f"Unsupported data format: {fmt}")
+
+        generated[fmt] = path
+
+    return generated
+
+
+def save_config_copy(config_path, output_dir, timestamp):
+    """
+    Copy YAML config into output directory.
+    """
+    dst = os.path.join(output_dir, f"{BASE_NAME}_{timestamp}.yaml")
+    shutil.copyfile(config_path, dst)
+    return dst
 
 
 # =============================================================================
 # PLOTTING
 # =============================================================================
 
-def generate_plot(df, cfg, output_dir, timestamp):
+def _finite_positive(values):
+    """
+    Return finite positive values.
+    """
+    arr = np.asarray(pd.to_numeric(values, errors="coerce"), dtype=float)
+    return arr[np.isfinite(arr) & (arr > 0)]
+
+
+def _set_log_ylim(ax, series_list):
+    """
+    Set log-scale limits from finite positive data.
+    """
+    values = []
+
+    for y in series_list:
+        values.extend(_finite_positive(y))
+
+    values = np.asarray(values, dtype=float)
+
+    if values.size == 0:
+        return
+
+    ymin = np.min(values)
+    ymax = np.max(values)
+
+    ax.set_ylim(
+        max(ymin * 0.75, 1e-12),
+        ymax * 1.25,
+    )
+
+
+def generate_plot(df, cfg, output_dir, timestamp, show=False):
     """
     Generate the main truncation-comparison MSE-vs-B plot.
     """
+    if "B" not in df.columns:
+        raise ValueError("Cannot plot main figure. Missing required column: B")
 
     plot_cfg = cfg.get("plot", {})
     labels = plot_cfg.get("label_map", {})
 
-    plt.figure(figsize=(9, 5))
+    B = np.asarray(pd.to_numeric(df["B"], errors="coerce"), dtype=float)
 
-    # -------------------------------------------------------------------------
-    # Benchmark free
-    # -------------------------------------------------------------------------
-    if "mse_benchmark_free" in df.columns and df["mse_benchmark_free"].notna().any():
-        plt.plot(
-            df["B"],
-            df["mse_benchmark_free"],
-            linestyle="-",
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    method_specs = [
+        (
+            "mse_benchmark_free",
+            labels.get("benchmark_free", "Benchmark (free M)"),
+            "-",
+        ),
+        (
+            "mse_benchmark_pow2",
+            labels.get("benchmark_pow2", "Benchmark (power-of-two M)"),
+            "--",
+        ),
+        (
+            "mse_rbcp_free",
+            labels.get("rbcp_free", "RbCP (free M_RbCP)"),
+            "-.",
+        ),
+        (
+            "mse_rbcp_pow2",
+            labels.get("rbcp_pow2", "RbCP (power-of-two M_RbCP)"),
+            ":",
+        ),
+    ]
+
+    plotted = []
+
+    for col, label, linestyle in method_specs:
+        if col not in df.columns:
+            continue
+
+        y = np.asarray(pd.to_numeric(df[col], errors="coerce"), dtype=float)
+
+        if not np.any(np.isfinite(y)):
+            continue
+
+        ax.plot(
+            B,
+            y,
+            linestyle=linestyle,
             linewidth=2,
-            label=labels.get("benchmark_free", "Benchmark (free M)")
+            label=label,
+        )
+        plotted.append(y)
+
+    if not plotted:
+        raise ValueError(
+            "Cannot plot main figure. No valid MSE columns found. "
+            f"Available columns: {list(df.columns)}"
         )
 
-    # -------------------------------------------------------------------------
-    # Benchmark power-of-two
-    # -------------------------------------------------------------------------
-    if "mse_benchmark_pow2" in df.columns and df["mse_benchmark_pow2"].notna().any():
-        plt.plot(
-            df["B"],
-            df["mse_benchmark_pow2"],
-            linestyle="--",
-            linewidth=2,
-            label=labels.get("benchmark_pow2", "Benchmark (power-of-two M)")
-        )
-
-    # -------------------------------------------------------------------------
-    # RbCP free
-    # -------------------------------------------------------------------------
-    if "mse_rbcp_free" in df.columns and df["mse_rbcp_free"].notna().any():
-        plt.plot(
-            df["B"],
-            df["mse_rbcp_free"],
-            linestyle="-.",
-            linewidth=2,
-            label=labels.get("rbcp_free", "RbCP (free M_RbCP)")
-        )
-
-    # -------------------------------------------------------------------------
-    # RbCP power-of-two
-    # -------------------------------------------------------------------------
-    if "mse_rbcp_pow2" in df.columns and df["mse_rbcp_pow2"].notna().any():
-        plt.plot(
-            df["B"],
-            df["mse_rbcp_pow2"],
-            linestyle=":",
-            linewidth=2,
-            label=labels.get("rbcp_pow2", "RbCP (power-of-two M_RbCP)")
-        )
-
-    plt.xlabel(plot_cfg.get("x_axis", "B"))
-    plt.ylabel(plot_cfg.get("y_axis", "MSE"))
+    ax.set_xlabel(plot_cfg.get("x_axis", "B"))
+    ax.set_ylabel(plot_cfg.get("y_axis", "MSE"))
 
     if plot_cfg.get("x_scale", "linear") == "log":
-        plt.xscale("log")
+        ax.set_xscale("log")
 
     if plot_cfg.get("y_scale", "linear") == "log":
-        plt.yscale("log")
+        ax.set_yscale("log")
+        _set_log_ylim(ax, plotted)
 
     if plot_cfg.get("show_grid", True):
-        plt.grid(True)
+        ax.grid(True, which="both", linestyle=":", linewidth=0.7)
 
     if plot_cfg.get("legend", True):
-        plt.legend()
+        ax.legend(loc="best", frameon=True)
 
-    plt.title(cfg.get("figure", {}).get(
-        "title",
-        "Benchmark and RbCP MSE versus B: free vs power-of-two truncation"
-    ))
-
-    for fmt in cfg["output"]["formats"]["plot"]:
-        plt.savefig(
-            os.path.join(output_dir, f"rbcp_benchmark_truncation_mse_vs_B_{timestamp}.{fmt}"),
-            bbox_inches="tight"
+    ax.set_title(
+        cfg.get("figure", {}).get(
+            "title",
+            "Benchmark and RbCP MSE versus B: free vs power-of-two truncation",
         )
+    )
 
-    plt.show(block=True)
-    plt.close()
+    fig.tight_layout()
+
+    formats = cfg["output"].get("formats", {}).get(
+        "plot",
+        cfg["output"].get("formats", {}).get("figure", ["png", "pdf"]),
+    )
+
+    generated = {}
+    base_name = f"{BASE_NAME}_{timestamp}"
+
+    for fmt in formats:
+        path = os.path.join(output_dir, f"{base_name}.{fmt}")
+
+        if fmt == "png":
+            fig.savefig(path, dpi=300, bbox_inches="tight")
+        elif fmt == "pdf":
+            fig.savefig(path, bbox_inches="tight")
+        else:
+            raise ValueError(f"Unsupported figure format: {fmt}")
+
+        generated[f"main_{fmt}"] = path
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return generated
 
 
-def generate_diagnostics_plot(df, cfg, output_dir, timestamp):
+def generate_diagnostics_plot(df, cfg, output_dir, timestamp, show=False):
     """
     Plot diagnostic quantities versus B:
     - M_benchmark_free
@@ -208,124 +398,131 @@ def generate_diagnostics_plot(df, cfg, output_dir, timestamp):
     - M_rbcp_free
     - M_rbcp_pow2
     """
+    if "B" not in df.columns:
+        raise ValueError("Cannot plot diagnostics. Missing required column: B")
 
-    plt.figure(figsize=(9, 5))
+    B = np.asarray(pd.to_numeric(df["B"], errors="coerce"), dtype=float)
 
-    if "M_benchmark_free" in df.columns and df["M_benchmark_free"].notna().any():
-        plt.plot(
-            df["B"],
-            df["M_benchmark_free"],
-            linestyle="-",
-            marker="o",
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    diagnostic_specs = [
+        ("M_benchmark_free", "M_benchmark (free)", "-", "o"),
+        ("M_benchmark_pow2", "M_benchmark (power-of-two)", "--", "s"),
+        ("M_rbcp_free", "M_RbCP (free)", "-.", "^"),
+        ("M_rbcp_pow2", "M_RbCP (power-of-two)", ":", "d"),
+    ]
+
+    plotted = []
+
+    for col, label, linestyle, marker in diagnostic_specs:
+        if col not in df.columns:
+            continue
+
+        y = np.asarray(pd.to_numeric(df[col], errors="coerce"), dtype=float)
+
+        if not np.any(np.isfinite(y)):
+            continue
+
+        ax.plot(
+            B,
+            y,
+            linestyle=linestyle,
+            marker=marker,
             linewidth=2,
             markersize=4,
-            label="M_benchmark (free)"
+            label=label,
+        )
+        plotted.append(y)
+
+    if not plotted:
+        raise ValueError(
+            "Cannot plot diagnostics. No valid M columns found. "
+            f"Available columns: {list(df.columns)}"
         )
 
-    if "M_benchmark_pow2" in df.columns and df["M_benchmark_pow2"].notna().any():
-        plt.plot(
-            df["B"],
-            df["M_benchmark_pow2"],
-            linestyle="--",
-            marker="s",
-            linewidth=2,
-            markersize=4,
-            label="M_benchmark (power-of-two)"
-        )
+    ax.set_xlabel("B")
+    ax.set_ylabel("Value")
+    ax.set_yscale("log")
+    _set_log_ylim(ax, plotted)
+    ax.grid(True, which="both", linestyle=":", linewidth=0.7)
+    ax.legend(loc="best", frameon=True)
+    ax.set_title("Diagnostic quantities versus B")
 
-    if "M_rbcp_free" in df.columns and df["M_rbcp_free"].notna().any():
-        plt.plot(
-            df["B"],
-            df["M_rbcp_free"],
-            linestyle="-.",
-            marker="^",
-            linewidth=2,
-            markersize=4,
-            label="M_RbCP (free)"
-        )
+    fig.tight_layout()
 
-    if "M_rbcp_pow2" in df.columns and df["M_rbcp_pow2"].notna().any():
-        plt.plot(
-            df["B"],
-            df["M_rbcp_pow2"],
-            linestyle=":",
-            marker="d",
-            linewidth=2,
-            markersize=4,
-            label="M_RbCP (power-of-two)"
-        )
+    formats = cfg["output"].get("formats", {}).get(
+        "plot",
+        cfg["output"].get("formats", {}).get("figure", ["png", "pdf"]),
+    )
 
-    plt.xlabel("B")
-    plt.ylabel("Value")
-    plt.yscale("log")
-    plt.grid(True)
-    plt.legend()
-    plt.title("Diagnostic quantities versus B")
+    generated = {}
+    base_name = f"{BASE_NAME}_{timestamp}_diagnostics"
 
-    for fmt in cfg["output"]["formats"]["plot"]:
-        plt.savefig(
-            os.path.join(
-                output_dir,
-                f"rbcp_benchmark_truncation_mse_vs_B_diagnostics_{timestamp}.{fmt}"
-            ),
-            bbox_inches="tight"
-        )
+    for fmt in formats:
+        path = os.path.join(output_dir, f"{base_name}.{fmt}")
 
-    plt.show(block=True)
-    plt.close()
+        if fmt == "png":
+            fig.savefig(path, dpi=300, bbox_inches="tight")
+        elif fmt == "pdf":
+            fig.savefig(path, bbox_inches="tight")
+        else:
+            raise ValueError(f"Unsupported figure format: {fmt}")
+
+        generated[f"diagnostics_{fmt}"] = path
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return generated
 
 
 # =============================================================================
 # METADATA
 # =============================================================================
 
-def save_metadata(cfg, df, output_dir, timestamp, config_path):
+def save_metadata(cfg, df, output_dir, timestamp, config_path, generated_files):
     """
     Save metadata and a small summary of the generated dataset.
     """
+    _ = cfg
 
-    meta_path = os.path.join(output_dir, f"metadata_{timestamp}.txt")
+    metadata_path = os.path.join(
+        output_dir,
+        f"{BASE_NAME}_{timestamp}_metadata.json",
+    )
 
-    with open(meta_path, "w") as f:
-        f.write("Experiment: rbcp_benchmark_truncation_mse_vs_B\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write(f"Git commit: {get_git_commit()}\n")
-        f.write(f"Config file: {config_path}\n\n")
+    metadata = {
+        "created_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "project_root": str(PROJECT_ROOT),
+        "config_path": str(config_path),
+        "output_dir": str(output_dir),
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "git_commit": get_git_commit(),
+        "git_dirty": get_git_dirty(),
+        "columns": list(df.columns),
+        "num_rows": int(len(df)),
+        "generated_files": generated_files,
+        "summary": {},
+    }
 
-        f.write("--- DATA SUMMARY ---\n")
-        f.write(f"Rows: {len(df)}\n")
-        f.write(f"Columns: {list(df.columns)}\n\n")
+    for col in df.columns:
+        series = pd.to_numeric(df[col], errors="coerce")
+        finite = series[np.isfinite(series)]
 
-        if "B" in df.columns:
-            f.write(f"B min: {df['B'].min()}\n")
-            f.write(f"B max: {df['B'].max()}\n\n")
+        if finite.size > 0:
+            metadata["summary"][col] = {
+                "min": _json_safe_value(finite.min()),
+                "max": _json_safe_value(finite.max()),
+                "mean": _json_safe_value(finite.mean()),
+            }
 
-        if "P_derived" in df.columns:
-            f.write(f"P_derived min: {df['P_derived'].min()}\n")
-            f.write(f"P_derived max: {df['P_derived'].max()}\n\n")
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
 
-        if "M_benchmark_free" in df.columns:
-            f.write(f"M_benchmark_free min: {df['M_benchmark_free'].min()}\n")
-            f.write(f"M_benchmark_free max: {df['M_benchmark_free'].max()}\n\n")
-
-        if "M_benchmark_pow2" in df.columns:
-            f.write(f"M_benchmark_pow2 min: {df['M_benchmark_pow2'].min()}\n")
-            f.write(f"M_benchmark_pow2 max: {df['M_benchmark_pow2'].max()}\n\n")
-
-        if "M_rbcp_free" in df.columns:
-            f.write(f"M_rbcp_free min: {df['M_rbcp_free'].min()}\n")
-            f.write(f"M_rbcp_free max: {df['M_rbcp_free'].max()}\n\n")
-
-        if "M_rbcp_pow2" in df.columns:
-            f.write(f"M_rbcp_pow2 min: {df['M_rbcp_pow2'].min()}\n")
-            f.write(f"M_rbcp_pow2 max: {df['M_rbcp_pow2'].max()}\n\n")
-
-        f.write("--- CONFIG SNAPSHOT ---\n\n")
-        f.write(yaml.dump(cfg, sort_keys=False))
-
-
-def copy_config_file(config_path, output_dir):
-    shutil.copy(config_path, os.path.join(output_dir, "config_used.yaml"))
+    return metadata_path
 
 
 # =============================================================================
@@ -338,7 +535,7 @@ def run_rbcp_benchmark_truncation_mse_vs_B(config_path):
 
     Parameters
     ----------
-    config_path : str
+    config_path : str or pathlib.Path
         Path to the YAML config.
 
     Returns
@@ -346,14 +543,19 @@ def run_rbcp_benchmark_truncation_mse_vs_B(config_path):
     pandas.DataFrame
         Generated dataset.
     """
+    config_path = Path(config_path)
 
     cfg = load_config(config_path)
 
     output_dir, timestamp = prepare_output_dir(cfg)
 
     print("[INFO] Output directory:", output_dir)
+    print("[INFO] Timestamp:", timestamp)
     print("[INFO] Running rbcp_benchmark_truncation_mse_vs_B...\n")
-    print(f"[INFO] Figure title: {cfg.get('figure', {}).get('title', 'rbcp_benchmark_truncation_mse_vs_B')}")
+    print(
+        f"[INFO] Figure title: "
+        f"{cfg.get('figure', {}).get('title', 'rbcp_benchmark_truncation_mse_vs_B')}"
+    )
     print(f"[INFO] Config path: {config_path}")
 
     # -------------------------------------------------------------------------
@@ -362,33 +564,77 @@ def run_rbcp_benchmark_truncation_mse_vs_B(config_path):
     df = generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg)
 
     print("\n[INFO] Generated dataframe preview:")
-    print(df.head())
+    print(df.head().to_string(index=False))
+
+    print("\n[INFO] Columns:")
+    print(list(df.columns))
+
+    generated_files = {}
 
     # -------------------------------------------------------------------------
     # SAVE DATA
     # -------------------------------------------------------------------------
     if cfg["output"].get("save_dat", True):
-        save_data(df, cfg, output_dir, timestamp)
+        data_files = save_data(df, cfg, output_dir, timestamp)
+        generated_files.update(data_files)
         print("[INFO] Data saved")
+
+    # -------------------------------------------------------------------------
+    # CONFIG COPY
+    # -------------------------------------------------------------------------
+    if cfg["output"].get("save_config_copy", True):
+        copied_config = save_config_copy(config_path, output_dir, timestamp)
+        generated_files["config"] = copied_config
+        print("[INFO] Config copy saved")
 
     # -------------------------------------------------------------------------
     # PLOTS
     # -------------------------------------------------------------------------
     if cfg["output"].get("save_plot", True):
-        generate_plot(df, cfg, output_dir, timestamp)
+        main_figs = generate_plot(
+            df=df,
+            cfg=cfg,
+            output_dir=output_dir,
+            timestamp=timestamp,
+            show=False,
+        )
+        generated_files.update(main_figs)
         print("[INFO] Main plot saved")
 
-        generate_diagnostics_plot(df, cfg, output_dir, timestamp)
+        diagnostic_figs = generate_diagnostics_plot(
+            df=df,
+            cfg=cfg,
+            output_dir=output_dir,
+            timestamp=timestamp,
+            show=False,
+        )
+        generated_files.update(diagnostic_figs)
         print("[INFO] Diagnostics plot saved")
 
     # -------------------------------------------------------------------------
     # METADATA
     # -------------------------------------------------------------------------
     if cfg["output"].get("save_metadata", True):
-        save_metadata(cfg, df, output_dir, timestamp, config_path)
+        metadata_filename = os.path.join(
+            output_dir,
+            f"{BASE_NAME}_{timestamp}_metadata.json",
+        )
+        generated_files["metadata"] = metadata_filename
 
-    if cfg["output"].get("save_config_copy", True):
-        copy_config_file(config_path, output_dir)
+        metadata_path = save_metadata(
+            cfg=cfg,
+            df=df,
+            output_dir=output_dir,
+            timestamp=timestamp,
+            config_path=config_path,
+            generated_files=generated_files,
+        )
+        generated_files["metadata"] = metadata_path
+        print("[INFO] Metadata saved")
+
+    print("\n[INFO] Generated files:")
+    for key, path in generated_files.items():
+        print(f"       {key}: {path}")
 
     print("\n[INFO] Done ✅")
 
@@ -400,8 +646,17 @@ def run_rbcp_benchmark_truncation_mse_vs_B(config_path):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
+    parser = argparse.ArgumentParser(
+        description="Run RbCP/Benchmark truncation MSE-vs-B experiment."
+    )
+
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=str(DEFAULT_CONFIG_PATH),
+        help="Path to YAML config.",
+    )
+
     args = parser.parse_args()
 
     run_rbcp_benchmark_truncation_mse_vs_B(args.config)
@@ -409,6 +664,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 # from scripts.run_rbcp_benchmark_truncation_mse_vs_B import (
 #     run_rbcp_benchmark_truncation_mse_vs_B,

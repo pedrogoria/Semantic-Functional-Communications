@@ -1,0 +1,158 @@
+{
+  "created_at": "2026-06-08T13:44:50Z",
+  "project_root": "C:\\Users\\pedro.goria.silva@lut.fi\\PycharmProjects\\Semantic-Functional-Communications",
+  "config_path": null,
+  "output_dir": "tests/results\\debug_sod_full_system\\20260608_164446",
+  "git_commit": "2bbeb4986b2f053f6bfbedd405cf56deb0331100",
+  "signal": {
+    "distribution": "uniform",
+    "W": 10.0,
+    "tau": 1.0,
+    "Tt": 0.001,
+    "peak_to_peak": 2.0,
+    "dc_values": [
+      -0.00564432294313609
+    ],
+    "p2p_scales": [
+      7.425415523142449
+    ]
+  },
+  "physical_model": {
+    "S": 1,
+    "B_total": 2500.0,
+    "P": 1.0,
+    "N0": 0.01,
+    "bandwidth_allocation": [
+      1.0
+    ],
+    "B_per_sensor": [
+      2500.0
+    ],
+    "SNR_per_sensor": [
+      0.04
+    ],
+    "SNR_per_sensor_dB": [
+      -13.979400086720375
+    ],
+    "capacity_per_sensor": [
+      141.45882091591878
+    ]
+  },
+  "benchmark_budget": {
+    "sampling_rate": 10.0,
+    "effective_rate_factor": 1.0,
+    "effective_sampling_rate": 10.0,
+    "M_benchmark_per_sensor": [
+      18127
+    ]
+  },
+  "sod": {
+    "threshold": 0.1,
+    "transmit_event_times": true,
+    "reconstruction_mode": "zero_order_hold",
+    "initial_event": true,
+    "time_bins": 208,
+    "amplitude_bins": [
+      18127
+    ],
+    "selected_sensor": 0,
+    "event_count": 71,
+    "payload_bits": 1551.0867517359545,
+    "available_bits": 141.45882091591878,
+    "payload_feasible": false,
+    "bits_per_event": {
+      "amplitude_bits": 14.1458525598301,
+      "time_bits": 7.700439718141092,
+      "total_bits": 21.84629227797119
+    },
+    "amplitude_quantization_metadata": {
+      "enabled": true,
+      "mode": "trusted_quantize",
+      "function": "sfc.core.quantization.quantize",
+      "range_mode": "per_signal",
+      "clip": true,
+      "poss": 0.5,
+      "bins_per_sensor": [
+        18127
+      ],
+      "per_signal": {
+        "period_0_sensor_0": {
+          "enabled": true,
+          "bins": 18127,
+          "mode": "trusted_quantize",
+          "function": "sfc.core.quantization.quantize",
+          "value_min": -0.9633600321194011,
+          "value_max": 1.0366399678805989,
+          "delta": 0.00011033265294864014,
+          "poss": 0.5,
+          "saturated_low": 0,
+          "saturated_high": 0,
+          "degenerate": false
+        }
+      }
+    },
+    "time_quantization_metadata": {
+      "enabled": true,
+      "mode": "trusted_quantize",
+      "function": "sfc.core.quantization.quantize",
+      "range_mode": "period",
+      "clip": true,
+      "poss": 0.5,
+      "bins_per_sensor": [
+        208
+      ],
+      "per_signal": {
+        "period_0_sensor_0": {
+          "enabled": true,
+          "bins": 208,
+          "mode": "trusted_quantize",
+          "function": "sfc.core.quantization.quantize",
+          "value_min": 0.0,
+          "value_max": 1.0,
+          "delta": 0.004807692307692308,
+          "poss": 0.5,
+          "saturated_low": 0,
+          "saturated_high": 0,
+          "degenerate": false
+        }
+      },
+      "time_range": {
+        "value_min": 0.0,
+        "value_max": 1.0
+      }
+    },
+    "payload_metadata": {
+      "transmit_event_times": true,
+      "amplitude_bins_per_sensor": [
+        18127
+      ],
+      "time_bins_per_sensor": [
+        208
+      ],
+      "bits_per_event": {
+        "period_0_sensor_0": {
+          "amplitude_bits": 14.1458525598301,
+          "time_bits": 7.700439718141092,
+          "total_bits": 21.84629227797119
+        }
+      },
+      "total_payload_bits": 1551.0867517359545
+    }
+  },
+  "metrics": {
+    "mse_sod": 0.003478246761958399,
+    "mse_sinc": 0.0023686712690105132
+  },
+  "generated_files": {
+    "signal_events_png": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_signal_events_20260608_164446.png",
+    "signal_events_pdf": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_signal_events_20260608_164446.pdf",
+    "reconstruction_png": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_reconstruction_20260608_164446.png",
+    "reconstruction_pdf": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_reconstruction_20260608_164446.pdf",
+    "error_png": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_error_20260608_164446.png",
+    "error_pdf": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_error_20260608_164446.pdf",
+    "channel_budget_png": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_channel_budget_20260608_164446.png",
+    "channel_budget_pdf": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_channel_budget_20260608_164446.pdf",
+    "arrays_npz": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_arrays_20260608_164446.npz",
+    "config": "tests/results\\debug_sod_full_system\\20260608_164446\\sod_full_system_debug_20260608_164446.yaml"
+  }
+}

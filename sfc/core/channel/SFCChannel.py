@@ -79,7 +79,7 @@ Physical-power convention
 -------------------------
 This class does not directly scale power and does not add noise.
 
-Physical scaling is handled by:
+Physical scaling and AWGN are handled by:
 
     sfc/core/channel/physical_channel.py
 
@@ -90,6 +90,22 @@ using the matched-filter/resource-output SFC convention:
 where:
 
     E_chip = P tau / (2 N L)
+
+and the simulated noise uses the resolved noise parameter N0 directly at the
+matched-filter/resource-output level:
+
+    n ~ CN(0, N0)
+
+This orchestrator must not generate noise from:
+
+    B * N0
+
+or:
+
+    B_s * N0
+
+and must not use SNR as an operational noise parameter. SNR remains a diagnostic
+and channel-capacity quantity handled by system/theory helpers.
 
 The collision module returns a dimensionless resource-time superposition frame.
 The physical channel maps that dimensionless frame to the physical
@@ -125,15 +141,19 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-from sfc.core.channel.mapping import EventMapper
 from sfc.core.channel.collision import CollisionModel
-from sfc.core.channel.physical_channel import PhysicalChannel
 from sfc.core.channel.detection import MapDetector
+from sfc.core.channel.mapping import EventMapper
+from sfc.core.channel.physical_channel import PhysicalChannel
 
 
 class SFCChannel:
     """
     SFC channel orchestrator.
+
+    This class coordinates mapping, collision/superposition, physical channel,
+    detection, and inverse mapping. It intentionally delegates physical scaling
+    and AWGN generation to PhysicalChannel.
     """
 
     def __init__(self, cfg: Dict[str, Any]):
@@ -145,7 +165,6 @@ class SFCChannel:
         cfg : dict
             Configuration dictionary.
         """
-
         self.cfg = cfg
 
         # ------------------------------------------------------------------
@@ -176,7 +195,7 @@ class SFCChannel:
         # Expected shape when provided:
         #     (S, num_event_ids)
         #
-        # In the fair-methods pipeline, this is usually:
+        # In fair-methods pipelines, this is usually:
         #     sensor s owns event IDs [2sN, ..., 2(s+1)N - 1]
         # ------------------------------------------------------------------
         self.sensor_x_event = cfg.get("channel", {}).get("sensor_x_event", [])
@@ -190,6 +209,7 @@ class SFCChannel:
 
         # ------------------------------------------------------------------
         # Theorem-consistent row-resource groups.
+        #
         # These groups are fixed for the lifetime of the SFCChannel object.
         # ------------------------------------------------------------------
         self.row_resource_groups = self._build_row_resource_groups()
@@ -199,14 +219,23 @@ class SFCChannel:
 
         # ------------------------------------------------------------------
         # Channel submodules.
+        #
+        # CollisionModel:
+        #     dimensionless temporal/resource superposition.
+        #
+        # PhysicalChannel:
+        #     SFC matched-filter/resource-output scaling and AWGN.
+        #
+        # MapDetector:
+        #     detection of transmitted maps from physical channel output.
         # ------------------------------------------------------------------
         self.collision = CollisionModel(cfg)
         self.channel = PhysicalChannel(cfg)
         self.detector = MapDetector(cfg)
 
-    # ======================================================================
+    # =========================================================================
     # MAIN CALL
-    # ======================================================================
+    # =========================================================================
 
     def __call__(self, events, return_intermediates: bool = False):
         """
@@ -242,11 +271,12 @@ class SFCChannel:
                     "diagnostics": diagnostics,
                 }
         """
-
         events = np.asarray(events, dtype=float)
 
-        assert len(events.shape) == 2, \
-            "events must have shape (event_slots_total, num_event_ids)"
+        if events.ndim != 2:
+            raise ValueError(
+                "events must have shape (event_slots_total, num_event_ids)."
+            )
 
         self._initialize_if_needed(events)
 
@@ -262,6 +292,11 @@ class SFCChannel:
 
         # ------------------------------------------------------------------
         # PHYSICAL CHANNEL
+        #
+        # PhysicalChannel is the only block responsible for:
+        #   - SFC signal-level scaling;
+        #   - AWGN generation;
+        #   - N0-based physical noise convention.
         # ------------------------------------------------------------------
         y = self.channel.transmit(superposed)
 
@@ -291,20 +326,23 @@ class SFCChannel:
 
         return events_est
 
-    # ======================================================================
+    # =========================================================================
     # LAZY INITIALIZATION
-    # ======================================================================
+    # =========================================================================
 
     def _initialize_if_needed(self, events):
         """
         Initialize fixed codebook and mapper only once.
         """
-
         if self.maps_library is not None and self.mapper is not None:
             return
 
-        assert len(events.shape) == 2, \
-            "events must have shape (event_slots_total, num_event_ids)"
+        events = np.asarray(events, dtype=float)
+
+        if events.ndim != 2:
+            raise ValueError(
+                "events must have shape (event_slots_total, num_event_ids)."
+            )
 
         self.num_event_ids = int(events.shape[1])
 
@@ -349,9 +387,8 @@ class SFCChannel:
 
         and therefore a sensor_x_event matrix must be provided explicitly.
         """
-
         if num_event_ids != self.S:
-            raise AssertionError(
+            raise ValueError(
                 "error in sensor_x_event map: No sensor_x_event map is set and "
                 "a default identity(S) is invalid because num_event_ids != S. "
                 "Please provide cfg['channel']['sensor_x_event'] explicitly."
@@ -359,9 +396,9 @@ class SFCChannel:
 
         return np.identity(self.S)
 
-    # ======================================================================
+    # =========================================================================
     # THEOREM-CONSISTENT MAP GENERATION LOGIC
-    # ======================================================================
+    # =========================================================================
 
     def _build_row_resource_groups(self) -> List[List[int]]:
         """
@@ -382,7 +419,6 @@ class SFCChannel:
 
             R=14, L=4 -> sizes [4,4,3,3]
         """
-
         base_size = self.R // self.L
         remainder = self.R % self.L
 
@@ -417,7 +453,6 @@ class SFCChannel:
 
             product_l |D_l|
         """
-
         return int(math.prod(len(group) for group in row_resource_groups))
 
     def _generate_maps(self, num_event_ids):
@@ -432,13 +467,12 @@ class SFCChannel:
         - sample num_event_ids unique maps uniformly without replacement;
         - keep the selected assignment fixed for the life of the channel object.
         """
-
         codebook = self._build_valid_map_codebook()
 
         total_valid_maps = int(codebook.shape[0])
 
         if num_event_ids > total_valid_maps:
-            raise AssertionError(
+            raise ValueError(
                 "Not enough unique theorem-valid SFC maps available. "
                 f"Requested num_event_ids={num_event_ids}, but only "
                 f"{total_valid_maps} theorem-valid maps exist for "
@@ -465,7 +499,7 @@ class SFCChannel:
         invalid_or_duplicates = self._validate_maps(maps)
 
         if len(invalid_or_duplicates) > 0:
-            raise AssertionError(
+            raise ValueError(
                 "Generated maps are invalid, duplicated, or violate "
                 f"the row-resource partition: {invalid_or_duplicates}"
             )
@@ -498,7 +532,6 @@ class SFCChannel:
 
         This replaces the old R^L construction.
         """
-
         total_valid_maps = self.total_theorem_valid_maps
 
         row_choices_iterator = itertools.product(*self.row_resource_groups)
@@ -514,9 +547,9 @@ class SFCChannel:
 
         return codebook
 
-    # ======================================================================
+    # =========================================================================
     # MAP VALIDATION
-    # ======================================================================
+    # =========================================================================
 
     def _validate_maps(self, maps):
         """
@@ -541,10 +574,9 @@ class SFCChannel:
         list
             List of validation problems.
         """
-
         maps = np.asarray(maps)
 
-        if len(maps.shape) != 3:
+        if maps.ndim != 3:
             raise ValueError("maps must have shape (num_maps, L, R).")
 
         if maps.shape[1] != self.L or maps.shape[2] != self.R:
@@ -627,18 +659,16 @@ class SFCChannel:
         Historically this method checked only one-hot validity and duplicate
         maps. It now delegates to the theorem-consistent validator.
         """
-
         return self._validate_maps(maps)
 
-    # ======================================================================
+    # =========================================================================
     # DIAGNOSTICS
-    # ======================================================================
+    # =========================================================================
 
     def diagnostics(self):
         """
         Return diagnostics from the orchestrator and submodules.
         """
-
         diagnostics = {
             "S": self.S,
             "R": self.R,
@@ -671,3 +701,8 @@ class SFCChannel:
             diagnostics["detector"] = self.detector.diagnostics()
 
         return diagnostics
+
+
+__all__ = [
+    "SFCChannel",
+]

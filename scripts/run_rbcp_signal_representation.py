@@ -10,12 +10,13 @@ This figure:
 - propagates the representative signal through the SFC stack
 - plots:
     - band-limited signal
+    - zero-mean signal
     - RbCP reconstruction
     - SFC reconstruction
     - Nyquist benchmark reconstruction
 
-Usage (Python Console - PyCharm):
---------------------------------
+Usage (Python Console)
+---------------------
 from scripts.run_rbcp_signal_representation import run_rbcp_signal_representation
 
 run_rbcp_signal_representation(
@@ -23,18 +24,50 @@ run_rbcp_signal_representation(
 )
 """
 
+from __future__ import annotations
+
 import argparse
-import datetime
-import os
+import datetime as _dt
+import json
+import platform
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 import matplotlib.pyplot as plt
-import yaml
 import numpy as np
+import yaml
+
+# =============================================================================
+# PATH HANDLING
+# =============================================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# =============================================================================
+# PIPELINE
+# =============================================================================
 
 from sfc.pipelines.rbcp_signal_representation import (
     generate_rbcp_signal_representation_data,
+)
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+BASE_NAME = "rbcp_signal_representation"
+
+DEFAULT_CONFIG_PATH = (
+        PROJECT_ROOT
+        / "experiments"
+        / "configs"
+        / "figures"
+        / "rbcp_signal_representation.yaml"
 )
 
 
@@ -43,8 +76,18 @@ from sfc.pipelines.rbcp_signal_representation import (
 # =============================================================================
 
 def load_config(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+    path = Path(path)
+
+    if not path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    with path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if cfg is None:
+        raise ValueError(f"Empty YAML config: {path}")
+
+    return cfg
 
 
 # =============================================================================
@@ -53,15 +96,17 @@ def load_config(path):
 
 def prepare_output_dir(cfg):
     output_cfg = cfg["output"]
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    output_dir = os.path.join(
-        output_cfg["base_dir"],
-        output_cfg["figure_dir"],
-        timestamp
-    )
+    timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    os.makedirs(output_dir, exist_ok=True)
+    base_dir = Path(output_cfg["base_dir"])
+    if not base_dir.is_absolute():
+        base_dir = PROJECT_ROOT / base_dir
+
+    figure_dir = output_cfg.get("figure_dir", BASE_NAME)
+
+    output_dir = base_dir / figure_dir / timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     return output_dir, timestamp
 
@@ -74,8 +119,10 @@ def get_git_commit():
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
-            stderr=subprocess.DEVNULL
-        ).decode("utf-8").strip()
+            cwd=str(PROJECT_ROOT),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
     except Exception:
         return "unknown"
 
@@ -84,16 +131,13 @@ def get_git_commit():
 # PLOTTING
 # =============================================================================
 
-def generate_plot(data, cfg, output_dir, timestamp):
-    """
-    Plot:
-    - filtered signal
-    - zero-mean signal
-    - RbCP reconstruction
-    - SFC reconstruction
-    - Nyquist benchmark reconstruction
+def _figure_formats(cfg):
+    return cfg["output"].get("formats", {}).get("plot", ["png", "pdf"])
 
-    and a second error plot.
+
+def generate_plot(data, cfg, output_dir, timestamp, show=False):
+    """
+    Generate main plot + error plot.
     """
 
     t = data["t"]
@@ -103,137 +147,130 @@ def generate_plot(data, cfg, output_dir, timestamp):
     x_sfc = data["x_sfc"]
     x_benchmark = data["x_benchmark"]
 
-    plot_cfg = cfg["plot"]
+    plot_cfg = cfg.get("plot", {})
+    styles = plot_cfg.get("styles", {})
+    labels = plot_cfg.get("labels", {})
 
     # -------------------------------------------------------------------------
-    # MAIN PLOT
+    # MAIN SIGNAL PLOT
     # -------------------------------------------------------------------------
-    plt.figure(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(10, 5))
 
-    plt.plot(
-        t, x_filtered,
-        plot_cfg["styles"]["filtered"],
-        label=plot_cfg["labels"]["filtered"],
-        linewidth=2
-    )
+    ax.plot(t, x_filtered, styles.get("filtered", "-"), label=labels.get("filtered", "Filtered"), linewidth=2)
+    ax.plot(t, x_zero_mean, styles.get("zero_mean", "--"), label=labels.get("zero_mean", "Zero-mean"), linewidth=2)
+    ax.plot(t, x_rbcp, styles.get("rbcp", "-"), label=labels.get("rbcp", "RbCP"), linewidth=2)
+    ax.plot(t, x_sfc, styles.get("sfc", "-."), label=labels.get("sfc", "SFC"), linewidth=2)
+    ax.plot(t, x_benchmark, styles.get("benchmark", ":"), label=labels.get("benchmark", "Benchmark"), linewidth=2)
 
-    plt.plot(
-        t, x_zero_mean,
-        plot_cfg["styles"]["filtered"],
-        label=plot_cfg["labels"]["zero_mean"],
-        linewidth=2
-    )
+    ax.set_xlabel(r"$t$")
+    ax.set_ylabel("Amplitude")
 
-    plt.plot(
-        t, x_rbcp,
-        plot_cfg["styles"]["rbcp"],
-        label=plot_cfg["labels"]["rbcp"],
-        linewidth=2
-    )
+    if plot_cfg.get("show_grid", True):
+        ax.grid(True, linestyle=":", linewidth=0.7)
 
-    plt.plot(
-        t, x_sfc,
-        plot_cfg["styles"].get("sfc", "-."),
-        label=plot_cfg["labels"].get("sfc", "SFC reconstruction"),
-        linewidth=2
-    )
+    if plot_cfg.get("legend", True):
+        ax.legend()
 
-    plt.plot(
-        t, x_benchmark,
-        plot_cfg["styles"]["benchmark"],
-        label=plot_cfg["labels"]["benchmark"],
-        linewidth=2
-    )
+    ax.set_title("RbCP vs SFC vs Nyquist Benchmark")
 
-    plt.xlabel(r"$t$")
-    plt.ylabel("Amplitude")
+    fig.tight_layout()
 
-    if plot_cfg.get("show_grid", False):
-        plt.grid(True)
+    generated = {}
 
-    if plot_cfg.get("legend", False):
-        plt.legend()
+    for fmt in _figure_formats(cfg):
+        path = output_dir / f"{BASE_NAME}_{timestamp}.{fmt}"
+        fig.savefig(path, bbox_inches="tight", dpi=300 if fmt == "png" else None)
+        generated[f"signal_{fmt}"] = str(path)
 
-    plt.title("RbCP vs SFC vs Nyquist Benchmark")
-
-    for fmt in cfg["output"]["formats"]["plot"]:
-        plt.savefig(
-            os.path.join(output_dir, f"rbcp_representation_{timestamp}.{fmt}"),
-            bbox_inches="tight"
-        )
-
-    plt.show(block=True)
-    plt.close()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
     # -------------------------------------------------------------------------
     # ERROR PLOT
     # -------------------------------------------------------------------------
-    plt.figure(figsize=(10, 4))
-
     err_rbcp = x_zero_mean - x_rbcp
     err_sfc = x_zero_mean - x_sfc
     err_bench = x_zero_mean - x_benchmark
 
-    plt.plot(t, err_rbcp, label="RbCP error", linewidth=2)
-    plt.plot(t, err_sfc, label="SFC error", linewidth=2)
-    plt.plot(t, err_bench, label="Benchmark error", linewidth=2)
+    fig2, ax2 = plt.subplots(figsize=(10, 4))
 
-    plt.xlabel(r"$t$")
-    plt.ylabel("Error")
+    ax2.plot(t, err_rbcp, label="RbCP error", linewidth=2)
+    ax2.plot(t, err_sfc, label="SFC error", linewidth=2)
+    ax2.plot(t, err_bench, label="Benchmark error", linewidth=2)
 
-    if plot_cfg.get("show_grid", False):
-        plt.grid(True)
+    ax2.set_xlabel(r"$t$")
+    ax2.set_ylabel("Error")
 
-    plt.legend()
-    plt.title("Reconstruction Error")
+    if plot_cfg.get("show_grid", True):
+        ax2.grid(True, linestyle=":", linewidth=0.7)
 
-    for fmt in cfg["output"]["formats"]["plot"]:
-        plt.savefig(
-            os.path.join(output_dir, f"rbcp_error_{timestamp}.{fmt}"),
-            bbox_inches="tight"
-        )
+    ax2.legend()
+    ax2.set_title("Reconstruction Error")
 
-    plt.show(block=True)
-    plt.close()
+    fig2.tight_layout()
+
+    for fmt in _figure_formats(cfg):
+        path = output_dir / f"{BASE_NAME}_{timestamp}_error.{fmt}"
+        fig2.savefig(path, bbox_inches="tight", dpi=300 if fmt == "png" else None)
+        generated[f"error_{fmt}"] = str(path)
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig2)
 
     # -------------------------------------------------------------------------
-    # MSE PRINT
+    # PRINT MSE
     # -------------------------------------------------------------------------
-    mse_rbcp = np.mean(err_rbcp**2)
-    mse_sfc = np.mean(err_sfc**2)
-    mse_bench = np.mean(err_bench**2)
-
     print("\n[RESULTS]")
-    print(f"MSE RbCP       = {mse_rbcp:.6e}")
-    print(f"MSE SFC        = {mse_sfc:.6e}")
-    print(f"MSE Benchmark  = {mse_bench:.6e}")
+    print(f"MSE RbCP      = {np.mean(err_rbcp ** 2):.6e}")
+    print(f"MSE SFC       = {np.mean(err_sfc ** 2):.6e}")
+    print(f"MSE Benchmark = {np.mean(err_bench ** 2):.6e}")
+
+    return generated
 
 
 # =============================================================================
 # METADATA
 # =============================================================================
 
-def save_metadata(cfg, output_dir, timestamp, config_path):
-    meta_path = os.path.join(output_dir, f"metadata_{timestamp}.txt")
+def save_metadata(cfg, output_dir, timestamp, config_path, generated_files):
+    meta_path = output_dir / f"{BASE_NAME}_{timestamp}_metadata.json"
 
-    with open(meta_path, "w") as f:
-        f.write("Experiment: rbcp_signal_representation\n")
-        f.write(f"Timestamp: {timestamp}\n")
-        f.write(f"Git commit: {get_git_commit()}\n")
-        f.write(f"Config file: {config_path}\n\n")
-        f.write("--- CONFIG SNAPSHOT ---\n\n")
-        f.write(yaml.dump(cfg, sort_keys=False))
+    metadata = {
+        "created_at": _dt.datetime.utcnow().isoformat() + "Z",
+        "config_path": str(config_path),
+        "output_dir": str(output_dir),
+        "git_commit": get_git_commit(),
+        "platform": platform.platform(),
+        "generated_files": generated_files,
+        "config": cfg,
+    }
+
+    with meta_path.open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    return str(meta_path)
 
 
-def copy_config_file(config_path, output_dir):
-    shutil.copy(config_path, os.path.join(output_dir, "config_used.yaml"))
+def copy_config_file(config_path, output_dir, timestamp):
+    dst = output_dir / f"{BASE_NAME}_{timestamp}.yaml"
+    shutil.copy(config_path, dst)
+    return str(dst)
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
 
-def run_rbcp_signal_representation(config_path):
+def run_rbcp_signal_representation(
+        config_path=DEFAULT_CONFIG_PATH,
+        show_plots=False,
+):
+    config_path = Path(config_path)
+
     cfg = load_config(config_path)
 
     output_dir, timestamp = prepare_output_dir(cfg)
@@ -241,15 +278,45 @@ def run_rbcp_signal_representation(config_path):
     print("[INFO] Output directory:", output_dir)
     print("[INFO] Starting simulation...\n")
 
+    # -------------------------------------------------------------------------
+    # RUN PIPELINE
+    # -------------------------------------------------------------------------
     data = generate_rbcp_signal_representation_data(cfg)
 
-    generate_plot(data, cfg, output_dir, timestamp)
+    # -------------------------------------------------------------------------
+    # PLOTS
+    # -------------------------------------------------------------------------
+    generated_files = generate_plot(
+        data,
+        cfg,
+        output_dir,
+        timestamp,
+        show=show_plots,
+    )
 
+    # -------------------------------------------------------------------------
+    # METADATA
+    # -------------------------------------------------------------------------
     if cfg["output"].get("save_metadata", True):
-        save_metadata(cfg, output_dir, timestamp, config_path)
+        meta_path = save_metadata(
+            cfg,
+            output_dir,
+            timestamp,
+            config_path,
+            generated_files,
+        )
+        generated_files["metadata"] = meta_path
 
+    # -------------------------------------------------------------------------
+    # CONFIG COPY
+    # -------------------------------------------------------------------------
     if cfg["output"].get("save_config_copy", True):
-        copy_config_file(config_path, output_dir)
+        cfg_copy = copy_config_file(config_path, output_dir, timestamp)
+        generated_files["config"] = cfg_copy
+
+    print("\n[INFO] Generated files:")
+    for k, v in generated_files.items():
+        print(f"       {k}: {v}")
 
     print("\n[INFO] Done ✅")
 
@@ -257,13 +324,32 @@ def run_rbcp_signal_representation(config_path):
 
 
 # =============================================================================
+# CLI
+# =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
+    parser = argparse.ArgumentParser(
+        description="Run RbCP signal representation experiment."
+    )
+
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=str(DEFAULT_CONFIG_PATH),
+    )
+
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show plots interactively",
+    )
+
     args = parser.parse_args()
 
-    run_rbcp_signal_representation(args.config)
+    run_rbcp_signal_representation(
+        config_path=args.config,
+        show_plots=args.show,
+    )
 
 
 if __name__ == "__main__":
