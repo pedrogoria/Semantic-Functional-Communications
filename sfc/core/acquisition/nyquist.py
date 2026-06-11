@@ -1,7 +1,8 @@
 """
-sfc/core/nyquist.py
+sfc/core/acquisition/nyquist.py
 
-Trusted core module for Nyquist sampling, quantization, and sinc-based reconstruction.
+Trusted acquisition module for Nyquist sampling, quantization, and sinc-based
+reconstruction.
 
 This file isolates the `Nyquist` class extracted from the trusted
 `sfc/sampling.py` implementation.

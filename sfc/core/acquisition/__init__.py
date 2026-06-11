@@ -55,6 +55,10 @@ from .base import (
 
 from .cs import CSAcquisitionCore
 
+from sfc.core.acquisition.nyquist import Nyquist
+
+from sfc.core.acquisition.fri import FRIAcquisition, FRIResult
+
 __all__ = [
     "AcquisitionResult",
     "ReconstructionResult",
@@ -63,4 +67,7 @@ __all__ = [
     "ensure_1d_time_vector",
     "validate_time_axis_length",
     "CSAcquisitionCore",
+    "Nyquist",
+    "FRIAcquisition",
+    "FRIResult",
 ]

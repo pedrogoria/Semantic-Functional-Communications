@@ -1,0 +1,437 @@
+# tests/configs/debug_fair_methods_comparison.yaml
+
+# This YAML controls the interactive debug plots for:
+#
+#   tests/debug_fair_methods_comparison.py
+#
+# It does not save result tables. It only generates plots.
+
+experiment_config_path: "experiments/configs/figures/fair_methods_comparison_vs_B.yaml"
+
+debug:
+  # Select one B point from the experiment sweep.
+  # If B_value is not null, B_value overrides B_index.
+  B_index: 0
+  B_value: 1000
+
+  # Select one period/sensor to visualize in most waveform plots.
+  period: 0
+  sensor: 0
+
+  # Reproducible debug source generation.
+  seed: 47
+
+  # Global physical AWGN switch for debug plots.
+  #
+  # Applies to methods with physical waveform/resource AWGN in this debug:
+  #   - PPM
+  #   - SFC
+  #   - SFC + SED
+  #
+  # Does not artificially add AWGN to digital/acquisition abstractions:
+  #   Benchmark/Nyquist, CS, SoD, FRI, RbCP, RbCP_time.
+  add_awgn: true
+
+  # Show plots interactively. No data tables are saved.
+  show: true
+
+  # Choose which debug figures to generate.
+  #
+  # Available:
+  #   source
+  #   benchmark
+  #   nyquist
+  #   cs
+  #   ppm
+  #   sod
+  #   fri
+  #   rbcp
+  #   rbcp_time
+  #   sfc
+  #   sfc_sed
+  methods:
+    - source
+    - benchmark
+    - cs
+    - ppm
+    - sod
+    - fri
+    - rbcp
+    - rbcp_time
+    - sfc
+    - sfc_sed
+    - sfc_y_hist
+
+  hist_bins: 80
+
+plot_axes:
+  # ---------------------------------------------------------------------------
+  # Global defaults applied to every subplot unless overridden below.
+  # Use null to let Matplotlib autoscale.
+  # ---------------------------------------------------------------------------
+  default:
+    xlim: null
+    ylim: null
+    xscale: linear
+    yscale: linear
+    grid: true
+
+  # ---------------------------------------------------------------------------
+  # Source figure
+  #
+  # PSD is meaningful here because this is the processed simulation/baseband
+  # source signal.
+  #
+  # subplot keys:
+  #   raw
+  #   processed
+  #   psd
+  # ---------------------------------------------------------------------------
+  source:
+    raw:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    processed:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    psd:
+      xlim: [0.0, 50.0]
+      ylim: null
+      xscale: linear
+      yscale: log
+
+  # ---------------------------------------------------------------------------
+  # Benchmark / Nyquist figure
+  #
+  # No transmission PSD is plotted here because this method uses an abstract
+  # FDMA capacity-derived bit budget, not an explicit physical waveform.
+  #
+  # subplot keys:
+  #   samples
+  #   quantization
+  #   reconstruction
+  #   budget
+  # ---------------------------------------------------------------------------
+  benchmark:
+    samples:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    quantization:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    reconstruction:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    budget:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+  # ---------------------------------------------------------------------------
+  # CS figure
+  #
+  # No transmission PSD is plotted here because CS uses an abstract FDMA
+  # capacity-derived bit budget for measurements and quantization bits.
+  #
+  # subplot keys:
+  #   samples
+  #   measurements
+  #   reconstruction
+  #   budget
+  # ---------------------------------------------------------------------------
+  cs:
+    samples:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    measurements:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    reconstruction:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    budget:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+  # ---------------------------------------------------------------------------
+  # PPM figure
+  #
+  # PSD is meaningful here because PPM has an explicit physical time-domain
+  # transmit/receive waveform in this debug.
+  #
+  # subplot keys:
+  #   samples
+  #   waveform
+  #   reconstruction
+  #   psd
+  #
+  # In psd, the vertical line is B_s, the per-sensor bandwidth.
+  # ---------------------------------------------------------------------------
+  ppm:
+    samples:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    waveform:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    reconstruction:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    psd:
+      xlim: [0.0, 500.0]
+      ylim: null
+      xscale: linear
+      yscale: log
+
+  # ---------------------------------------------------------------------------
+  # SoD figure
+  #
+  # No transmission PSD is plotted here because SoD uses payload accounting under
+  # an abstract FDMA bit budget.
+  #
+  # subplot keys:
+  #   events
+  #   reconstruction
+  #   payload
+  #   diagnostics
+  # ---------------------------------------------------------------------------
+  sod:
+    events:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    reconstruction:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    payload:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    diagnostics:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+  # ---------------------------------------------------------------------------
+  # FRI figure
+  #
+  # No transmission PSD is plotted here because FRI uses sparse-innovation
+  # payload accounting under an abstract FDMA bit budget.
+  #
+  # subplot keys:
+  #   innovations
+  #   reconstruction
+  #   amplitudes
+  #   budget
+  # ---------------------------------------------------------------------------
+  fri:
+    innovations:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    reconstruction:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    amplitudes:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    budget:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+  # ---------------------------------------------------------------------------
+  # RbCP figure
+  #
+  # No transmission PSD is plotted here because RbCP is represented by phase
+  # quantization under the abstract communication budget.
+  #
+  # subplot keys:
+  #   reconstruction
+  #   ta
+  #   tb
+  #   diagnostics
+  # ---------------------------------------------------------------------------
+  rbcp:
+    reconstruction:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    ta:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    tb:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    diagnostics:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+  # ---------------------------------------------------------------------------
+  # RbCP_time figure
+  #
+  # subplot keys:
+  #   reconstruction
+  #   ta
+  #   tb
+  #   diagnostics
+  # ---------------------------------------------------------------------------
+  rbcp_time:
+    reconstruction:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    ta:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    tb:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    diagnostics:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+  # ---------------------------------------------------------------------------
+  # SFC figure
+  #
+  # No PSD is plotted here. SFC debug uses event/resource-domain matrices.
+  #
+  # subplot keys:
+  #   reconstruction
+  #   events_tx
+  #   events_rx
+  #   events_error
+  # ---------------------------------------------------------------------------
+  sfc:
+    reconstruction:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    events_tx:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    events_rx:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    events_error:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+  # ---------------------------------------------------------------------------
+  # SFC + SED figure
+  #
+  # No PSD is plotted here. SFC+SED debug uses event/resource-domain matrices.
+  #
+  # subplot keys:
+  #   reconstruction
+  #   events_tx
+  #   events_rx
+  #   events_error
+  # ---------------------------------------------------------------------------
+  sfc_sed:
+    reconstruction:
+      xlim: [0.0, 1.0]
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    events_tx:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    events_rx:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear
+
+    events_error:
+      xlim: null
+      ylim: null
+      xscale: linear
+      yscale: linear

@@ -70,7 +70,7 @@ from sfc.core.fourier import FourierCoefficientCore
 from sfc.core.phase_cof import PhaseCoefficientCore
 from sfc.core.quantization import quantize_ta_tb
 from sfc.core.reconstruction import recover_signal
-from sfc.core.nyquist import Nyquist
+from sfc.core.acquisition.nyquist import Nyquist
 from sfc.core.channel.SFCChannel import SFCChannel
 from sfc.core.system_parameters import (
     build_derived_system_parameters,

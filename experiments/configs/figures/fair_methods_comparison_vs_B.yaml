@@ -1,6 +1,15 @@
 # experiments/configs/figures/fair_methods_comparison_vs_B.yaml
 
-description: "Fair comparison versus total bandwidth B: Benchmark+FDMA, CS+FDMA, PPM+FDMA, RbCP, RbCP_time, SFC, SFC+SED"
+description: "Fair comparison versus total bandwidth B: Benchmark/Nyquist+FDMA, CS+FDMA, PPM+FDMA, SoD+FDMA, FRI+FDMA, RbCP, RbCP_time, SFC, SFC+SED"
+
+figure:
+  id: "fair_methods_comparison_vs_B"
+  manuscript_figure: null
+  title: "Fair methods comparison versus total bandwidth B"
+  description: >
+    Fair comparison versus total bandwidth B for Benchmark/Nyquist+FDMA,
+    CS+FDMA, PPM+FDMA, SoD+FDMA, FRI-inspired+FDMA, RbCP, RbCP_time,
+    SFC, and SFC+SED.
 
 # =============================================================================
 # Monte Carlo
@@ -8,10 +17,12 @@ description: "Fair comparison versus total bandwidth B: Benchmark+FDMA, CS+FDMA,
 
 monte_carlo:
   seed: 47
-  interactions: 30
+  interactions: 200
 
 reproducibility:
   seed: 47
+  save_git_commit: true
+  save_timestamp: true
 
 # =============================================================================
 # Output convention
@@ -20,18 +31,30 @@ reproducibility:
 output:
   base_dir: "data/results"
   figure_dir: "fair_methods_comparison_vs_B"
+
+  save_dat: true
+  save_plot: true
   save_figures: true
+  save_diagnostics_plot: true
+  save_metadata: true
+  save_config_copy: true
 
   formats:
     data:
       - dat
       - csv
+
     figure:
+      - png
+      - pdf
+
+    plot:
       - png
       - pdf
 
 data_format:
   delimiter: "\t"
+  columns: []
 
 # =============================================================================
 # Sweep over total bandwidth B
@@ -39,10 +62,27 @@ data_format:
 
 sweep:
   B:
-    start: 100.0
-    stop: 100000.0
-    step: 5000.0
-    include_stop: true
+    values:
+#      - 100.0
+      - 500.0
+      - 1000.0
+      - 2000.0
+      - 4000.0
+      - 7000.0
+      - 10000.0
+      - 15000.0
+      - 20000.0
+      - 50000.0
+      - 75000.0
+      - 100000.0
+
+
+#sweep:
+#  B:
+#    start: 1000.0
+#    stop: 50001.0
+#    step: 10000.0
+#    include_stop: true
 
 # =============================================================================
 # Method switches
@@ -50,12 +90,76 @@ sweep:
 
 mode:
   run_benchmark_fdma: true
+  run_benchmark: true
+  run_nyquist: true
+
   run_cs_fdma: true
+  run_cs: true
+
   run_ppm_fdma: true
+  run_ppm: true
+
+  run_sod: true
+  run_fri: true
+
   run_rbcp: true
   run_rbcp_time: true
+
   run_sfc: true
   run_sfc_sed: true
+
+  semantic_error_detection: true
+
+# =============================================================================
+# Fair-comparison policy
+# =============================================================================
+
+comparison:
+  methods:
+    enabled:
+      - benchmark
+      - cs
+      - ppm
+      - sod
+      - fri
+      - rbcp
+      - rbcp_time
+      - sfc
+      - sfc_sed
+
+    use_common_bit_budget: true
+    bit_budget_source: capacity
+    fixed_budget_bits: null
+
+
+    # Optional abstract post-demodulation BER for digital/acquisition baselines.
+    #
+    # This does NOT define the FDMA bit budget.
+    # The FDMA budget is still:
+    #
+    #   budget_bits_s = floor(C_s * tau)
+    #
+    # target_ber only models optional bit flips after quantization/encoding.
+    # Currently consumed by the FRI-inspired baseline.
+    target_ber: 0.0
+
+    # SFC keeps its native physical channel.
+    sfc_error_model: native_physical_channel
+
+    # supported:
+    #   bandlimited_random
+    #   sparse_innovation
+    signal_model: bandlimited_random
+
+# =============================================================================
+# Power model
+# =============================================================================
+
+power_model:
+  # supported:
+  #   fixed_P_and_N0
+  #   fixed_P_and_SNR
+  mode: fixed_P_and_N0
 
 # =============================================================================
 # Physical/system parameters
@@ -63,7 +167,7 @@ mode:
 
 system:
   # Number of sensors.
-  S: 12
+  S: 10
 
   # Total system bandwidth.
   # This value is overwritten by sweep.B.
@@ -73,14 +177,23 @@ system:
   # P  = average transmit power per sensor
   # N0 = universal noise parameter
   P: 1.0
-  N0: 0.007
+  N0: 0.013
+  SNR_dB: 0
 
   # SFC resource-grid parameters.
-  R: 12
+  #
+  # IMPORTANT:
+  # With S = 12, N_override = 5, L = 4:
+  #
+  #   required maps = 2*N*S = 120
+  #
+  # R = 12 gives partition [3,3,3,3] -> 81 maps -> invalid.
+  # R = 16 gives partition [4,4,4,4] -> 256 maps -> valid.
+  R: 16
   L: 4
 
   # null means uniform allocation:
-  # B_s = B / S
+  #   B_s = B / S
   bandwidth_allocation: null
 
 # =============================================================================
@@ -89,23 +202,25 @@ system:
 
 signal:
   # Signal period.
-  tau: 1.0
+  tau: 0.25
+
+  # Legacy alias kept consistent with tau.
+  T: 1.0
 
   # Dense-time numerical reference step.
   # This is the simulation/reference grid used for x(t) and MSE evaluation.
-  # CS no longer operates directly on this dense grid.
   Tt: 0.001
 
   # Source bandwidth used by filter_periodic.
   # IMPORTANT: filter with this W directly.
-  W: 10.4
+  W: 25.8
 
   # Fixed harmonic count for RbCP/SFC controlled comparison.
   # If removed or set to null, N is derived in system_parameters.py.
-  N_override: 5
+#  N_override: null
 
   # Number of periods per Monte Carlo trial.
-  n_periods: 1
+  n_periods: 4
 
   # Random source distribution.
   distribution: gaussian
@@ -119,6 +234,26 @@ signal:
 
   # Harmonic threshold used by phase coefficient routines.
   threshold_harmonics: 0.001
+
+# =============================================================================
+# Optional signal model for reviewer-response comparisons
+# =============================================================================
+
+signal_model:
+  # supported:
+  #   bandlimited_random
+  #   sparse_innovation
+  type: bandlimited_random
+
+  sparse_innovation:
+    K: 3
+    kernel: gaussian
+    kernel_sigma: 0.01
+    amplitude_distribution: uniform
+    amplitude_min: -1.0
+    amplitude_max: 1.0
+    periodic: true
+    min_separation: 0.02
 
 # =============================================================================
 # DC handling
@@ -138,180 +273,311 @@ quantization:
   rounding_mode: floor
 
 # =============================================================================
-# Benchmark + FDMA
+# Acquisition-layer method configs
 # =============================================================================
 
-benchmark:
-  # Benchmark and CS share the same uniform sampling rate:
-  #
-  #   fs = effective_rate_factor * sampling_rate
-  #
-  # With:
-  #   sampling_rate = W
-  #   effective_rate_factor = 2.0
-  #
-  # we get:
-  #   fs = 2W
-  #
-  # This rate is used:
-  #   - by Benchmark for uniform sampling/reconstruction logic
-  #   - by CS to sample x(t) into x[n] before CS encoding
-  sampling_rate: 10.4
-  effective_rate_factor: 1.0
-
-# =============================================================================
-# CS + FDMA
-# =============================================================================
-
-cs:
+acquisition:
   # ---------------------------------------------------------------------------
-  # Current CS chain
+  # Nyquist / Benchmark acquisition
   # ---------------------------------------------------------------------------
-  #
-  # The CS branch uses:
-  #
-  #   x(t) -> x[n] -> y = Phi x[n] -> q = Q(y) -> y_tilde
-  #        -> x_hat[n] -> x_hat(t)
-  #
-  # where x[n] are uniform samples of x(t) at the same sampling rate used by
-  # the Benchmark branch.
-  #
-  # MSE is computed between dense x(t) and reconstructed x_hat(t).
-  #
+  nyquist:
+    enabled: true
+    sampling_rate: 25.8
+    effective_rate_factor: 1.0
+    quantize: true
+    peak2peak: sample
+    periodic_replicas: 10
+
   # ---------------------------------------------------------------------------
-  # Fair CS budget policy
+  # CS + FDMA
   # ---------------------------------------------------------------------------
-  #
-  # The pipeline does not treat measurement_bits as a fixed YAML parameter.
-  #
-  # For each sensor and each B value, the pipeline computes:
-  #
-  #   N_s = number of uniform samples x[n] per period
-  #   C_s = B_s * log2(1 + P / (B_s * N0))
-  #   bits_available = C_s * tau
-  #
-  # It then tries:
-  #
-  #   M_s = N_s
-  #
-  # whenever possible, and computes:
-  #
-  #   measurement_bits_s = floor(bits_available / N_s)
-  #
-  # If measurement_bits_s < 1, the pipeline sets:
-  #
-  #   measurement_bits_s = 1
-  #   M_s = floor(bits_available)
-  #
-  # Therefore:
-  #   - M_s is as large as possible, ideally equal to N_s
-  #   - measurement_bits_s is the largest integer precision allowed by the
-  #     channel budget
-  #   - the effective OMP sparsity is set by the pipeline to:
-  #
-  #       K_eff = min(M_s, N_s)
+  cs:
+    enabled: true
 
-  # If false:
-  #   y_rx = y
-  #
-  # If true:
-  #   q       = Q(y)
-  #   y_tilde = Q^{-1}(q)
-  #   y_rx    = y_tilde
-  #
-  # The number of quantization bits is computed dynamically by the pipeline.
-  quantize_measurements: true
+    # -------------------------------------------------------------------------
+    # Current CS chain
+    # -------------------------------------------------------------------------
+    #
+    #   x(t) -> x[n] -> y = Phi x[n] -> q = Q(y) -> y_tilde
+    #        -> x_hat[n] -> x_hat(t)
+    #
+    # where x[n] are uniform samples of x(t) at the same sampling rate used by
+    # the Benchmark branch.
+    #
+    # MSE is computed between dense x(t) and reconstructed x_hat(t).
+    #
+    # -------------------------------------------------------------------------
+    # Fair CS budget policy
+    # -------------------------------------------------------------------------
+    #
+    # For each sensor and each B value:
+    #
+    #   N_s = number of uniform samples x[n] per period
+    #   C_s = B_s * log2(1 + P / (B_s * N0))
+    #   bits_available = C_s * tau
+    #
+    # The pipeline chooses:
+    #
+    #   M_s = N_s if possible
+    #   measurement_bits_s = floor(bits_available / N_s)
+    #
+    # If measurement_bits_s < 1:
+    #
+    #   measurement_bits_s = 1
+    #   M_s = floor(bits_available)
+    #
+    # Therefore the effective number of measurements and bits are dynamic.
+    quantize_measurements: true
+    quantize: true
 
-  # Supported currently by CSAcquisitionCore:
-  #   uniform_midrise
-  measurement_quantization_mode: uniform_midrise
+    # Supported currently by CSAcquisitionCore:
+    #   uniform_midrise
+    measurement_quantization_mode: uniform_midrise
 
-  # Quantization range strategy.
-  #
-  # per_signal:
-  #   each period/sensor measurement vector y gets its own [min(y), max(y)].
-  #   This is favorable to CS, but assumes the receiver knows that range.
-  #
-  # global:
-  #   one [min(y), max(y)] is computed over the acquisition tensor.
-  #
-  # fixed:
-  #   use measurement_quantization_min and measurement_quantization_max.
-  measurement_quantization_range: per_signal
+    # Quantization range strategy:
+    #   per_signal
+    #   global
+    #   fixed
+    measurement_quantization_range: per_signal
+    measurement_quantization_min: null
+    measurement_quantization_max: null
+    clip_quantization: true
 
-  # Used only when measurement_quantization_range: fixed.
-  measurement_quantization_min: null
-  measurement_quantization_max: null
+    # Kept for compatibility. The fair pipeline may override effective sparsity.
+    sparsity: 6
 
-  # If true, out-of-range values are clipped to edge bins.
-  # If false, out-of-range values raise an error.
-  clip_quantization: true
+    # Sparsifying basis used by CSAcquisitionCore.
+    # Supported:
+    #   dct
+    #   identity
+    basis: dct
 
-  # Kept for compatibility with debug scripts and alternative CS policies.
-  # In the current fair-CS pipeline, the effective sparsity is set internally as:
-  #
-  #   K_eff = min(M_s, N_s)
-  sparsity: 5
+    # Sensing matrix used by CSAcquisitionCore.
+    # Supported:
+    #   gaussian
+    #   bernoulli
+    #   identity
+    sensing_matrix: gaussian
+    measurement_matrix: gaussian
 
-  # Sparsifying basis used by CSAcquisitionCore.
-  # Supported:
-  #   dct
-  #   identity
-  basis: dct
+    # If null, the pipeline draws per-trial/per-sensor random states from the
+    # Monte Carlo RNG.
+    random_state: 12345
+    seed: 12345
 
-  # Sensing matrix used by CSAcquisitionCore.
-  # Supported:
-  #   gaussian
-  #   bernoulli
-  #   identity
-  sensing_matrix: gaussian
+    normalize_dictionary_columns: true
+    store_true_representation: false
 
-  # Fixed seed for reproducibility of Phi.
-  # If null, the pipeline draws per-trial/per-sensor random states from the
-  # Monte Carlo RNG.
-  random_state: 12345
+    # Optional direct override. Leave null for capacity-derived fair policy.
+    measurements: null
+    measurement_factor: 4.0
+    reconstruction: omp
+    max_iter: 20
+    tolerance: 1.0e-6
+    budget_bits: null
+    bit_error_rate: 0.0
 
-  normalize_dictionary_columns: true
-  store_true_representation: false
+  # ---------------------------------------------------------------------------
+  # PPM + FDMA
+  # ---------------------------------------------------------------------------
+  ppm:
+    enabled: true
+
+    # Requested upper bound for the PPM message rate.
+    #
+    # The pipeline will choose the largest feasible fs_msg satisfying:
+    #
+    #   fs_msg <= requested fs_msg
+    #   fs_msg <= 2 B_s / (1 + rolloff)
+    #   fs_msg <= 1 / (min_samples_per_symbol * Tt)
+    #   fs_msg <= max_pulse_width_fraction_of_symbol / pulse_width
+    #
+    fs_msg: 30.0
+
+    enforce_bandwidth_from_B_sensor: true
+
+    # Numerical-grid constraint.
+    min_samples_per_symbol: 16
+
+    pulse_type: raised_cosine
+    rolloff: 0.09
+    span: 12
+
+    # Explicit pulse width.
+    #
+    # This value is respected by the pipeline.
+    # The pipeline reduces fs_msg if needed.
+    pulse_width: null
+
+    # Used only if pulse_width is null.
+    # Prefer explicit pulse_width for fair comparisons.
+    pulse_width_fraction: 0.1
+
+    # The selected pulse_width must satisfy approximately:
+    #
+    #   pulse_width >= pulse_width_bandwidth_factor / B_s
+    #
+    # Equivalently:
+    #
+    #   B_required_pulse = pulse_width_bandwidth_factor / pulse_width <= B_s
+    #
+    enforce_pulse_width_from_B_sensor: true
+    pulse_width_bandwidth_factor: 1.0
+
+    # The pulse must fit inside one symbol:
+    #
+    #   pulse_width <= max_pulse_width_fraction_of_symbol / fs_msg
+    #
+    # Equivalently:
+    #
+    #   fs_msg <= max_pulse_width_fraction_of_symbol / pulse_width
+    #
+    max_pulse_width_fraction_of_symbol: 0.95
+
+    # Ask PPMCore to warn if instantiated inconsistently with B_s.
+    enforce_bandwidth_warning: true
+
+    rec_pulse: 0.0
+    eps_margin: 0.001
+    interp_mode: sinc
+    periodic_replicas: 10
+    clip_recovered_to_unit_interval: true
+
+    normalize_sensor_power: true
+
+  # ---------------------------------------------------------------------------
+  # SoD + FDMA
+  # ---------------------------------------------------------------------------
+  sod:
+    enabled: true
+
+    threshold: 1.25
+    delta: 0.25
+
+    initial_event: true
+
+    # linear
+    # zero_order_hold
+    reconstruction_mode: linear
+
+    transmit_event_times: true
+
+    # Correct budget policy:
+    #
+    # SoD does not inherit Benchmark/Nyquist M.
+    #
+    # For each sensor/period, the pipeline detects candidate SoD events and
+    # then chooses how many events and how many bits per event fit inside:
+    #
+    #   budget_bits_s = floor(C_s * tau)
+    #
+    # At least one event is always transmitted.
+    quantize: true
+    quantize_amplitudes: true
+    quantize_times: true
+
+    # Minimum bit requirements used when budget allows.
+    # If the budget is extremely small, the pipeline falls back to one coarse
+    # event.
+    min_amplitude_bits: 1
+    min_time_bits: 1
+
+    # How to split bits_per_event between time and amplitude:
+    #   balanced
+    #   time_first
+    #   amplitude_first
+    time_bits_policy: balanced
+
+    # Amplitude quantization range:
+    #   per_signal
+    #   per_events
+    #   global
+    #   fixed
+    amplitude_quantization_range: per_signal
+    amplitude_quantization_min: null
+    amplitude_quantization_max: null
+
+    # Time quantization range:
+    #   period
+    #   fixed
+    time_quantization_range: period
+    time_quantization_min: null
+    time_quantization_max: null
+
+    quantization_poss: 0.5
+    clip_quantization: true
+
+    # Removed:
+    #   require_budget_feasible
+    #
+    # SoD always adapts to the budget and transmits at least one event.
+    max_events: null
+
+    budget_bits: null
+    bit_error_rate: 0.0
+
+  # ---------------------------------------------------------------------------
+  # FRI-inspired + FDMA
+  # ---------------------------------------------------------------------------
+  fri:
+    enabled: true
+
+    # Number of innovations per period/sensor.
+    K: 3
+    num_innovations: 3
+
+    # Minimum separation between selected innovations in seconds.
+    min_separation: 0.02
+
+    # Reconstruction kernel:
+    #   gaussian
+    #   sinc
+    #   triangular
+    #   nearest
+    kernel: gaussian
+    kernel_sigma: 0.01
+    sinc_bandwidth: null
+    periodic: true
+
+    # The fair pipeline passes:
+    #
+    #   budget_bits_s = floor(C_s * tau)
+    #
+    # to FRIAcquisition.run(...), per sensor.
+    quantize: true
+    budget_bits: null
+
+    # Used only when budget_bits is null inside FRIAcquisition.
+    # In the fair pipeline, budget_bits is injected per sensor.
+    bits_location: 10
+    bits_amplitude: 10
+
+    # Amplitude range:
+    #   sample
+    #   peak_to_peak
+    #   [min, max]
+    amplitude_range: sample
+    peak_to_peak: null
+
+    # Applied to quantized FRI indices.
+    bit_error_rate: 0.0
+
+    # If true, MSE is averaged only over feasible streams.
+    require_budget_feasible: true
+    allow_zero_budget: false
+
+    seed: 47
 
 # =============================================================================
-# PPM + FDMA
+# RbCP / RbCP_time
 # =============================================================================
 
-ppm:
-  # Requested PPM message sampling frequency.
-  #
-  # The pipeline clips this using:
-  #   fs_msg <= 2 B_s / (1 + rolloff)
-  #
-  # and also:
-  #   fs_msg <= 1 / (min_samples_per_symbol * Tt)
-  fs_msg: 1000.0
+rbcp:
+  enabled: true
 
-  enforce_bandwidth_from_B_sensor: true
-
-  # Numerical-grid constraint.
-  # With Tt = 0.001 and min_samples_per_symbol = 8:
-  #   fs_msg <= 125 Hz
-  min_samples_per_symbol: 8
-
-  pulse_type: raised_cosine
-  rolloff: 0.99
-  span: 12
-
-  # If pulse_width is null:
-  #   pulse_width = pulse_width_fraction / fs_msg
-  pulse_width: null
-  pulse_width_fraction: 0.1
-
-  rec_pulse: 0.0
-  eps_margin: 0.001
-  interp_mode: sinc
-  periodic_replicas: 10
-  clip_recovered_to_unit_interval: true
-
-  # Normalize each PPM waveform to average power P.
-  normalize_sensor_power: true
+rbcp_time:
+  enabled: true
+  use_error_free_time_model: true
 
 # =============================================================================
 # SFC channel
@@ -323,15 +589,107 @@ channel:
   detection_mode: threshold
 
   # If threshold is not explicitly set, detector uses:
-  # threshold_factor * sqrt(P * tau / L)
-  threshold_factor: 0.5
+  # threshold_factor * sqrt(E_chip)
+  threshold_factor: 0.7
+  threshold: null
 
-  # Usually set to L for strict full-length map match.
-  score_threshold: 4
+  # global_frame_fit
+  # local
+  candidate_selection: local
+
+  global:
+    allow_empty: true
+    strategy: local_only
+    restarts: 100
+    max_iter: 80
+    seed: 47
+    observed_mode: abs
+    event_penalty: 0.0
+    residual_threshold: 0.0
+
+  sensor_x_event: null
 
 # =============================================================================
 # Semantic error detection
 # =============================================================================
 
 sed:
+  enabled: true
   discard_invalid_periods: true
+  mode: sparse_pairs
+  event_id_ordering: ta_block_then_tb_block
+  throughput_mode: valid_periods_times_S_over_tau
+
+# =============================================================================
+# Metrics
+# =============================================================================
+
+metrics:
+  mse: true
+  throughput: true
+  event_rate: true
+  acquisition_rate: true
+  bit_budget: true
+  resource_diagnostics: true
+
+  aggregation:
+    mean: true
+    std: false
+    median: false
+    quantiles: []
+
+# =============================================================================
+# Plot settings
+# =============================================================================
+
+plot:
+  x_axis: "Total bandwidth B"
+  y_axis: "MSE"
+  x_scale: linear
+  y_scale: log
+
+  show_grid: true
+  legend: true
+
+  label_map:
+    benchmark: "Benchmark"
+    nyquist: "Nyquist"
+    benchmark_fdma: "Benchmark / Nyquist + FDMA"
+
+    cs: "CS"
+    cs_fdma: "CS + FDMA"
+
+    ppm: "PPM"
+    ppm_fdma: "PPM + FDMA"
+
+    sod: "SoD"
+    sod_fdma: "SoD + FDMA"
+
+    fri: "FRI-inspired"
+    fri_fdma: "FRI-inspired + FDMA"
+
+    rbcp: "RbCP"
+    rbcp_time: "RbCP_time"
+
+    sfc: "SFC"
+    sfc_sed: "SFC + SED"
+
+  panel_layout: vertical
+
+  mse_panel:
+    x_axis: "Total bandwidth B"
+    y_axis: "MSE"
+    x_scale: linear
+    y_scale: log
+    title: "MSE versus B"
+    show_grid: true
+    legend: true
+
+  throughput_panel:
+    x_axis: "Total bandwidth B"
+    y_axis: "Throughput"
+    x_scale: linear
+    y_scale: linear
+    title: "Throughput versus B"
+    show_grid: true
+    legend: true

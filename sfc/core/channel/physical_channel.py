@@ -515,9 +515,9 @@ class PhysicalChannel:
         # Some existing modules may still inspect E_tot, E_s, or signal_level.
         # For SFC, signal_level now means the matched-filter chip level.
         # ------------------------------------------------------------------
-        self.E_tot = self.E_sensor
-        self.E_s = self.E_chip
-        self.signal_level = self.sfc_signal_level
+        # self.E_tot = self.E_sensor
+        # self.E_s = self.E_chip
+        # self.signal_level = self.sfc_signal_level
 
         # ------------------------------------------------------------------
         # Channel type and RNG.

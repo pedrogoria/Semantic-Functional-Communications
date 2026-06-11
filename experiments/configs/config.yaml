@@ -19,7 +19,7 @@
 # HOW TO READ THIS FILE
 # ---------------------
 # - Keys are grouped by section.
-# - Comments try to document:
+# - Comments document:
 #     * type
 #     * meaning
 #     * typical/allowed values
@@ -36,6 +36,7 @@
 #     * sum equal to 1
 # - Newer pipelines prefer signal.tau.
 # - Some older figure pipelines still accept signal.T as a legacy alias.
+# - B denotes TOTAL system bandwidth unless explicitly stated otherwise.
 # =============================================================================
 
 
@@ -44,39 +45,70 @@
 # -----------------------------------------------------------------------------
 figure:
   # Free string identifier for the experiment.
+  #
   # type: str
+  #
   # examples:
   #   "figure1"
   #   "rbcp_mse_vs_B"
   #   "sfc_mse_throughput_vs_B"
+  #   "fair_methods_comparison_vs_B"
+  #   "fri_cs_rbcp_comparison_vs_B"
   id: "template_experiment"
 
   # Optional manuscript figure number.
+  #
   # type: int | null
-  # examples: 1, 2, 4, 5, 6, 7
+  #
+  # examples:
+  #   1, 2, 4, 5, 6, 7
   manuscript_figure: null
 
   # Human-readable title used by runners/plots.
+  #
   # type: str
   title: "Template experiment"
 
   # Optional long description.
+  #
   # type: str
   description: >
     Central master catalog of configurable keys supported by the current
-    SFC/RbCP core and figure pipelines.
+    SFC/RbCP core, acquisition baselines, and figure pipelines.
 
 
 # -----------------------------------------------------------------------------
 # EXECUTION MODES
 # -----------------------------------------------------------------------------
 mode:
-  # Main branches used by the MSE-vs-B pipelines.
+  # Main method branches used by MSE-vs-B and fair-comparison pipelines.
+  #
   # type: bool
+  #
+  # Notes:
+  #   These flags are pipeline-level switches. Not every pipeline reads every
+  #   flag. Experiment-specific YAMLs should enable only the methods needed for
+  #   that figure.
   run_benchmark: false
+  run_nyquist: false
   run_rbcp: false
   run_rbcp_time: false
   run_sfc: false
+  run_sfc_sed: false
+
+  # Additional acquisition / communication baselines.
+  #
+  # Current/expected modules:
+  #   - sfc/core/acquisition/nyquist.py
+  #   - sfc/core/acquisition/cs.py
+  #   - sfc/core/acquisition/sod.py
+  #   - sfc/core/acquisition/fri.py
+  #
+  # type: bool
+  run_cs: false
+  run_ppm: false
+  run_sod: false
+  run_fri: false
 
   # Pipeline-level switch for semantic-based error detection.
   #
@@ -93,6 +125,7 @@ mode:
   semantic_error_detection: false
 
   # Figure-4 / duplicate-reception specific toggles.
+  #
   # type: bool
   monte_carlo_random_signals: false
   monte_carlo_uniform_t: false
@@ -103,12 +136,13 @@ mode:
 # -----------------------------------------------------------------------------
 system:
   # Number of sensors / signals in the physical system.
+  #
   # type: int
   # valid: >= 1
-  # used in: almost all system-level pipelines
   S: 8
 
   # Average transmit power parameter.
+  #
   # type: float
   # valid: > 0
   #
@@ -118,16 +152,18 @@ system:
   P: 1.0
 
   # Total system bandwidth.
+  #
   # type: float
   # valid: > 0
   #
   # IMPORTANT:
   #   B always denotes TOTAL system bandwidth at the top config level.
-  #   Per-sensor slices are derived through the core builder using
-  #   system.bandwidth_allocation, or equal split if null.
+  #   Per-sensor slices are derived through system.bandwidth_allocation, or
+  #   equal split if bandwidth_allocation is null.
   B: 10000.0
 
   # Number of resources / subcarriers used by SFC maps.
+  #
   # type: int
   # valid: >= 1
   #
@@ -152,35 +188,34 @@ system:
   #
   #       product_l |D_l| >= 2 * N * S
   #
-  #   Example:
-  #       S = 12, N = 5, L = 4
-  #       required maps = 2*5*12 = 120
-  #
-  #       R = 12 -> partition [3,3,3,3] -> 81 maps  -> invalid
-  #       R = 16 -> partition [4,4,4,4] -> 256 maps -> valid
-  #
   #   If this condition is not met, SFCChannel raises an AssertionError.
   R: 12
 
   # Number of temporal resources / sub-symbols / rows per SFC map.
+  #
   # type: int
   # valid: >= 1
   L: 4
 
   # Signal-to-noise ratio in dB.
+  #
   # type: float
-  # examples: -16.0, -12.0, -8.0
-  # used either directly or overwritten by fixed-power pipelines.
+  #
+  # Used either directly or overwritten by fixed-power pipelines.
   SNR_dB: -16.0
 
   # Noise parameter N0.
+  #
   # type: float
   # valid: > 0
   #
   # remarks:
-  #   The core uses the TOTAL system bandwidth B when relating SNR, P and N0:
+  #   The core uses the TOTAL system bandwidth B when relating SNR, P, and N0:
   #
   #       SNR = P / (B * N0)
+  #
+  #   SFC physical AWGN simulation uses N0 directly at the matched-filter /
+  #   resource-output level according to the project physical-channel convention.
   N0: 0.007
 
   # ---------------------------------------------------------------------------
@@ -188,6 +223,7 @@ system:
   # ---------------------------------------------------------------------------
 
   # Figure-5-style regime helper:
+  #
   # keep SNR_dB fixed and N0 fixed, derive:
   #
   #   P(B) = SNR * B * N0
@@ -197,6 +233,7 @@ system:
   derive_P_from_fixed_N0: false
 
   # Figure-6 / Figure-7-style regime helper:
+  #
   # keep P fixed and N0 fixed, derive:
   #
   #   SNR(B) = P / (B * N0)
@@ -210,6 +247,7 @@ system:
   # ---------------------------------------------------------------------------
 
   # Fraction of total bandwidth assigned to each sensor.
+  #
   # type: list[float] | null
   #
   # rules:
@@ -226,22 +264,29 @@ system:
 # SIGNAL PARAMETERS
 # -----------------------------------------------------------------------------
 signal:
-  # Signal bandwidth used by the theory/core.
+  # Signal/source bandwidth used by signal filtering and theory.
+  #
   # type: float
   # valid: > 0
   #
   # remarks:
-  #   If N_override is not supplied, the core derives:
+  #   If N_override is not supplied, the core may derive:
   #
   #       N = floor(W * tau / 2)
+  #
+  #   The source filter must use signal.W directly and must NOT redefine:
+  #
+  #       W_eff = 2 * N / tau
   W: 10.4
 
   # Preferred modern signal period / frame duration key.
+  #
   # type: float
   # valid: > 0
   tau: 1.0
 
   # Legacy alias still accepted by some older figure pipelines.
+  #
   # type: float
   #
   # recommendation:
@@ -249,56 +294,60 @@ signal:
   #   If both T and tau are present, keep them numerically consistent.
   T: 1.0
 
-  # Time discretization step used in the simulations.
+  # Time discretization step used in simulations.
+  #
   # type: float
   # valid: > 0
-  #
-  # practical guidance:
-  #   smaller Tt -> more accurate waveform representation -> higher cost
   Tt: 0.01
 
   # Optional direct override for number of harmonics.
+  #
   # type: int | null
   # valid if set: >= 1
-  # examples: 3, 5
   N_override: null
 
   # Signal distribution for Monte Carlo generation.
+  #
   # type: str
+  #
   # supported values:
   #   "uniform"
   #   "gaussian"
   distribution: "uniform"
 
   # Target peak-to-peak amplitude AFTER filtering.
+  #
   # type: float
   # valid: >= 0
-  # examples: 0.0, 2.0, 4.0, 12.0
   peak_to_peak: 2.0
 
   # Whether to use the Fourier-core normalization logic.
+  #
   # type: bool
   normalize_dft: true
 
   # Target norm used when normalize_dft = true.
+  #
   # type: float
   # valid: > 0
   normalization_target: 3.9
 
   # Optional number of concatenated periods used by some Figure 1/2 code paths.
+  #
   # type: int
   # valid: >= 1
   dft_signal_periods: 1
 
   # Number of periods used by SFC/fair-method pipelines.
+  #
   # type: int
   # valid: >= 1
   n_periods: 1
 
   # Harmonic threshold used by PhaseCoefficientCore.
+  #
   # type: float
   # valid: >= 0
-  # typical: 1e-3
   #
   # Manuscript meaning:
   #   If a Fourier coefficient is null/below threshold, the corresponding
@@ -308,23 +357,82 @@ signal:
 
 
 # -----------------------------------------------------------------------------
+# SIGNAL MODELS FOR METHOD-COMPARISON EXPERIMENTS
+# -----------------------------------------------------------------------------
+signal_model:
+  # High-level model used by generic comparison pipelines.
+  #
+  # supported values:
+  #   "bandlimited_random"
+  #       Original manuscript-style random signal filtered by signal.W.
+  #
+  #   "sparse_innovation"
+  #       FRI-friendly signal:
+  #           x(t) = sum_k a_k phi(t - tau_k)
+  #
+  #   "mixed"
+  #       Optional future model combining bandlimited background and sparse
+  #       innovations.
+  type: "bandlimited_random"
+
+  sparse_innovation:
+    # Number of innovations per period/sensor.
+    #
+    # type: int
+    # valid: >= 1
+    K: 3
+
+    # Innovation kernel.
+    #
+    # supported values:
+    #   "gaussian"
+    #   "sinc"
+    #   "triangular"
+    #   "nearest"
+    kernel: "gaussian"
+
+    # Kernel width/sigma in seconds.
+    #
+    # type: float
+    # valid: > 0
+    kernel_sigma: 0.01
+
+    # Amplitude distribution for sparse innovations.
+    #
+    # supported values:
+    #   "uniform"
+    #   "gaussian"
+    amplitude_distribution: "uniform"
+
+    # Amplitude range if amplitude_distribution = "uniform".
+    amplitude_min: -1.0
+    amplitude_max: 1.0
+
+    # Whether innovation locations are sampled with periodic wrap.
+    periodic: true
+
+    # Minimum separation between innovations in seconds.
+    min_separation: 0.0
+
+
+# -----------------------------------------------------------------------------
 # DC HANDLING
 # -----------------------------------------------------------------------------
 dc:
   # If false:
   #   remove the signal mean/DC component before the RbCP chain.
+  #
   # type: bool
   enabled: false
 
 
 # -----------------------------------------------------------------------------
-# GLOBAL QUANTIZATION POLICY (CORE-LEVEL)
+# GLOBAL QUANTIZATION POLICY
 # -----------------------------------------------------------------------------
 quantization:
   # Whether M / M_RbCP are constrained to power of 2.
-  # type: bool
   #
-  # default in current aligned core: false
+  # type: bool
   #
   # behavior:
   #   false -> free integer M, rounded by quantization.rounding_mode
@@ -332,15 +440,13 @@ quantization:
   force_power_of_two: false
 
   # Integer rounding mode used by the core when converting continuous M values.
+  #
   # type: str
   #
   # supported values:
   #   "floor"
   #   "ceil"
   #   "round"
-  #
-  # default in current aligned core:
-  #   "floor"
   rounding_mode: "floor"
 
 
@@ -348,32 +454,381 @@ quantization:
 # BENCHMARK SETTINGS
 # -----------------------------------------------------------------------------
 benchmark:
-  # Whether benchmark-related branches/curves are enabled.
+  # Legacy/high-level benchmark settings used by older figure pipelines.
+  #
+  # For new acquisition-layer configs, prefer acquisition.nyquist.
+  #
   # type: bool
   enabled: false
 
   # Benchmark / Nyquist sampling rate.
+  #
   # type: float
   # valid: > 0
   sampling_rate: 10.4
 
   # Historical tuning knob used by Figure 5 / Figure 6 style benchmark branches.
-  # The stabilized pipelines preserve it by scaling the effective sampling rate
-  # when computing feasible M.
+  #
   # type: float
   # valid: > 0
-  # examples: 1.0, 2.0
   effective_rate_factor: 1.0
 
   # Figure-2-specific benchmark bandwidth used in the Eq. mapping between
   # M and M_RbCP. If not needed, can remain equal to signal.W.
+  #
   # type: float
   # valid: > 0
   W: 10.4
 
   # Descriptive switch used in some configs.
+  #
   # type: bool
   use_per_sensor_bandwidth: true
+
+
+# -----------------------------------------------------------------------------
+# ACQUISITION METHODS
+# -----------------------------------------------------------------------------
+acquisition:
+  # ---------------------------------------------------------------------------
+  # NYQUIST / BENCHMARK ACQUISITION
+  # ---------------------------------------------------------------------------
+  nyquist:
+    # Whether the Nyquist acquisition branch is enabled.
+    #
+    # type: bool
+    enabled: false
+
+    # Sampling rate used by Nyquist.
+    #
+    # type: float
+    # valid: > 0
+    sampling_rate: 10.4
+
+    # Optional multiplier applied to sampling_rate when computing communication
+    # budget / feasible M.
+    #
+    # type: float
+    # valid: > 0
+    effective_rate_factor: 1.0
+
+    # Whether scalar quantization is applied to sampled values.
+    #
+    # type: bool
+    quantize: true
+
+    # Peak-to-peak range used by quantizer.
+    #
+    # supported values:
+    #   "sample"       -> use min/max of current samples
+    #   numeric value  -> use [-peak2peak/2, +peak2peak/2]
+    peak2peak: "sample"
+
+    # Periodic sinc reconstruction support / number of tiled periods.
+    #
+    # type: int
+    # valid: >= 1
+    periodic_replicas: 10
+
+  # ---------------------------------------------------------------------------
+  # COMPRESSIVE SENSING ACQUISITION
+  # ---------------------------------------------------------------------------
+  cs:
+    # Whether the CS branch is enabled.
+    #
+    # type: bool
+    enabled: false
+
+    # Signal sparsifying basis / dictionary.
+    #
+    # supported typical values:
+    #   "dct"
+    #   "dft"
+    #   "identity"
+    #   "fourier"
+    basis: "dct"
+
+    # Measurement matrix / sensing operator.
+    #
+    # supported typical values:
+    #   "gaussian"
+    #   "bernoulli"
+    #   "partial_fourier"
+    #   "random_projection"
+    measurement_matrix: "gaussian"
+
+    # Number of CS measurements.
+    #
+    # type: int | null
+    #
+    # If null, the pipeline/core may derive it from the channel bit budget.
+    measurements: null
+
+    # Optional measurement factor used by some pipelines:
+    #
+    #   measurements = ceil(measurement_factor * sparsity * log(N_grid/sparsity))
+    #
+    # type: float
+    # valid: > 0
+    measurement_factor: 4.0
+
+    # Assumed sparsity level.
+    #
+    # type: int | null
+    sparsity: null
+
+    # Reconstruction algorithm.
+    #
+    # supported typical values:
+    #   "omp"
+    #   "basis_pursuit"
+    #   "lasso"
+    #   "iht"
+    reconstruction: "omp"
+
+    # Maximum iterations for iterative CS solvers.
+    #
+    # type: int
+    # valid: >= 1
+    max_iter: 200
+
+    # Tolerance for iterative CS solvers.
+    #
+    # type: float
+    # valid: >= 0
+    tolerance: 1.0e-6
+
+    # Whether CS measurements/coefficients are quantized under communication
+    # budget constraints.
+    #
+    # type: bool
+    quantize: true
+
+    # Optional total bit budget per sensor/period.
+    #
+    # type: int | null
+    budget_bits: null
+
+    # Bit error rate applied to digital CS payload.
+    #
+    # type: float
+    # valid: 0 <= bit_error_rate <= 1
+    bit_error_rate: 0.0
+
+    # Random seed for sensing matrix generation.
+    #
+    # type: int | null
+    seed: null
+
+  # ---------------------------------------------------------------------------
+  # PPM ACQUISITION / COMMUNICATION BASELINE
+  # ---------------------------------------------------------------------------
+  ppm:
+    # Whether the PPM branch is enabled.
+    #
+    # type: bool
+    enabled: false
+
+    # PPM slots / message alphabet size.
+    #
+    # type: int | null
+    #
+    # If null, may be derived from bandwidth, power, N0, and target bit budget.
+    M_ppm: null
+
+    # PPM message sampling frequency.
+    #
+    # type: float | null
+    #
+    # Some pipelines report ppm_fs_msg_min / ppm_fs_msg_max diagnostics.
+    fs_msg: null
+
+    # Whether M_ppm must be a power of two.
+    #
+    # type: bool
+    force_power_of_two: false
+
+    # Rounding mode for derived M_ppm.
+    #
+    # supported values:
+    #   "floor"
+    #   "ceil"
+    #   "round"
+    rounding_mode: "floor"
+
+    # Optional bit budget per sensor/period.
+    #
+    # type: int | null
+    budget_bits: null
+
+    # Bit error rate for decoded PPM messages.
+    #
+    # type: float
+    # valid: 0 <= bit_error_rate <= 1
+    bit_error_rate: 0.0
+
+  # ---------------------------------------------------------------------------
+  # SEND-ON-DELTA / SOD ACQUISITION
+  # ---------------------------------------------------------------------------
+  sod:
+    # Whether the SoD branch is enabled.
+    #
+    # type: bool
+    enabled: false
+
+    # Send-on-delta threshold.
+    #
+    # type: float
+    # valid: >= 0
+    delta: 0.1
+
+    # Maximum number of events per period/sensor.
+    #
+    # type: int | null
+    max_events: null
+
+    # Event polarity mode.
+    #
+    # supported typical values:
+    #   "signed"    -> send positive/negative changes
+    #   "absolute"  -> send magnitude-only events
+    polarity: "signed"
+
+    # Whether event times/amplitudes are quantized.
+    #
+    # type: bool
+    quantize: true
+
+    # Bits for event time/location.
+    #
+    # type: int
+    bits_time: 10
+
+    # Bits for event amplitude/delta.
+    #
+    # type: int
+    bits_amplitude: 10
+
+    # Optional total bit budget per sensor/period.
+    #
+    # type: int | null
+    budget_bits: null
+
+    # Bit error rate for SoD digital payload.
+    #
+    # type: float
+    # valid: 0 <= bit_error_rate <= 1
+    bit_error_rate: 0.0
+
+  # ---------------------------------------------------------------------------
+  # FINITE RATE OF INNOVATION / FRI BASELINE
+  # ---------------------------------------------------------------------------
+  fri:
+    # Whether the FRI-inspired branch is enabled.
+    #
+    # type: bool
+    enabled: false
+
+    # Number of innovations per period/sensor.
+    #
+    # type: int
+    # valid: >= 1
+    #
+    # This is K in:
+    #
+    #   x_hat(t) = sum_k a_k phi(t - tau_k)
+    K: 3
+
+    # Minimum separation between selected innovations.
+    #
+    # type: float
+    # valid: >= 0
+    #
+    # In seconds. If 0, no minimum separation constraint is enforced.
+    min_separation: 0.0
+
+    # Reconstruction kernel used by the simulation baseline.
+    #
+    # supported values:
+    #   "gaussian"
+    #   "sinc"
+    #   "triangular"
+    #   "nearest"
+    kernel: "gaussian"
+
+    # Gaussian sigma / triangular width.
+    #
+    # type: float | null
+    #
+    # If null, FRIAcquisition defaults to 2*Tt for gaussian/triangular kernels.
+    kernel_sigma: null
+
+    # Sinc bandwidth parameter.
+    #
+    # type: float | null
+    #
+    # If null, FRIAcquisition defaults to 1 / max(Tt, eps).
+    sinc_bandwidth: null
+
+    # Whether distances are computed periodically over one signal period.
+    #
+    # type: bool
+    periodic: true
+
+    # Whether innovation locations/amplitudes are quantized.
+    #
+    # type: bool
+    quantize: true
+
+    # Optional total bit budget per signal/period/sensor.
+    #
+    # type: int | null
+    #
+    # If provided, FRIAcquisition splits budget_bits across K innovations,
+    # then splits per-innovation bits between location and amplitude.
+    budget_bits: null
+
+    # Bits used for each innovation location when budget_bits is null.
+    #
+    # type: int
+    # valid: >= 0
+    bits_location: 10
+
+    # Bits used for each innovation amplitude when budget_bits is null.
+    #
+    # type: int
+    # valid: >= 0
+    bits_amplitude: 10
+
+    # Amplitude quantization range.
+    #
+    # supported values:
+    #   "sample"       -> use min/max of current signal
+    #   "peak_to_peak" -> use [-peak_to_peak/2, +peak_to_peak/2]
+    #   [min, max]     -> explicit numeric range
+    amplitude_range: "sample"
+
+    # Peak-to-peak range used when:
+    #
+    #   amplitude_range: "peak_to_peak"
+    #
+    # If null, FRIAcquisition falls back to signal.peak_to_peak when available.
+    peak_to_peak: null
+
+    # Bit error rate applied by a binary symmetric channel to quantized
+    # innovation indices.
+    #
+    # type: float
+    # valid: 0 <= bit_error_rate <= 1
+    bit_error_rate: 0.0
+
+    # Optional FRI-local RNG seed.
+    #
+    # type: int | null
+    #
+    # If null, FRIAcquisition falls back to reproducibility.seed or
+    # monte_carlo.seed when available.
+    seed: null
 
 
 # -----------------------------------------------------------------------------
@@ -381,6 +836,7 @@ benchmark:
 # -----------------------------------------------------------------------------
 rbcp:
   # Whether explicit RbCP-related branches are enabled in a given experiment.
+  #
   # type: bool
   enabled: false
 
@@ -389,6 +845,8 @@ rbcp:
 # RBCP_time SETTINGS
 # -----------------------------------------------------------------------------
 rbcp_time:
+  # Whether RbCP_time-related branch is enabled.
+  #
   # type: bool
   enabled: false
 
@@ -406,6 +864,7 @@ rbcp_time:
 # -----------------------------------------------------------------------------
 channel:
   # Channel type.
+  #
   # type: str
   #
   # supported values:
@@ -414,6 +873,7 @@ channel:
   type: "awgn"
 
   # Collision superposition rule.
+  #
   # type: str
   #
   # supported values:
@@ -425,31 +885,25 @@ channel:
   collision_mode: "sum"
 
   # Local SFC detection mode used to generate map candidates.
+  #
   # type: str
   #
   # supported values:
   #   "strict"    -> accept candidate if score == L
   #   "loose"     -> accept candidate if score > 0
   #   "threshold" -> accept candidate if score >= score_threshold
-  #
-  # Recommended:
-  #   "threshold"
   detection_mode: "threshold"
 
   # Score threshold used by the local map detector.
+  #
   # type: int | float | null
   #
   # If null, detector uses:
   #   score_threshold = L
-  #
-  # Common choice:
-  #   score_threshold = L
-  #
-  # Meaning:
-  #   A candidate map is accepted locally only if all L active chips are detected.
   score_threshold: 4
 
   # Physical threshold scaling used to derive the chip-detection threshold.
+  #
   # type: float
   # valid: >= 0
   #
@@ -460,20 +914,17 @@ channel:
   # where:
   #
   #   E_chip = P*tau/(2*N*L)
-  #
-  # Common choice:
-  #   0.5
   threshold_factor: 0.5
 
   # Optional explicit detector threshold.
+  #
   # type: float | null
   #
   # If provided, overrides threshold_factor * sqrt(E_chip).
-  #
-  # Usually leave unset/null.
   threshold: null
 
   # Optional explicit sensor-event association matrix.
+  #
   # type: matrix-like | null
   #
   # Most experiments leave this unset and let pipelines build it internally.
@@ -487,115 +938,70 @@ channel:
   # ---------------------------------------------------------------------------
 
   # Candidate-selection stage after local map detection.
+  #
   # type: str
   #
   # supported values:
   #   "global_frame_fit"
-  #       Default new behavior. The local detector generates candidates and
-  #       the global selector chooses a physically consistent subset by fitting
-  #       the received frame.
-  #
   #   "none"
   #   "local"
   #   "local_only"
-  #       Disable global selection and recover the old local-only behavior.
-  #
-  # Recommended default:
-  #   "global_frame_fit"
   candidate_selection: "global_frame_fit"
 
   global:
     # Whether the global detector may choose the empty decision for an event ID.
+    #
     # type: bool
-    #
-    # The manuscript allows sparse transmission because t_a^(s,n) or t_b^(s,n)
-    # may be absent when the corresponding coefficient is null/below threshold.
-    #
-    # Therefore, the correct theoretical default is:
-    #   true
     allow_empty: true
 
     # Global selection strategy.
+    #
     # type: str
     #
     # supported values:
     #   "local_only"
-    #       Use only local candidates and minimize frame residual:
-    #           ||Y_obs - Y_hat||^2
-    #
     #   "event_penalty"
-    #       Penalize the number of selected events:
-    #           ||Y_obs - Y_hat||^2 + lambda * |A|
-    #
     #   "residual_rule"
-    #       Accept coordinate updates only if residual improvement exceeds
-    #       residual_threshold.
-    #
-    # Recommended first choice:
-    #   "local_only"
     strategy: "local_only"
 
     # Number of random restarts for global coordinate descent.
+    #
     # type: int
     # valid: >= 1
-    #
-    # Larger values improve robustness but increase runtime.
-    #
-    # Typical values:
-    #   50, 100, 500
     restarts: 100
 
     # Maximum coordinate-descent iterations per restart.
+    #
     # type: int
     # valid: >= 1
-    #
-    # Typical values:
-    #   50, 80, 100
     max_iter: 80
 
-    # Seed for the global detector random restarts.
-    # type: int
+    # Seed for global detector random restarts.
     #
-    # If omitted by specific YAMLs, the detector falls back to:
-    #   reproducibility.seed
-    # or:
-    #   monte_carlo.seed
+    # type: int
     seed: 47
 
     # How to build the observed frame used by the global frame-fit objective.
+    #
     # type: str
     #
     # supported values:
     #   "abs"
-    #       observed_frame = abs(y) / sqrt(E_chip)
-    #       Recommended for AWGN because y is complex-valued.
-    #
     #   "real"
-    #       observed_frame = real(y / sqrt(E_chip))
-    #       Useful for clean deterministic debugging.
-    #
     #   "binary"
-    #       observed_frame = thresholded binary frame.
-    #
-    # Recommended default for experiments:
-    #   "abs"
     observed_mode: "abs"
 
     # Event penalty lambda used only when:
-    #   strategy: "event_penalty"
     #
-    # Objective:
-    #   ||Y_obs - Y_hat||^2 + event_penalty * number_of_active_events
+    #   strategy: "event_penalty"
     #
     # type: float
     # valid: >= 0
     event_penalty: 0.0
 
     # Residual-improvement threshold used only when:
-    #   strategy: "residual_rule"
     #
-    # A coordinate update is accepted only if:
-    #   improvement > residual_threshold
+    #   strategy: "residual_rule"
     #
     # type: float
     # valid: >= 0
@@ -607,15 +1013,8 @@ channel:
 # -----------------------------------------------------------------------------
 sed:
   # Whether semantic-based error detection is enabled in the pipeline.
+  #
   # type: bool
-  #
-  # This flag is usually read by figure pipelines through:
-  #
-  #   mode.semantic_error_detection
-  #
-  # or through this sed.enabled flag, depending on the pipeline.
-  #
-  # When enabled, SED is applied after SFC detection.
   enabled: false
 
   # If true:
@@ -623,65 +1022,23 @@ sed:
   #   zeroing the corresponding rows in corrected_events_est.
   #
   # type: bool
-  #
-  # Default in semantic_error_detection.py:
-  #   true
   discard_invalid_periods: true
 
   # SED theoretical logic.
   #
-  # Current implementation follows the manuscript:
-  #
-  #   1. Nonunique t_z^(s,n)
-  #      For each event ID corresponding to one t_a^(s,n) or t_b^(s,n),
-  #      there must be at most one detected slot per period.
-  #
-  #      Error if:
-  #          count(event_id) > 1
-  #
-  #   2. Failure in the pair
-  #      For each sensor s and harmonic n, t_a^(s,n) and t_b^(s,n) must be
-  #      either both present or both absent.
-  #
-  #      Valid:
-  #          count(ta_id) = 0 and count(tb_id) = 0
-  #          count(ta_id) = 1 and count(tb_id) = 1
-  #
-  #      Invalid:
-  #          count(ta_id) = 1 and count(tb_id) = 0
-  #          count(ta_id) = 0 and count(tb_id) = 1
-  #
-  # IMPORTANT:
-  #   SED does NOT require exactly 2*N*S events per period.
-  #
-  #   This is manuscript-aligned because the transmitter may omit t_a^(s,n) or
-  #   t_b^(s,n) when the corresponding Fourier coefficient is null/below the
-  #   harmonic threshold.
-  #
-  #   Therefore, absent pairs are valid and their reconstruction terms should be
-  #   ignored.
+  # current supported value:
+  #   "sparse_pairs"
   mode: "sparse_pairs"
 
   # Event-ID convention assumed by semantic_error_detection.py.
   #
-  # For each sensor s:
-  #
-  #   [ta events for N harmonics][tb events for N harmonics]
-  #
-  # Hence:
-  #
-  #   ta_id = 2*s*N + n_idx
-  #   tb_id = 2*s*N + N + n_idx
-  #
-  # type: str
   # current supported value:
   #   "ta_block_then_tb_block"
   event_id_ordering: "ta_block_then_tb_block"
 
   # Throughput counting policy used by the current Figure-7-style pipeline.
-  # type: str
   #
-  # currently supported value in the aligned pipeline:
+  # currently supported value:
   #   "valid_periods_times_S_over_tau"
   throughput_mode: "valid_periods_times_S_over_tau"
 
@@ -691,6 +1048,7 @@ sed:
 # -----------------------------------------------------------------------------
 duplicate_rx:
   # Number of Monte Carlo interactions used by duplicate-reception experiments.
+  #
   # type: int
   # valid: >= 1
   interactions: 200
@@ -701,12 +1059,11 @@ duplicate_rx:
 # -----------------------------------------------------------------------------
 sweep:
   # Sweep over total system bandwidth B.
-  # Current pipelines use NumPy arange semantics:
-  #   start inclusive, stop exclusive, positive step
   B:
     start: 1000
     stop: 10001
     step: 1000
+    include_stop: true
 
   # Figure-1-style sweep over N.
   n:
@@ -732,6 +1089,7 @@ sweep:
     start: 2
     stop: 33
     step: 1
+    include_stop: true
 
 
 # -----------------------------------------------------------------------------
@@ -739,10 +1097,12 @@ sweep:
 # -----------------------------------------------------------------------------
 monte_carlo:
   # Random seed.
+  #
   # type: int
   seed: 47
 
   # Number of Monte Carlo interactions.
+  #
   # type: int
   # valid: >= 1
   interactions: 200
@@ -758,9 +1118,37 @@ metrics:
   # Whether throughput is computed/reported.
   throughput: false
 
+  # Whether event-rate / acquisition-rate metrics are computed.
+  #
+  # Useful for SoD, FRI, CS, and PPM comparisons.
+  event_rate: false
+  acquisition_rate: false
+
+  # Whether communication bit-budget diagnostics are reported.
+  #
+  # Examples:
+  #   bits_per_period
+  #   bits_per_sensor
+  #   bits_per_method
+  bit_budget: false
+
+  # Whether method-specific resource diagnostics are reported.
+  #
+  # Examples:
+  #   M_benchmark
+  #   M_rbcp
+  #   M_time
+  #   cs_measurements
+  #   ppm_fs_msg
+  #   fri_K
+  #   sod_num_events
+  resource_diagnostics: true
+
   aggregation:
-    # Whether mean aggregation is requested.
     mean: true
+    std: false
+    median: false
+    quantiles: []
 
 
 # -----------------------------------------------------------------------------
@@ -776,11 +1164,16 @@ output:
   # Save controls.
   save_dat: true
   save_plot: true
+  save_diagnostics_plot: true
   save_metadata: true
   save_config_copy: true
 
   formats:
     plot:
+      - "png"
+      - "pdf"
+
+    figure:
       - "png"
       - "pdf"
 
@@ -797,7 +1190,10 @@ data_format:
   columns: []
 
   # Delimiter used when saving data tables.
-  # common values: "\t", ","
+  #
+  # common values:
+  #   "\t"
+  #   ","
   delimiter: "\t"
 
 
@@ -819,7 +1215,31 @@ plot:
   legend: true
 
   # Label remapping dictionary used by runners.
-  label_map: {}
+  label_map:
+    benchmark: "Benchmark"
+    nyquist: "Nyquist"
+    rbcp: "RbCP"
+    rbcp_time: "RbCP_time"
+    sfc: "SFC"
+    sfc_sed: "SFC + SED"
+
+    cs: "CS"
+    ppm: "PPM"
+    sod: "SoD"
+    fri: "FRI-inspired"
+
+    benchmark_fdma: "Benchmark + FDMA"
+    cs_fdma: "CS + FDMA"
+    ppm_fdma: "PPM + FDMA"
+
+    throughput_sfc: "Throughput (SFC)"
+    throughput_max: "Maximum throughput"
+
+    upper_bound: "Upper bound"
+    random_clean: "Random signals (clean)"
+    random_awgn: "Random signals (AWGN)"
+    uniform_clean: "Uniform t (clean)"
+    uniform_awgn: "Uniform t (AWGN)"
 
   # Optional multi-panel layout helper.
   panel_layout: "vertical"
@@ -845,7 +1265,7 @@ plot:
 
 
 # -----------------------------------------------------------------------------
-# TRUNCATION-COMPARISON SETTINGS
+# COMPARISON SETTINGS
 # -----------------------------------------------------------------------------
 comparison:
   # Used by the Benchmark vs RbCP truncation-comparison experiment.
@@ -866,6 +1286,83 @@ comparison:
     power_of_two:
       force_power_of_two: true
       rounding_mode: "floor"
+
+  # General method-comparison settings.
+  methods:
+    # Ordered list of methods to include in generic comparison pipelines.
+    #
+    # supported typical values:
+    #   "benchmark"
+    #   "nyquist"
+    #   "cs"
+    #   "ppm"
+    #   "sod"
+    #   "fri"
+    #   "rbcp"
+    #   "rbcp_time"
+    #   "sfc"
+    #   "sfc_sed"
+    enabled:
+      - "benchmark"
+      - "rbcp"
+      - "rbcp_time"
+      - "sfc"
+
+    # If true, all digital/acquisition baselines should use the same
+    # capacity-derived bit budget per sensor/period when the pipeline supports it.
+    #
+    # type: bool
+    use_common_bit_budget: true
+
+    # Bit-budget source.
+    #
+    # supported values:
+    #   "capacity"
+    #       Derive bits from B_s log2(1 + SNR_s) over tau.
+    #
+    #   "fixed"
+    #       Use comparison.methods.fixed_budget_bits.
+    #
+    #   "method_specific"
+    #       Let each method derive its own native budget.
+    bit_budget_source: "capacity"
+
+    # Fixed budget used only when:
+    #
+    #   bit_budget_source: "fixed"
+    #
+    # type: int | null
+    fixed_budget_bits: null
+
+    # Equivalent post-demodulation bit error rate for digital baselines.
+    #
+    # type: float
+    # valid: 0 <= target_ber <= 1
+    #
+    # Applies naturally to:
+    #   CS, PPM, SoD, FRI, Benchmark/Nyquist, RbCP
+    #
+    # SFC may instead use its native physical AWGN event-channel model.
+    target_ber: 0.0
+
+    # How to treat SFC in fair comparisons.
+    #
+    # supported values:
+    #   "native_physical_channel"
+    #       Use SFCChannel / PhysicalChannel directly.
+    #
+    #   "equivalent_ber"
+    #       Apply an equivalent BER-style abstraction if a future pipeline
+    #       implements it.
+    sfc_error_model: "native_physical_channel"
+
+    # Optional signal model used by reviewer-response experiments.
+    #
+    # supported typical values:
+    #   "bandlimited_random"
+    #   "sparse_innovation"
+    #   "mixed"
+    signal_model: "bandlimited_random"
 
 
 # -----------------------------------------------------------------------------

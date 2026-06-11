@@ -10,9 +10,11 @@ saves the resulting data table, metadata, config copy, and figures.
 
 Compared methods
 ----------------
-- Benchmark + FDMA
+- Benchmark / Nyquist + FDMA
 - CS + FDMA
 - PPM + FDMA
+- SoD + FDMA
+- FRI-inspired + FDMA
 - RbCP
 - RbCP_time
 - SFC
@@ -32,6 +34,8 @@ All generated artifacts are saved inside that timestamped directory.
 
 Files generated
 ---------------
+Depending on output.formats and save flags:
+
 - fair_methods_comparison_vs_B_<timestamp>.dat
 - fair_methods_comparison_vs_B_<timestamp>.csv
 - fair_methods_comparison_vs_B_<timestamp>.yaml
@@ -40,20 +44,37 @@ Files generated
 - fair_methods_comparison_vs_B_<timestamp>.pdf
 - fair_methods_comparison_vs_B_<timestamp>_diagnostics.png
 - fair_methods_comparison_vs_B_<timestamp>_diagnostics.pdf
+
+Usage Python Console
+--------------------
+from scripts.run_fair_methods_comparison_vs_B import run_fair_methods_comparison_vs_B
+
+df = run_fair_methods_comparison_vs_B(
+    "experiments/configs/figures/fair_methods_comparison_vs_B.yaml"
+)
+
+Usage terminal
+--------------
+python scripts/run_fair_methods_comparison_vs_B.py \\
+    --config experiments/configs/figures/fair_methods_comparison_vs_B.yaml
 """
 
 from __future__ import annotations
 
 import argparse
-import datetime
+import datetime as _dt
 import json
-import os
 import platform
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import yaml
 
 # =============================================================================
 # PATH HANDLING
@@ -64,12 +85,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import yaml
-
-
 # =============================================================================
 # PIPELINE IMPORTS
 # =============================================================================
@@ -79,20 +94,19 @@ from sfc.pipelines.fair_methods_comparison_vs_B import (
     save_dat_file,
 )
 
-
 # =============================================================================
-# DEFAULT CONFIG
+# CONSTANTS
 # =============================================================================
-
-DEFAULT_CONFIG_PATH = (
-    PROJECT_ROOT
-    / "experiments"
-    / "configs"
-    / "figures"
-    / "fair_methods_comparison_vs_B.yaml"
-)
 
 BASE_NAME = "fair_methods_comparison_vs_B"
+
+DEFAULT_CONFIG_PATH = (
+        PROJECT_ROOT
+        / "experiments"
+        / "configs"
+        / "figures"
+        / "fair_methods_comparison_vs_B.yaml"
+)
 
 
 # =============================================================================
@@ -118,47 +132,53 @@ def load_yaml_config(config_path: str | Path) -> dict:
 
 
 # =============================================================================
-# OUTPUT DIR
+# OUTPUT DIRECTORY
 # =============================================================================
 
-def prepare_output_dir(cfg):
+def prepare_output_dir(cfg: dict) -> tuple[Path, str]:
     """
     Prepare timestamped output directory using the project convention:
 
-        base_dir / figure_dir / YYYYMMDD_HHMMSS
+        output.base_dir / output.figure_dir / YYYYMMDD_HHMMSS
     """
     output_cfg = cfg["output"]
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 
     base_dir = Path(output_cfg["base_dir"])
+
     if not base_dir.is_absolute():
         base_dir = PROJECT_ROOT / base_dir
 
-    output_dir = base_dir / output_cfg["figure_dir"] / timestamp
+    figure_dir = output_cfg.get("figure_dir", BASE_NAME)
+
+    output_dir = base_dir / figure_dir / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    return str(output_dir), timestamp
+    return output_dir, timestamp
 
 
 # =============================================================================
-# GIT META
+# GIT METADATA
 # =============================================================================
 
-def get_git_commit():
+def get_git_commit() -> str:
     """
     Return current git commit hash if available.
     """
     try:
-        return subprocess.check_output(
+        out = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
             cwd=str(PROJECT_ROOT),
             stderr=subprocess.DEVNULL,
-        ).decode("utf-8").strip()
+            text=True,
+        )
+        return out.strip()
     except Exception:
         return "unknown"
 
 
-def get_git_dirty():
+def get_git_dirty() -> bool | None:
     """
     Return whether git working tree has uncommitted changes.
     """
@@ -167,8 +187,9 @@ def get_git_dirty():
             ["git", "status", "--porcelain"],
             cwd=str(PROJECT_ROOT),
             stderr=subprocess.DEVNULL,
-        ).decode("utf-8").strip()
-        return bool(out)
+            text=True,
+        )
+        return bool(out.strip())
     except Exception:
         return None
 
@@ -181,15 +202,15 @@ def _json_safe_value(value: Any):
     """
     Convert numpy/pandas values into JSON-safe objects.
     """
-    if isinstance(value, (np.integer,)):
+    if isinstance(value, np.integer):
         return int(value)
 
-    if isinstance(value, (np.floating,)):
+    if isinstance(value, np.floating):
         if np.isfinite(value):
             return float(value)
         return None
 
-    if isinstance(value, (np.bool_,)):
+    if isinstance(value, np.bool_):
         return bool(value)
 
     if isinstance(value, np.ndarray):
@@ -208,54 +229,79 @@ def _json_safe_value(value: Any):
 # DATA SAVE
 # =============================================================================
 
-def save_data(df, cfg, output_dir, timestamp):
+def save_data(
+        df: pd.DataFrame,
+        cfg: dict,
+        output_dir: Path,
+        timestamp: str,
+) -> dict[str, str]:
     """
     Save the generated dataset in the requested formats.
     """
-    data_cfg = cfg["output"].get("formats", {}).get("data", ["dat"])
+    data_formats = cfg["output"].get("formats", {}).get("data", ["dat"])
     delimiter = cfg.get("data_format", {}).get("delimiter", "\t")
 
     base_name = f"{BASE_NAME}_{timestamp}"
 
-    generated = {}
+    generated_files: dict[str, str] = {}
 
-    for fmt in data_cfg:
-        path = os.path.join(output_dir, f"{base_name}.{fmt}")
+    for fmt in data_formats:
+        path = output_dir / f"{base_name}.{fmt}"
 
         if fmt == "dat":
-            save_dat_file(df, path, delimiter=delimiter)
+            save_dat_file(
+                df=df,
+                path=str(path),
+                delimiter=delimiter,
+            )
+
         elif fmt == "csv":
-            df.to_csv(path, index=False, float_format="%.8e")
+            df.to_csv(
+                path,
+                index=False,
+                float_format="%.8e",
+            )
+
         else:
             raise ValueError(f"Unsupported data format: {fmt}")
 
-        generated[fmt] = path
+        generated_files[fmt] = str(path)
 
-    return generated
+    return generated_files
 
 
-def save_config_copy(config_path, output_dir, timestamp):
+def save_config_copy(
+        config_path: str | Path,
+        output_dir: Path,
+        timestamp: str,
+) -> str:
     """
     Copy YAML config into output directory.
     """
-    dst = os.path.join(output_dir, f"{BASE_NAME}_{timestamp}.yaml")
+    dst = output_dir / f"{BASE_NAME}_{timestamp}.yaml"
     shutil.copyfile(config_path, dst)
-    return dst
+
+    return str(dst)
 
 
-def save_metadata(df, cfg, config_path, output_dir, timestamp, generated_files):
+def save_metadata(
+        df: pd.DataFrame,
+        cfg: dict,
+        config_path: str | Path,
+        output_dir: Path,
+        timestamp: str,
+        generated_files: dict[str, str],
+) -> str:
     """
     Save metadata JSON.
     """
     _ = cfg
 
-    metadata_path = os.path.join(
-        output_dir,
-        f"{BASE_NAME}_{timestamp}_metadata.json",
-    )
+    metadata_path = output_dir / f"{BASE_NAME}_{timestamp}_metadata.json"
 
     metadata = {
-        "created_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "created_at": _dt.datetime.utcnow().replace(microsecond=0).isoformat()
+                      + "Z",
         "project_root": str(PROJECT_ROOT),
         "config_path": str(config_path),
         "output_dir": str(output_dir),
@@ -280,10 +326,10 @@ def save_metadata(df, cfg, config_path, output_dir, timestamp, generated_files):
                 "mean": _json_safe_value(finite.mean()),
             }
 
-    with open(metadata_path, "w", encoding="utf-8") as f:
+    with metadata_path.open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-    return metadata_path
+    return str(metadata_path)
 
 
 # =============================================================================
@@ -294,7 +340,7 @@ def print_result_diagnostics(df: pd.DataFrame):
     """
     Print important result diagnostics explicitly.
     """
-    print("\n[INFO] Benchmark + FDMA diagnostics:")
+    print("\n[INFO] Benchmark / Nyquist + FDMA diagnostics:")
 
     benchmark_cols = [
         "B",
@@ -317,6 +363,8 @@ def print_result_diagnostics(df: pd.DataFrame):
         "mse_benchmark_fdma",
         "mse_cs_fdma",
         "mse_ppm_fdma",
+        "mse_sod_fdma",
+        "mse_fri_fdma",
         "mse_rbcp",
         "mse_rbcp_time",
         "mse_sfc",
@@ -329,32 +377,111 @@ def print_result_diagnostics(df: pd.DataFrame):
     else:
         print("[WARN] MSE columns not found in DataFrame.")
 
-    print("\n[INFO] Resource diagnostics:")
+    print("\n[INFO] FDMA budget diagnostics:")
 
-    resource_cols = [
+    fdma_cols = [
         "B",
-        "M_benchmark_min",
-        "M_benchmark_mean",
-        "M_benchmark_max",
-        "M_rbcp",
-        "M_time",
+        "fdma_capacity_sensor_min",
+        "fdma_capacity_sensor_max",
+        "fdma_budget_bits_sensor_min",
+        "fdma_budget_bits_sensor_max",
+    ]
+    fdma_cols = [c for c in fdma_cols if c in df.columns]
+
+    if fdma_cols:
+        print(df[fdma_cols].to_string(index=False))
+    else:
+        print("[WARN] FDMA budget columns not found in DataFrame.")
+
+    print("\n[INFO] CS / PPM diagnostics:")
+
+    cs_ppm_cols = [
+        "B",
         "cs_measurements_min",
         "cs_measurements_max",
+        "cs_measurement_bits_min",
+        "cs_measurement_bits_max",
+        "cs_sparsity_eff_min",
+        "cs_sparsity_eff_max",
+        "cs_sampling_rate",
+        "cs_num_samples",
+        "cs_quantized_fraction",
         "ppm_fs_msg_min",
         "ppm_fs_msg_max",
+    ]
+    cs_ppm_cols = [c for c in cs_ppm_cols if c in df.columns]
+
+    if cs_ppm_cols:
+        print(df[cs_ppm_cols].to_string(index=False))
+    else:
+        print("[WARN] CS / PPM diagnostic columns not found in DataFrame.")
+
+    print("\n[INFO] SoD / FRI diagnostics:")
+
+    sod_fri_cols = [
+        "B",
+        "sod_num_events_min",
+        "sod_num_events_mean",
+        "sod_num_events_max",
+        "sod_payload_bits_mean",
+        "sod_payload_budget_bits_mean",
+        "sod_fdma_feasible_fraction",
+        "fri_K_mean",
+        "fri_bits_location_mean",
+        "fri_bits_amplitude_mean",
+        "fri_budget_bits_mean",
+        "fri_fdma_feasible_fraction",
+    ]
+    sod_fri_cols = [c for c in sod_fri_cols if c in df.columns]
+
+    if sod_fri_cols:
+        print(df[sod_fri_cols].to_string(index=False))
+    else:
+        print("[WARN] SoD / FRI diagnostic columns not found in DataFrame.")
+
+    print("\n[INFO] RbCP / SFC diagnostics:")
+
+    rbcp_sfc_cols = [
+        "B",
+        "M_rbcp",
+        "M_time",
         "sfc_sed_valid_fraction",
     ]
-    resource_cols = [c for c in resource_cols if c in df.columns]
+    rbcp_sfc_cols = [c for c in rbcp_sfc_cols if c in df.columns]
 
-    if resource_cols:
-        print(df[resource_cols].to_string(index=False))
+    if rbcp_sfc_cols:
+        print(df[rbcp_sfc_cols].to_string(index=False))
     else:
-        print("[WARN] Resource columns not found in DataFrame.")
+        print("[WARN] RbCP / SFC diagnostic columns not found in DataFrame.")
 
 
 # =============================================================================
 # PLOT HELPERS
 # =============================================================================
+
+def _figure_formats(cfg: dict) -> list:
+    """
+    Return requested figure formats.
+
+    Supports both:
+        output.formats.figure
+    and:
+        output.formats.plot
+    """
+    formats_cfg = cfg["output"].get("formats", {})
+
+    return formats_cfg.get(
+        "figure",
+        formats_cfg.get("plot", ["png", "pdf"]),
+    )
+
+
+def _to_numeric_array(values) -> np.ndarray:
+    """
+    Convert a sequence or pandas Series to a float numpy array.
+    """
+    return np.asarray(pd.to_numeric(values, errors="coerce"), dtype=float)
+
 
 def _finite_positive(values) -> np.ndarray:
     """
@@ -387,257 +514,477 @@ def _set_log_ylim(ax, series_list):
     )
 
 
-def plot_main_mse_figure(df, cfg, output_dir, timestamp, show=False):
+def _plot_column_if_present(
+        ax,
+        df: pd.DataFrame,
+        x,
+        column: str,
+        label: str,
+        marker: str,
+        linestyle: str = "-",
+        linewidth: float = 1.5,
+        markersize: float = 5.0,
+):
+    """
+    Plot one column if present and at least one finite value exists.
+    """
+    if column not in df.columns:
+        return None
+
+    y = _to_numeric_array(df[column])
+
+    if not np.any(np.isfinite(y)):
+        return None
+
+    line = ax.plot(
+        x,
+        y,
+        marker=marker,
+        linestyle=linestyle,
+        linewidth=linewidth,
+        markersize=markersize,
+        label=label,
+    )
+
+    return line[0]
+
+
+# =============================================================================
+# MAIN MSE PLOT
+# =============================================================================
+
+def plot_main_mse_figure(
+        df: pd.DataFrame,
+        cfg: dict,
+        output_dir: Path,
+        timestamp: str,
+        show: bool = False,
+) -> dict[str, str]:
     """
     Plot main MSE figure and save in requested formats.
     """
     if "B" not in df.columns:
         raise ValueError("Cannot plot main figure. Missing required column: B")
 
-    B = np.asarray(pd.to_numeric(df["B"], errors="coerce"), dtype=float)
+    B = _to_numeric_array(df["B"])
 
-    fig, ax = plt.subplots(figsize=(7.6, 4.8))
+    plot_cfg = cfg.get("plot", {})
+    label_map = plot_cfg.get("label_map", {})
+
+    fig, ax = plt.subplots(figsize=(8.2, 5.0))
 
     method_specs = [
-        ("mse_benchmark_fdma", "Benchmark + FDMA", "x", "-"),
-        ("mse_cs_fdma", "CS + FDMA", "o", "-"),
-        ("mse_ppm_fdma", "PPM + FDMA", "s", "-"),
-        ("mse_rbcp", "RbCP", "^", "-"),
-        ("mse_rbcp_time", "RbCP_time", "D", "-"),
-        ("mse_sfc", "SFC", "v", "-"),
-        ("mse_sfc_sed", "SFC + SED", "P", "-"),
+        (
+            "mse_benchmark_fdma",
+            label_map.get("benchmark_fdma", "Benchmark / Nyquist + FDMA"),
+            "x",
+            "-",
+        ),
+        (
+            "mse_cs_fdma",
+            label_map.get("cs_fdma", "CS + FDMA"),
+            "o",
+            "-",
+        ),
+        (
+            "mse_ppm_fdma",
+            label_map.get("ppm_fdma", "PPM + FDMA"),
+            "s",
+            "-",
+        ),
+        (
+            "mse_sod_fdma",
+            label_map.get("sod_fdma", "SoD + FDMA"),
+            "*",
+            "-",
+        ),
+        (
+            "mse_fri_fdma",
+            label_map.get("fri_fdma", "FRI-inspired + FDMA"),
+            "h",
+            "-",
+        ),
+        (
+            "mse_rbcp",
+            label_map.get("rbcp", "RbCP"),
+            "^",
+            "-",
+        ),
+        (
+            "mse_rbcp_time",
+            label_map.get("rbcp_time", "RbCP_time"),
+            "D",
+            "-",
+        ),
+        (
+            "mse_sfc",
+            label_map.get("sfc", "SFC"),
+            "v",
+            "-",
+        ),
+        (
+            "mse_sfc_sed",
+            label_map.get("sfc_sed", "SFC + SED"),
+            "P",
+            "-",
+        ),
     ]
 
     plotted = []
-    plotted_any = False
 
     for col, label, marker, linestyle in method_specs:
-        if col not in df.columns:
-            continue
-
-        y = np.asarray(pd.to_numeric(df[col], errors="coerce"), dtype=float)
-        plotted.append(y)
-        plotted_any = True
-
-        ax.plot(
-            B,
-            y,
+        line = _plot_column_if_present(
+            ax=ax,
+            df=df,
+            x=B,
+            column=col,
+            label=label,
             marker=marker,
             linestyle=linestyle,
-            linewidth=1.5,
-            markersize=5,
-            label=label,
         )
 
-    if not plotted_any:
+        if line is not None:
+            plotted.append(line.get_ydata())
+
+    if not plotted:
         raise ValueError(
-            "Cannot plot main figure. No MSE columns found. "
+            "Cannot plot main figure. No valid MSE columns found. "
             f"Available columns: {list(df.columns)}"
         )
 
-    ax.set_xlabel("Total bandwidth B")
-    ax.set_ylabel("MSE")
-    ax.set_yscale("log")
-    ax.grid(True, which="both", linestyle=":", linewidth=0.7)
-    ax.legend(loc="best", frameon=True)
-    ax.set_title("Fair methods comparison versus total bandwidth")
+    ax.set_xlabel(plot_cfg.get("x_axis", "Total bandwidth B"))
+    ax.set_ylabel(plot_cfg.get("y_axis", "MSE"))
 
-    _set_log_ylim(ax, plotted)
+    if plot_cfg.get("x_scale", "linear") == "log":
+        ax.set_xscale("log")
+
+    if plot_cfg.get("y_scale", "log") == "log":
+        ax.set_yscale("log")
+        _set_log_ylim(ax, plotted)
+
+    if plot_cfg.get("show_grid", True):
+        ax.grid(True, which="both", linestyle=":", linewidth=0.7)
+
+    if plot_cfg.get("legend", True):
+        ax.legend(loc="best", frameon=True)
+
+    ax.set_title(
+        cfg.get("figure", {}).get(
+            "title",
+            "Fair methods comparison versus total bandwidth",
+        )
+    )
 
     fig.tight_layout()
 
-    formats = cfg["output"].get("formats", {}).get("figure", ["png", "pdf"])
+    generated_files: dict[str, str] = {}
     base_name = f"{BASE_NAME}_{timestamp}"
-    generated = {}
 
-    for fmt in formats:
-        path = os.path.join(output_dir, f"{base_name}.{fmt}")
+    for fmt in _figure_formats(cfg):
+        path = output_dir / f"{base_name}.{fmt}"
+
         if fmt == "png":
-            fig.savefig(path, dpi=300)
+            fig.savefig(path, dpi=300, bbox_inches="tight")
+
         elif fmt == "pdf":
-            fig.savefig(path)
+            fig.savefig(path, bbox_inches="tight")
+
         else:
             raise ValueError(f"Unsupported figure format: {fmt}")
-        generated[f"main_{fmt}"] = path
+
+        generated_files[f"main_{fmt}"] = str(path)
 
     if show:
         plt.show()
     else:
         plt.close(fig)
 
-    return generated
+    return generated_files
 
 
-def plot_diagnostics_figure(df, cfg, output_dir, timestamp, show=False):
+# =============================================================================
+# DIAGNOSTICS PLOT
+# =============================================================================
+
+def plot_diagnostics_figure(
+        df: pd.DataFrame,
+        cfg: dict,
+        output_dir: Path,
+        timestamp: str,
+        show: bool = False,
+) -> dict[str, str]:
     """
     Plot diagnostics figure and save in requested formats.
+
+    Panels:
+    1. FDMA capacity / budget.
+    2. Benchmark and RbCP M values.
+    3. CS and PPM resources.
+    4. SoD and FRI resources / feasibility.
+    5. SFC+SED valid fraction.
     """
     if "B" not in df.columns:
         raise ValueError("Column 'B' is required for diagnostics plot.")
 
-    B = np.asarray(pd.to_numeric(df["B"], errors="coerce"), dtype=float)
+    B = _to_numeric_array(df["B"])
 
-    fig, axes = plt.subplots(4, 1, figsize=(7.6, 10.2), sharex=True)
+    fig, axes = plt.subplots(5, 1, figsize=(8.2, 12.0), sharex=True)
 
     # -------------------------------------------------------------------------
-    # 1. Benchmark quantization bins
+    # 1. FDMA budget.
     # -------------------------------------------------------------------------
-    if "M_benchmark_min" in df.columns and "M_benchmark_max" in df.columns:
-        M_min = np.asarray(pd.to_numeric(df["M_benchmark_min"], errors="coerce"), dtype=float)
-        M_max = np.asarray(pd.to_numeric(df["M_benchmark_max"], errors="coerce"), dtype=float)
+    _plot_column_if_present(
+        axes[0],
+        df,
+        B,
+        "fdma_budget_bits_sensor_min",
+        "FDMA budget bits min",
+        "o",
+        "-",
+    )
+    _plot_column_if_present(
+        axes[0],
+        df,
+        B,
+        "fdma_budget_bits_sensor_max",
+        "FDMA budget bits max",
+        "s",
+        "--",
+    )
 
-        axes[0].plot(
-            B,
-            M_min,
-            "x-",
-            linewidth=1.5,
-            markersize=5,
-            label="Benchmark M min",
-        )
-        axes[0].plot(
-            B,
-            M_max,
-            "x--",
-            linewidth=1.5,
-            markersize=5,
-            label="Benchmark M max",
-        )
-
-    axes[0].set_ylabel("Benchmark M")
+    axes[0].set_ylabel("FDMA bits")
     axes[0].grid(True, linestyle=":", linewidth=0.7)
-    axes[0].legend(loc="best", frameon=True)
+
+    if axes[0].lines:
+        axes[0].legend(loc="best", frameon=True)
 
     # -------------------------------------------------------------------------
-    # 2. CS measurements
+    # 2. Benchmark / RbCP M values.
     # -------------------------------------------------------------------------
-    if "cs_measurements_min" in df.columns and "cs_measurements_max" in df.columns:
-        axes[1].plot(
-            B,
-            np.asarray(pd.to_numeric(df["cs_measurements_min"], errors="coerce"), dtype=float),
-            "o-",
-            linewidth=1.5,
-            markersize=5,
-            label="CS measurements min",
-        )
-        axes[1].plot(
-            B,
-            np.asarray(pd.to_numeric(df["cs_measurements_max"], errors="coerce"), dtype=float),
-            "s--",
-            linewidth=1.5,
-            markersize=5,
-            label="CS measurements max",
-        )
+    _plot_column_if_present(
+        axes[1],
+        df,
+        B,
+        "M_benchmark_min",
+        "Benchmark M min",
+        "x",
+        "-",
+    )
+    _plot_column_if_present(
+        axes[1],
+        df,
+        B,
+        "M_benchmark_max",
+        "Benchmark M max",
+        "x",
+        "--",
+    )
+    _plot_column_if_present(
+        axes[1],
+        df,
+        B,
+        "M_rbcp",
+        "M_RbCP",
+        "^",
+        "-",
+    )
+    _plot_column_if_present(
+        axes[1],
+        df,
+        B,
+        "M_time",
+        "M_time",
+        "D",
+        "-",
+    )
 
-    axes[1].set_ylabel("CS measurements")
+    axes[1].set_ylabel("M values")
     axes[1].grid(True, linestyle=":", linewidth=0.7)
-    axes[1].legend(loc="best", frameon=True)
+
+    if axes[1].lines:
+        axes[1].legend(loc="best", frameon=True)
 
     # -------------------------------------------------------------------------
-    # 3. PPM fs_msg
+    # 3. CS and PPM resources.
     # -------------------------------------------------------------------------
-    if "ppm_fs_msg_min" in df.columns and "ppm_fs_msg_max" in df.columns:
-        axes[2].plot(
-            B,
-            np.asarray(pd.to_numeric(df["ppm_fs_msg_min"], errors="coerce"), dtype=float),
-            "o-",
-            linewidth=1.5,
-            markersize=5,
-            label="PPM fs_msg min",
-        )
-        axes[2].plot(
-            B,
-            np.asarray(pd.to_numeric(df["ppm_fs_msg_max"], errors="coerce"), dtype=float),
-            "s--",
-            linewidth=1.5,
-            markersize=5,
-            label="PPM fs_msg max",
-        )
+    _plot_column_if_present(
+        axes[2],
+        df,
+        B,
+        "cs_measurements_min",
+        "CS measurements min",
+        "o",
+        "-",
+    )
+    _plot_column_if_present(
+        axes[2],
+        df,
+        B,
+        "cs_measurements_max",
+        "CS measurements max",
+        "s",
+        "--",
+    )
+    _plot_column_if_present(
+        axes[2],
+        df,
+        B,
+        "ppm_fs_msg_min",
+        "PPM fs_msg min",
+        "^",
+        "-",
+    )
+    _plot_column_if_present(
+        axes[2],
+        df,
+        B,
+        "ppm_fs_msg_max",
+        "PPM fs_msg max",
+        "v",
+        "--",
+    )
 
-    axes[2].set_ylabel("PPM fs_msg")
+    axes[2].set_ylabel("CS / PPM")
     axes[2].grid(True, linestyle=":", linewidth=0.7)
-    axes[2].legend(loc="best", frameon=True)
+
+    if axes[2].lines:
+        axes[2].legend(loc="best", frameon=True)
 
     # -------------------------------------------------------------------------
-    # 4. M_time / M_rbcp and SFC+SED valid fraction
+    # 4. SoD / FRI resources and feasibility.
     # -------------------------------------------------------------------------
-    lines = []
-    labels = []
+    _plot_column_if_present(
+        axes[3],
+        df,
+        B,
+        "sod_num_events_mean",
+        "SoD events mean",
+        "*",
+        "-",
+    )
+    _plot_column_if_present(
+        axes[3],
+        df,
+        B,
+        "sod_payload_bits_mean",
+        "SoD payload bits mean",
+        "o",
+        "--",
+    )
+    _plot_column_if_present(
+        axes[3],
+        df,
+        B,
+        "fri_K_mean",
+        "FRI K mean",
+        "h",
+        "-",
+    )
+    _plot_column_if_present(
+        axes[3],
+        df,
+        B,
+        "fri_budget_bits_mean",
+        "FRI budget bits mean",
+        "s",
+        "--",
+    )
 
-    if "M_time" in df.columns:
-        M_time = np.asarray(pd.to_numeric(df["M_time"], errors="coerce"), dtype=float)
-        line = axes[3].plot(
-            B,
-            M_time,
-            "o-",
-            linewidth=1.5,
-            markersize=5,
-            label="M_time",
-        )
-        lines.extend(line)
-        labels.extend([line[0].get_label()])
-
-    if "M_rbcp" in df.columns:
-        M_rbcp_numeric = pd.to_numeric(df["M_rbcp"], errors="coerce")
-        M_rbcp = np.asarray(M_rbcp_numeric, dtype=float)
-
-        if np.any(np.isfinite(M_rbcp)):
-            line = axes[3].plot(
-                B,
-                M_rbcp,
-                "^-",
-                linewidth=1.5,
-                markersize=5,
-                label="M_RbCP",
-            )
-            lines.extend(line)
-            labels.extend([line[0].get_label()])
-
-    axes[3].set_xlabel("Total bandwidth B")
-    axes[3].set_ylabel("M values")
+    axes[3].set_ylabel("SoD / FRI")
     axes[3].grid(True, linestyle=":", linewidth=0.7)
 
-    if "sfc_sed_valid_fraction" in df.columns:
-        ax2 = axes[3].twinx()
-        line = ax2.plot(
-            B,
-            np.asarray(pd.to_numeric(df["sfc_sed_valid_fraction"], errors="coerce"), dtype=float),
-            "s--",
-            linewidth=1.5,
-            markersize=5,
-            color="C1",
-            label="SFC+SED valid fraction",
-        )
-        ax2.set_ylabel("Valid fraction")
-        ax2.set_ylim(-0.05, 1.05)
+    if axes[3].lines:
+        axes[3].legend(loc="best", frameon=True)
 
-        lines.extend(line)
-        labels.extend([line[0].get_label()])
+    ax3b = axes[3].twinx()
 
-    if lines:
-        axes[3].legend(lines, labels, loc="best", frameon=True)
+    line_refs = []
+    line_labels = []
+
+    for col, label, marker, linestyle in [
+        (
+                "sod_fdma_feasible_fraction",
+                "SoD feasible fraction",
+                "P",
+                ":",
+        ),
+        (
+                "fri_fdma_feasible_fraction",
+                "FRI feasible fraction",
+                "X",
+                ":",
+        ),
+    ]:
+        if col in df.columns:
+            y = _to_numeric_array(df[col])
+
+            if np.any(np.isfinite(y)):
+                line = ax3b.plot(
+                    B,
+                    y,
+                    marker=marker,
+                    linestyle=linestyle,
+                    linewidth=1.5,
+                    markersize=5,
+                    label=label,
+                )[0]
+                line_refs.append(line)
+                line_labels.append(label)
+
+    ax3b.set_ylabel("Feasible fraction")
+    ax3b.set_ylim(-0.05, 1.05)
+
+    if line_refs:
+        existing_lines = list(axes[3].lines) + line_refs
+        existing_labels = [line.get_label() for line in axes[3].lines] + line_labels
+        axes[3].legend(existing_lines, existing_labels, loc="best", frameon=True)
+
+    # -------------------------------------------------------------------------
+    # 5. SFC+SED valid fraction.
+    # -------------------------------------------------------------------------
+    _plot_column_if_present(
+        axes[4],
+        df,
+        B,
+        "sfc_sed_valid_fraction",
+        "SFC+SED valid fraction",
+        "P",
+        "-",
+    )
+
+    axes[4].set_xlabel("Total bandwidth B")
+    axes[4].set_ylabel("Valid fraction")
+    axes[4].set_ylim(-0.05, 1.05)
+    axes[4].grid(True, linestyle=":", linewidth=0.7)
+
+    if axes[4].lines:
+        axes[4].legend(loc="best", frameon=True)
 
     fig.tight_layout()
 
-    formats = cfg["output"].get("formats", {}).get("figure", ["png", "pdf"])
+    generated_files: dict[str, str] = {}
     base_name = f"{BASE_NAME}_{timestamp}_diagnostics"
-    generated = {}
 
-    for fmt in formats:
-        path = os.path.join(output_dir, f"{base_name}.{fmt}")
+    for fmt in _figure_formats(cfg):
+        path = output_dir / f"{base_name}.{fmt}"
+
         if fmt == "png":
-            fig.savefig(path, dpi=300)
+            fig.savefig(path, dpi=300, bbox_inches="tight")
+
         elif fmt == "pdf":
-            fig.savefig(path)
+            fig.savefig(path, bbox_inches="tight")
+
         else:
             raise ValueError(f"Unsupported figure format: {fmt}")
-        generated[f"diagnostics_{fmt}"] = path
+
+        generated_files[f"diagnostics_{fmt}"] = str(path)
 
     if show:
         plt.show()
     else:
         plt.close(fig)
 
-    return generated
+    return generated_files
 
 
 # =============================================================================
@@ -645,8 +992,8 @@ def plot_diagnostics_figure(df, cfg, output_dir, timestamp, show=False):
 # =============================================================================
 
 def run_fair_methods_comparison_vs_B(
-    config_path: str | Path = DEFAULT_CONFIG_PATH,
-    show_plots: bool = False,
+        config_path: str | Path = DEFAULT_CONFIG_PATH,
+        show_plots: bool = False,
 ) -> pd.DataFrame:
     """
     Run fair methods comparison versus B following the project output convention.
@@ -668,15 +1015,37 @@ def run_fair_methods_comparison_vs_B(
 
     print_result_diagnostics(df)
 
-    generated_files = {}
+    generated_files: dict[str, str] = {}
 
-    data_files = save_data(df, cfg, output_dir, timestamp)
-    generated_files.update(data_files)
+    # -------------------------------------------------------------------------
+    # Save data.
+    # -------------------------------------------------------------------------
+    if cfg["output"].get("save_dat", True):
+        data_files = save_data(
+            df=df,
+            cfg=cfg,
+            output_dir=output_dir,
+            timestamp=timestamp,
+        )
+        generated_files.update(data_files)
+        print("[INFO] Data saved")
 
-    copied_config_path = save_config_copy(config_path, output_dir, timestamp)
-    generated_files["config"] = copied_config_path
+    # -------------------------------------------------------------------------
+    # Save config copy.
+    # -------------------------------------------------------------------------
+    if cfg["output"].get("save_config_copy", True):
+        copied_config_path = save_config_copy(
+            config_path=config_path,
+            output_dir=output_dir,
+            timestamp=timestamp,
+        )
+        generated_files["config"] = copied_config_path
+        print("[INFO] Config copy saved")
 
-    if cfg["output"].get("save_figures", True):
+    # -------------------------------------------------------------------------
+    # Save figures.
+    # -------------------------------------------------------------------------
+    if cfg["output"].get("save_plot", cfg["output"].get("save_figures", True)):
         main_figs = plot_main_mse_figure(
             df=df,
             cfg=cfg,
@@ -685,32 +1054,40 @@ def run_fair_methods_comparison_vs_B(
             show=show_plots,
         )
         generated_files.update(main_figs)
+        print("[INFO] Main MSE figure saved")
 
-        diagnostic_figs = plot_diagnostics_figure(
+        if cfg["output"].get("save_diagnostics_plot", True):
+            diagnostic_figs = plot_diagnostics_figure(
+                df=df,
+                cfg=cfg,
+                output_dir=output_dir,
+                timestamp=timestamp,
+                show=show_plots,
+            )
+            generated_files.update(diagnostic_figs)
+            print("[INFO] Diagnostics figure saved")
+
+    # -------------------------------------------------------------------------
+    # Save metadata.
+    # -------------------------------------------------------------------------
+    if cfg["output"].get("save_metadata", True):
+        metadata_expected_path = (
+                output_dir / f"{BASE_NAME}_{timestamp}_metadata.json"
+        )
+
+        generated_files["metadata"] = str(metadata_expected_path)
+
+        metadata_path = save_metadata(
             df=df,
             cfg=cfg,
+            config_path=config_path,
             output_dir=output_dir,
             timestamp=timestamp,
-            show=show_plots,
+            generated_files=generated_files,
         )
-        generated_files.update(diagnostic_figs)
 
-    metadata_filename = os.path.join(
-        output_dir,
-        f"{BASE_NAME}_{timestamp}_metadata.json",
-    )
-    generated_files["metadata"] = metadata_filename
-
-    metadata_path = save_metadata(
-        df=df,
-        cfg=cfg,
-        config_path=config_path,
-        output_dir=output_dir,
-        timestamp=timestamp,
-        generated_files=generated_files,
-    )
-
-    generated_files["metadata"] = metadata_path
+        generated_files["metadata"] = metadata_path
+        print("[INFO] Metadata saved")
 
     print("\n[INFO] Generated files:")
     for key, path in generated_files.items():
@@ -722,6 +1099,8 @@ def run_fair_methods_comparison_vs_B(
     print("\n[INFO] Columns:")
     print(list(df.columns))
 
+    print("\n[INFO] Done ✅")
+
     return df
 
 
@@ -730,6 +1109,9 @@ def run_fair_methods_comparison_vs_B(
 # =============================================================================
 
 def main():
+    """
+    CLI entry point.
+    """
     parser = argparse.ArgumentParser(
         description="Run fair methods comparison versus total bandwidth B."
     )
@@ -758,7 +1140,8 @@ def main():
 if __name__ == "__main__":
     main()
 
-
 # from scripts.run_fair_methods_comparison_vs_B import run_fair_methods_comparison_vs_B
 #
-# df = run_fair_methods_comparison_vs_B()
+# df = run_fair_methods_comparison_vs_B(
+#     "experiments/configs/figures/fair_methods_comparison_vs_B.yaml"
+# )

@@ -90,7 +90,7 @@ from sfc.core.filters import (
     plot_fft,
     filter_periodic,
 )
-from sfc.core.nyquist import Nyquist
+from sfc.core.acquisition.nyquist import Nyquist
 from sfc.core.delta_sampler import (
     print_new_samples,
     plot_threshold,
