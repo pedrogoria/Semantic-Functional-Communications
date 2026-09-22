@@ -12,11 +12,14 @@ This figure evaluates, as a function of B:
 
 Important simplifications
 -------------------------
-1. No channel:
-   - no SFC
+1. No simulated physical channel:
+   - no SFC physical channel
    - no RbCP_time
-   - no AWGN
+   - no AWGN waveform/resource simulation
    - no semantic error detection
+
+   Shannon capacity is still used to determine feasible quantization
+   resolutions for Benchmark and RbCP.
 
 2. Figure-5-style power model:
    Keep per-sensor SNR_dB fixed and N0 fixed, derive P(B) from:
@@ -74,6 +77,16 @@ Important simplifications
 
    The role of N is to define the number of representation harmonics. The role
    of W is to define the source-signal bandwidth used by the signal filter.
+
+Core-use policy
+---------------
+- Filtering uses sfc.core.filters.filter_periodic.
+- Fourier coefficients use sfc.core.fourier.FourierCoefficientCore.
+- Phase coefficients use sfc.core.phase_cof.PhaseCoefficientCore.
+- ta/tb quantization uses sfc.core.quantization.quantize_ta_tb.
+- Harmonic reconstruction uses sfc.core.reconstruction.recover_signal.
+- Benchmark M uses sfc.core.system_parameters.compute_benchmark_M_per_sensor.
+- RbCP M and bandwidth allocation helpers use sfc.core.theory.
 """
 
 from __future__ import annotations
@@ -91,9 +104,12 @@ from sfc.core.reconstruction import recover_signal
 from sfc.core.system_parameters import (
     build_derived_system_parameters,
     compute_benchmark_M_per_sensor,
-    compute_M_rbcp,
 )
-from sfc.core.theory import compute_snr_linear
+from sfc.core.theory import (
+    compute_M_rbcp,
+    compute_sensor_bandwidths,
+    compute_snr_linear,
+)
 
 
 # =============================================================================
@@ -127,7 +143,6 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         - mse_rbcp_pow2
         - num_trials
     """
-
     rng = np.random.default_rng(cfg["monte_carlo"]["seed"])
 
     print("[INFO] Starting rbcp_benchmark_truncation_mse_vs_B data generation")
@@ -262,12 +277,12 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         # ---------------------------------------------------------------------
         mse_benchmark_free = _run_benchmark_branch(
             cfg=cfg_B,
-            M_per_sensor=M_benchmark_free_vec
+            M_per_sensor=M_benchmark_free_vec,
         )
 
         mse_benchmark_pow2 = _run_benchmark_branch(
             cfg=cfg_B,
-            M_per_sensor=M_benchmark_pow2_vec
+            M_per_sensor=M_benchmark_pow2_vec,
         )
 
         # ---------------------------------------------------------------------
@@ -275,6 +290,8 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
         # ---------------------------------------------------------------------
         mse_rbcp_free_sum = 0.0
         mse_rbcp_pow2_sum = 0.0
+        rbcp_free_count = 0
+        rbcp_pow2_count = 0
 
         for i in range(n_trials):
             trial = _run_one_trial(
@@ -282,22 +299,51 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
                 rng=rng,
                 N=N,
                 M_rbcp_free=M_rbcp_free,
-                M_rbcp_pow2=M_rbcp_pow2
+                M_rbcp_pow2=M_rbcp_pow2,
             )
 
-            mse_rbcp_free_sum += trial["mse_rbcp_free"]
-            mse_rbcp_pow2_sum += trial["mse_rbcp_pow2"]
+            if np.isfinite(trial["mse_rbcp_free"]):
+                mse_rbcp_free_sum += trial["mse_rbcp_free"]
+                rbcp_free_count += 1
+
+            if np.isfinite(trial["mse_rbcp_pow2"]):
+                mse_rbcp_pow2_sum += trial["mse_rbcp_pow2"]
+                rbcp_pow2_count += 1
 
             if (i + 1) % max(1, n_trials // 5) == 0:
                 print(f"[INFO] Trial progress: {i + 1}/{n_trials}")
 
-        mse_rbcp_free = mse_rbcp_free_sum / n_trials
-        mse_rbcp_pow2 = mse_rbcp_pow2_sum / n_trials
+        mse_rbcp_free = (
+            mse_rbcp_free_sum / rbcp_free_count
+            if rbcp_free_count > 0
+            else np.nan
+        )
+        mse_rbcp_pow2 = (
+            mse_rbcp_pow2_sum / rbcp_pow2_count
+            if rbcp_pow2_count > 0
+            else np.nan
+        )
 
-        print(f"[INFO] mse_benchmark_free = {mse_benchmark_free:.6e}")
-        print(f"[INFO] mse_benchmark_pow2 = {mse_benchmark_pow2:.6e}")
-        print(f"[INFO] mse_rbcp_free = {mse_rbcp_free:.6e}")
-        print(f"[INFO] mse_rbcp_pow2 = {mse_rbcp_pow2:.6e}")
+        print(
+            f"[INFO] mse_benchmark_free = {mse_benchmark_free:.6e}"
+            if np.isfinite(mse_benchmark_free)
+            else "[INFO] mse_benchmark_free = nan"
+        )
+        print(
+            f"[INFO] mse_benchmark_pow2 = {mse_benchmark_pow2:.6e}"
+            if np.isfinite(mse_benchmark_pow2)
+            else "[INFO] mse_benchmark_pow2 = nan"
+        )
+        print(
+            f"[INFO] mse_rbcp_free = {mse_rbcp_free:.6e}"
+            if np.isfinite(mse_rbcp_free)
+            else "[INFO] mse_rbcp_free = nan"
+        )
+        print(
+            f"[INFO] mse_rbcp_pow2 = {mse_rbcp_pow2:.6e}"
+            if np.isfinite(mse_rbcp_pow2)
+            else "[INFO] mse_rbcp_pow2 = nan"
+        )
 
         results.append({
             "B": float(B),
@@ -324,63 +370,40 @@ def generate_rbcp_benchmark_truncation_mse_vs_B_data(cfg):
 
 def _derive_power_from_fixed_sensor_snr_and_n0(cfg):
     """
-    Derive P(B) from fixed per-sensor SNR and fixed N0.
+    Derive scalar P(B) from fixed per-sensor SNR and fixed N0.
 
-    The SNR configured in the YAML is interpreted as the SNR of each sensor
-    channel:
+    The configured SNR_dB is interpreted as the target per-sensor SNR:
 
         SNR_s = P / (B_s * N0)
 
     Therefore:
 
-        P = SNR_s * B_s * N0
+        P(B) = SNR_s * B_s * N0
 
-    Notes
-    -----
-    This helper assumes a scalar P shared by all sensors.
+    Because this pipeline uses one scalar P shared by all sensors, fixed
+    per-sensor SNR is only compatible with uniform bandwidth allocation.
 
-    If bandwidth allocation is uniform, all sensors have the same B_s and the
-    same SNR_s.
-
-    If bandwidth allocation is nonuniform, a single scalar P cannot keep the
-    same SNR for all sensors. In that case this helper raises an error.
+    For nonuniform allocation, use fixed P,N0 or sensor-dependent powers P_s.
     """
-
     SNR_s = compute_snr_linear(cfg["system"]["SNR_dB"])
     B = float(cfg["system"]["B"])
     N0 = float(cfg["system"]["N0"])
     S = int(cfg["system"]["S"])
 
-    allocation = cfg["system"].get("bandwidth_allocation", None)
-
-    if allocation is None:
-        alpha = 1.0 / S
-        B_sensor = alpha * B
-        return float(SNR_s * B_sensor * N0)
-
-    allocation = np.asarray(allocation, dtype=float).reshape(-1)
-
-    if len(allocation) != S:
-        raise ValueError(
-            f"bandwidth_allocation length mismatch: len={len(allocation)} but S={S}"
-        )
-
-    if np.any(allocation < 0):
-        raise ValueError("bandwidth_allocation must be nonnegative")
-
-    if not np.isclose(np.sum(allocation), 1.0):
-        raise ValueError(
-            f"bandwidth_allocation must sum to 1. Current sum={np.sum(allocation)}"
-        )
+    allocation, B_per_sensor = compute_sensor_bandwidths(
+        B=B,
+        S=S,
+        bandwidth_allocation=cfg["system"].get("bandwidth_allocation", None),
+    )
 
     if not np.allclose(allocation, np.ones(S) / S):
         raise ValueError(
-            "fixed per-sensor SNR with a scalar P requires uniform bandwidth allocation. "
-            "For nonuniform allocation, either allow sensor-dependent P_s or use fixed P,N0."
+            "fixed per-sensor SNR with scalar P requires uniform bandwidth allocation. "
+            "For nonuniform allocation, either allow sensor-dependent powers P_s "
+            "or use a fixed P,N0 power model."
         )
 
-    B_sensor = B * allocation[0]
-    return float(SNR_s * B_sensor * N0)
+    return float(SNR_s * float(B_per_sensor[0]) * N0)
 
 
 # =============================================================================
@@ -399,13 +422,12 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
             "mse_rbcp_pow2": ...
         }
     """
-
     params = build_derived_system_parameters(cfg)
 
     n_periods = int(
         cfg.get("signal", {}).get(
             "n_periods",
-            cfg.get("simulation", {}).get("n_periods", 1)
+            cfg.get("simulation", {}).get("n_periods", 1),
         )
     )
 
@@ -423,7 +445,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
         rng=rng,
         num_time_samples=n_time,
         n_periods=n_periods,
-        S=params.S
+        S=params.S,
     )
 
     # -------------------------------------------------------------------------
@@ -434,7 +456,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
         cfg=cfg,
         params=params,
         tau=tau,
-        Tt=Tt
+        Tt=Tt,
     )
 
     # -------------------------------------------------------------------------
@@ -442,7 +464,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
     # -------------------------------------------------------------------------
     x_filtered = _apply_peak_to_peak_control(
         x_filtered,
-        cfg["signal"].get("peak_to_peak", 0.0)
+        cfg["signal"].get("peak_to_peak", 0.0),
     )
 
     # -------------------------------------------------------------------------
@@ -452,7 +474,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
         x_filtered=x_filtered,
         tau=tau,
         Tt=Tt,
-        dc_enabled=cfg.get("dc", {}).get("enabled", False)
+        dc_enabled=cfg.get("dc", {}).get("enabled", False),
     )
 
     # -------------------------------------------------------------------------
@@ -465,7 +487,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
         S=params.S,
         Tt=Tt,
         normalize_dft=cfg["signal"].get("normalize_dft", True),
-        normalization_target=cfg["signal"].get("normalization_target", 3.99)
+        normalization_target=cfg["signal"].get("normalization_target", 3.99),
     )
 
     # -------------------------------------------------------------------------
@@ -479,7 +501,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
         S=params.S,
         cfg=cfg,
         params=params,
-        n_periods=n_periods
+        n_periods=n_periods,
     )
 
     # -------------------------------------------------------------------------
@@ -491,7 +513,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
         x_ref=x_zero_mean,
         t=t,
         tau=tau,
-        M_rbcp=M_rbcp_free
+        M_rbcp=M_rbcp_free,
     )
 
     # -------------------------------------------------------------------------
@@ -503,7 +525,7 @@ def _run_one_trial(cfg, rng, N, M_rbcp_free, M_rbcp_pow2):
         x_ref=x_zero_mean,
         t=t,
         tau=tau,
-        M_rbcp=M_rbcp_pow2
+        M_rbcp=M_rbcp_pow2,
     )
 
     return {
@@ -523,7 +545,6 @@ def _generate_signals(cfg, rng, num_time_samples, n_periods, S):
     Output shape:
         (time, periods, sensors)
     """
-
     dist = cfg["signal"]["distribution"]
 
     if dist == "uniform":
@@ -539,7 +560,7 @@ def _filter_signals(x_raw, cfg, params, tau, Tt):
     """
     Band-limit each signal using configured signal.W.
 
-    IMPORTANT:
+    IMPORTANT
     ---------
     The source filter bandwidth must come from:
 
@@ -552,7 +573,6 @@ def _filter_signals(x_raw, cfg, params, tau, Tt):
     N controls the number of representation harmonics. W controls the
     source-signal bandwidth.
     """
-
     W_filter = float(cfg["signal"].get("W", params.W))
 
     if W_filter <= 0:
@@ -568,7 +588,7 @@ def _filter_signals(x_raw, cfg, params, tau, Tt):
                 x_raw[:, p, s],
                 W_filter,
                 Tt,
-                tau
+                tau,
             )
 
     return x_filtered
@@ -578,7 +598,6 @@ def _apply_peak_to_peak_control(x_filtered, peak_to_peak):
     """
     Apply peak-to-peak control independently per (period, sensor).
     """
-
     if peak_to_peak == 0:
         return x_filtered
 
@@ -598,7 +617,6 @@ def _apply_dc_handling(x_filtered, tau, Tt, dc_enabled):
     """
     Remove DC component unless dc_enabled is True.
     """
-
     x_zero_mean = np.zeros_like(x_filtered)
     _, n_periods, S = x_filtered.shape
 
@@ -624,23 +642,22 @@ def _compute_fourier_coefficients(
     S,
     Tt,
     normalize_dft,
-    normalization_target
+    normalization_target,
 ):
     """
     Compute Fourier coefficients for all periods/sensors.
     """
-
     fourier_core = FourierCoefficientCore(
         T=tau,
         harmonics=N,
-        sensor_nodes=S
+        sensor_nodes=S,
     )
 
     an, bn, x_used = fourier_core.calc_an_bn_dft(
         x_zero_mean,
         Tt,
         normalize=normalize_dft,
-        norm=normalization_target
+        norm=normalization_target,
     )
 
     return an, bn, x_used
@@ -650,7 +667,6 @@ def _compute_phase_coefficients(an, bn, tau, N, S, cfg, params, n_periods):
     """
     Compute ta/tb for all periods and sensors.
     """
-
     phase_core = PhaseCoefficientCore(
         T=tau,
         harmonics=N,
@@ -660,7 +676,7 @@ def _compute_phase_coefficients(an, bn, tau, N, S, cfg, params, n_periods):
         bandwidth=params.B,
         detect_errors=False,
         periods=n_periods,
-        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
+        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001),
     )
 
     ta, tb = phase_core.calc_ta_tb(an, bn)
@@ -683,8 +699,7 @@ def _run_benchmark_branch(cfg, M_per_sensor):
 
     Returns the average over sensors.
     """
-
-    if not cfg["mode"].get("run_benchmark", False):
+    if not cfg.get("mode", {}).get("run_benchmark", True):
         return np.nan
 
     peak_to_peak = float(cfg["signal"]["peak_to_peak"])
@@ -719,7 +734,6 @@ def _run_rbcp_branch(ta, tb, x_ref, t, tau, M_rbcp):
     """
     Run direct RbCP and return average MSE over sensors/periods.
     """
-
     M_rbcp = int(M_rbcp)
 
     if M_rbcp < 2:
@@ -731,7 +745,7 @@ def _run_rbcp_branch(ta, tb, x_ref, t, tau, M_rbcp):
         ta=ta,
         tb=tb,
         w0=w0,
-        M=M_rbcp
+        M=M_rbcp,
     )
 
     _, n_periods, S = x_ref.shape
@@ -744,7 +758,7 @@ def _run_rbcp_branch(ta, tb, x_ref, t, tau, M_rbcp):
                 ta_q[p, :, s],
                 tb_q[p, :, s],
                 t,
-                w0
+                w0,
             )
 
             mse_sum += np.mean((x_ref[:, p, s] - x_rec) ** 2)
@@ -763,7 +777,6 @@ def _quantize_ta_tb_tensor(ta, tb, w0, M):
     Output shape:
         (periods, N, sensors)
     """
-
     ta = np.asarray(ta, dtype=float)
     tb = np.asarray(tb, dtype=float)
 
@@ -784,7 +797,7 @@ def _quantize_ta_tb_tensor(ta, tb, w0, M):
                 ta[p, :, s],
                 tb[p, :, s],
                 w0,
-                M
+                M,
             )
 
     return ta_q, tb_q
@@ -798,7 +811,6 @@ def _safe_min_int(values):
     """
     Return the minimum of an array/list of integer-like values as Python int.
     """
-
     values = list(values)
 
     if len(values) == 0:
@@ -811,7 +823,6 @@ def _fits_int64(value) -> bool:
     """
     Return True if value fits signed int64.
     """
-
     try:
         v = int(value)
     except Exception:
@@ -826,7 +837,6 @@ def _safe_table_value(value):
 
     This avoids pandas/numpy integer overflow for very large M values.
     """
-
     if _fits_int64(value):
         return int(value)
 
@@ -841,12 +851,11 @@ def save_dat_file(df, path, delimiter="\t"):
     """
     Save the figure dataset to a .dat-compatible tabular file.
     """
-
     df.to_csv(
         path,
         sep=delimiter,
         index=False,
-        float_format="%.8e"
+        float_format="%.8e",
     )
 
 

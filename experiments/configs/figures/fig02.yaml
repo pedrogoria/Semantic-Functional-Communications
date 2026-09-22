@@ -21,8 +21,8 @@ sweep:
   n_values: [5, 10, 15, 20]
 
   m_rbcp:
-    start: 4
-    stop: 41
+    start: 5
+    stop: 36
     step: 1
 
 # ----------------------------------------------------------------------
@@ -45,7 +45,7 @@ signal:
   Tt: 0.01
 
   # Signal amplitude adjustment AFTER filtering
-  peak_to_peak: 8.0
+  peak_to_peak: 12.0
 
   # DFT normalization logic
   normalize_dft: true
@@ -68,7 +68,7 @@ rbcp:
 # MONTE CARLO
 # ----------------------------------------------------------------------
 monte_carlo:
-  interactions: 200
+  interactions: 2000
   seed: 47
 
 # ----------------------------------------------------------------------
@@ -132,7 +132,7 @@ plot:
   y_axis: "MSE"
 
   x_min: 5
-  x_max: 40
+  x_max: 35
 
   y_scale: "log"
   y_min: 1.0e-2

@@ -67,6 +67,7 @@ channel:
 
   detection_mode: "threshold"
   threshold_factor: 0.5
+  candidate_selection: "none"
 
 # ----------------------------------------------------------------------
 # DUPLICATE-DETECTION EXPERIMENT

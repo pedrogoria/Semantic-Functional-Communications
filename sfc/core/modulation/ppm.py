@@ -3,17 +3,7 @@ sfc/core/modulation/ppm.py
 
 Pulse-Position Modulation (PPM) core.
 
-Purpose
--------
-This module implements a reusable, MAC-agnostic PPM modem that is compatible
-with the modulation-layer architecture:
-
-    sfc/core/modulation/
-
-Design principles
------------------
-1. Sensor-aware:
-   The implementation supports multiple sensors.
+ implementation supports multiple sensors.Purpose
 
 2. Period-aware:
    The implementation supports multiple periods.
@@ -27,6 +17,13 @@ Design principles
    The transmit pulse is obtained through:
 
        sfc.core.modulation.pulse_shaping
+
+5. Core reconstruction rule:
+   Continuous-time reconstruction from recovered symbol-domain samples must use:
+
+       sfc.core.filters.sinc_reconstruct_from_samples
+
+   This avoids local sinc implementations inside the PPM modem.
 
 Tensor conventions
 ------------------
@@ -43,14 +40,17 @@ Notes
 - This module does NOT add AWGN/noise by itself.
 - This module does NOT perform plots/PSD/debug visualizations.
 - This module does NOT implement MAC/resource sharing.
+- Physical AWGN must be handled outside this module, e.g. through:
+      sfc.core.channel.physical_channel.apply_awgn
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
+from sfc.core.filters import sinc_reconstruct_from_samples
 from sfc.core.modulation.base import (
     DemodulationResult,
     ModulationCoreBase,
@@ -96,7 +96,14 @@ class PPMCore(ModulationCoreBase):
             [eps_margin, 1 - eps_margin]
 
     interp_mode : str, optional
-        Sampling interpolation mode.
+        Continuous-time reconstruction mode.
+
+        Current supported value:
+            "sinc"
+
+        The sinc reconstruction is delegated to:
+
+            sfc.core.filters.sinc_reconstruct_from_samples
 
     periodic_replicas : int, optional
         Number of period replicas used during periodic sinc reconstruction.
@@ -108,18 +115,18 @@ class PPMCore(ModulationCoreBase):
     """
 
     def __init__(
-        self,
-        fc: float,
-        pulse_width: float,
-        rec_pulse: float = 0.0,
-        pulse_type: str = "raised_cosine",
-        rolloff: float = 0.99,
-        span: int = 12,
-        eps_margin: float = 1e-3,
-        interp_mode: str = "linear",
-        periodic_replicas: int = 10,
-        clip_recovered_to_unit_interval: bool = True,
-        **kwargs
+            self,
+            fc: float,
+            pulse_width: float,
+            rec_pulse: float = 0.0,
+            pulse_type: str = "raised_cosine",
+            rolloff: float = 0.99,
+            span: int = 12,
+            eps_margin: float = 1e-3,
+            interp_mode: str = "sinc",
+            periodic_replicas: int = 10,
+            clip_recovered_to_unit_interval: bool = True,
+            **kwargs
     ):
         super().__init__(
             fc=fc,
@@ -144,6 +151,9 @@ class PPMCore(ModulationCoreBase):
         if eps_margin < 0 or eps_margin >= 0.5:
             raise ValueError("eps_margin must satisfy 0 <= eps_margin < 0.5.")
 
+        if periodic_replicas < 0:
+            raise ValueError("periodic_replicas must be nonnegative.")
+
         self.fc = float(fc)
         self.Tc = 1.0 / self.fc
         self.pulse_width = float(pulse_width)
@@ -160,25 +170,30 @@ class PPMCore(ModulationCoreBase):
         self.span = int(span)
 
         self.eps_margin = float(eps_margin)
-        self.interp_mode = str(interp_mode)
+        self.interp_mode = str(interp_mode).lower()
         self.periodic_replicas = int(periodic_replicas)
         self.clip_recovered_to_unit_interval = bool(clip_recovered_to_unit_interval)
+
+        if self.interp_mode not in {"sinc"}:
+            raise ValueError(
+                "Unsupported interp_mode for PPMCore. "
+                "Currently supported: 'sinc'."
+            )
 
     # =========================================================================
     # NORMALIZATION
     # =========================================================================
 
     def normalize_message(
-        self,
-        x: np.ndarray,
-        **kwargs
-    ) -> tuple[np.ndarray, NormalizationState]:
+            self,
+            x: np.ndarray,
+            **kwargs
+    ) -> Tuple[np.ndarray, NormalizationState]:
         """
         Normalize each (period, sensor) waveform into:
 
             [eps_margin, 1 - eps_margin]
         """
-
         _ = kwargs
 
         x = ensure_3d_signal_tensor(x).astype(float, copy=False)
@@ -198,8 +213,8 @@ class PPMCore(ModulationCoreBase):
                 else:
                     x_01 = (x[:, p, s] - x_min[p, s]) / denom[p, s]
                     x_norm[:, p, s] = (
-                        self.eps_margin
-                        + (1.0 - 2.0 * self.eps_margin) * x_01
+                            self.eps_margin
+                            + (1.0 - 2.0 * self.eps_margin) * x_01
                     )
 
         state = NormalizationState(
@@ -214,15 +229,14 @@ class PPMCore(ModulationCoreBase):
         return x_norm, state
 
     def denormalize_message(
-        self,
-        x: np.ndarray,
-        normalization_state: Optional[NormalizationState],
-        **kwargs
+            self,
+            x: np.ndarray,
+            normalization_state: Optional[NormalizationState],
+            **kwargs
     ) -> np.ndarray:
         """
         Invert the normalization defined in normalize_message(...).
         """
-
         _ = kwargs
 
         if normalization_state is None or not normalization_state.enabled:
@@ -242,7 +256,7 @@ class PPMCore(ModulationCoreBase):
 
         for k in range(leading_dim):
             x_denorm[k, ...] = x_min + (
-                (x[k, ...] - normalization_state.eps_margin) / denom
+                    (x[k, ...] - normalization_state.eps_margin) / denom
             ) * (x_max - x_min)
 
         return x_denorm
@@ -252,15 +266,26 @@ class PPMCore(ModulationCoreBase):
     # =========================================================================
 
     def sample_message(
-        self,
-        x: np.ndarray,
-        t: np.ndarray,
-        **kwargs
-    ) -> tuple[np.ndarray, np.ndarray]:
+            self,
+            x: np.ndarray,
+            t: np.ndarray,
+            **kwargs
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Sample the normalized continuous-time message at the symbol rate fc.
-        """
 
+        The number of PPM symbols per period is:
+
+            n_symbols = len(np.arange(0.0, tau, Tc))
+
+        where:
+
+            Tc = 1 / fc.
+
+        Therefore, approximately:
+
+            n_symbols ≈ tau * fc.
+        """
         _ = kwargs
 
         x = ensure_3d_signal_tensor(x).astype(float, copy=False)
@@ -273,10 +298,9 @@ class PPMCore(ModulationCoreBase):
         symbol_times = np.arange(0.0, tau, self.Tc, dtype=float)
 
         # Numerical guard:
-        # Keep only symbols that are not clearly beyond the available grid.
-        # This avoids edge symbols caused by floating point roundoff when
-        # self.Tc does not divide tau exactly.
-        symbol_times = symbol_times[symbol_times < tau - 0.5 * dt + self.Tc]
+        # np.arange(0, tau, Tc) should already stop before tau. This additional
+        # guard protects against floating-point edge effects.
+        symbol_times = symbol_times[symbol_times < tau + 0.5 * dt]
 
         n_symbols = len(symbol_times)
         _, n_periods, n_sensors = x.shape
@@ -288,16 +312,16 @@ class PPMCore(ModulationCoreBase):
                 x_sampled[:, p, s] = np.interp(
                     symbol_times,
                     t,
-                    x[:, p, s]
+                    x[:, p, s],
                 )
 
         return x_sampled, symbol_times
 
     def compute_pulse_positions(
-        self,
-        x_sampled: np.ndarray,
-        symbol_times: np.ndarray,
-        **kwargs
+            self,
+            x_sampled: np.ndarray,
+            symbol_times: np.ndarray,
+            **kwargs
     ) -> np.ndarray:
         """
         Map normalized symbol values into pulse positions inside each symbol slot.
@@ -309,7 +333,6 @@ class PPMCore(ModulationCoreBase):
             t_pulse = t0 + pulse_width/2
                       + x_sampled * (Tc - (1 + rec_pulse) * pulse_width)
         """
-
         _ = kwargs
 
         x_sampled = np.asarray(x_sampled, dtype=float)
@@ -329,9 +352,9 @@ class PPMCore(ModulationCoreBase):
             )
 
         pulse_positions = (
-            symbol_times[:, None, None]
-            + self.pulse_width / 2.0
-            + x_sampled * displacement_scale
+                symbol_times[:, None, None]
+                + self.pulse_width / 2.0
+                + x_sampled * displacement_scale
         )
 
         return pulse_positions
@@ -341,14 +364,15 @@ class PPMCore(ModulationCoreBase):
     # =========================================================================
 
     def modulate(
-        self,
-        x: np.ndarray,
-        t: np.ndarray,
-        **kwargs
+            self,
+            x: np.ndarray,
+            t: np.ndarray,
+            **kwargs
     ) -> ModulationResult:
         """
         Modulate a continuous-time message tensor into a PPM waveform tensor.
         """
+        _ = kwargs
 
         x = ensure_3d_signal_tensor(x).astype(float, copy=False)
         t = ensure_1d_time_vector(t)
@@ -373,7 +397,7 @@ class PPMCore(ModulationCoreBase):
         tx_waveform = self._build_ppm_waveform_tensor(
             pulse_positions=pulse_positions,
             tx_pulse=tx_pulse,
-            t=t
+            t=t,
         )
 
         return ModulationResult(
@@ -395,15 +419,14 @@ class PPMCore(ModulationCoreBase):
         )
 
     def _build_ppm_waveform_tensor(
-        self,
-        pulse_positions: np.ndarray,
-        tx_pulse: np.ndarray,
-        t: np.ndarray
+            self,
+            pulse_positions: np.ndarray,
+            tx_pulse: np.ndarray,
+            t: np.ndarray
     ) -> np.ndarray:
         """
         Build the continuous-time PPM waveform tensor from pulse positions.
         """
-
         t = np.asarray(t, dtype=float)
         tx_pulse = np.asarray(tx_pulse, dtype=float).reshape(-1)
 
@@ -424,7 +447,7 @@ class PPMCore(ModulationCoreBase):
                     temp = np.zeros(n_time, dtype=float)
                     temp[idx] = 1.0
 
-                    waveform += np.convolve(temp, tx_pulse, mode="same")
+                    waveform += self._convolve_same_length(temp, tx_pulse)
 
                 y[:, p, s] = waveform
 
@@ -435,11 +458,11 @@ class PPMCore(ModulationCoreBase):
     # =========================================================================
 
     def demodulate(
-        self,
-        y: np.ndarray,
-        t: np.ndarray,
-        modulation_result: Optional[ModulationResult] = None,
-        **kwargs
+            self,
+            y: np.ndarray,
+            t: np.ndarray,
+            modulation_result: Optional[ModulationResult] = None,
+            **kwargs
     ) -> DemodulationResult:
         """
         Demodulate a received PPM waveform tensor.
@@ -449,11 +472,25 @@ class PPMCore(ModulationCoreBase):
         If a symbol interval is empty because of floating-point/grid mismatch
         at the edge of the period, the demodulator falls back to the nearest
         available time-grid sample instead of failing immediately.
-        """
 
+        Complex input convention
+        ------------------------
+        PPMCore is a real-valued pulse-position modem. If the received waveform
+        is complex-valued because an upstream channel produced complex samples,
+        the demodulator uses the real part before matched filtering.
+
+        In the current fair-comparison pipelines, apply_awgn(...) normally adds
+        real AWGN to real PPM waveforms, so this conversion is mostly a safety
+        guard.
+        """
         reconstruct_cont = kwargs.get("reconstruct_continuous", True)
 
-        y = ensure_3d_signal_tensor(y).astype(float, copy=False)
+        y_arr = np.asarray(y)
+
+        if np.iscomplexobj(y_arr):
+            y_arr = np.real(y_arr)
+
+        y = ensure_3d_signal_tensor(y_arr).astype(float, copy=False)
         t = ensure_1d_time_vector(t)
         validate_time_axis_length(y, t)
 
@@ -478,7 +515,7 @@ class PPMCore(ModulationCoreBase):
             symbol_times = np.asarray(modulation_result.symbol_times, dtype=float)
         else:
             symbol_times = np.arange(0.0, tau, self.Tc, dtype=float)
-            symbol_times = symbol_times[symbol_times < tau - 0.5 * dt + self.Tc]
+            symbol_times = symbol_times[symbol_times < tau + 0.5 * dt]
 
         n_symbols = len(symbol_times)
         _, n_periods, n_sensors = y.shape
@@ -496,15 +533,13 @@ class PPMCore(ModulationCoreBase):
 
         for p in range(n_periods):
             for s in range(n_sensors):
-                z = np.convolve(y[:, p, s], matched_filter, mode="same")
+                z = self._convolve_same_length(y[:, p, s], matched_filter)
                 matched_filter_output[:, p, s] = z
 
                 for k, t0 in enumerate(symbol_times):
                     idx_seg = (t >= t0) & (t < t0 + self.Tc)
 
                     if not np.any(idx_seg):
-                        # Robust fallback for edge symbols affected by
-                        # floating-point/grid mismatch.
                         idx_nearest = int(np.argmin(np.abs(t - t0)))
                         idx_nearest = max(0, min(idx_nearest, len(t) - 1))
 
@@ -529,7 +564,7 @@ class PPMCore(ModulationCoreBase):
                         xk = np.clip(
                             xk,
                             self.eps_margin,
-                            1.0 - self.eps_margin
+                            1.0 - self.eps_margin,
                         )
 
                     recovered_norm[k, p, s] = xk
@@ -537,7 +572,7 @@ class PPMCore(ModulationCoreBase):
         if modulation_result is not None:
             recovered_samples = self.denormalize_message(
                 recovered_norm,
-                modulation_result.normalization_state
+                modulation_result.normalization_state,
             )
             norm_state = modulation_result.normalization_state
         else:
@@ -549,7 +584,7 @@ class PPMCore(ModulationCoreBase):
             recovered_continuous = self.reconstruct_continuous(
                 recovered_samples=recovered_samples,
                 t=t,
-                modulation_result=modulation_result
+                modulation_result=modulation_result,
             )
 
         return DemodulationResult(
@@ -568,25 +603,91 @@ class PPMCore(ModulationCoreBase):
             },
         )
 
+    @staticmethod
+    def _convolve_same_length(x, h):
+        """
+        Convolve x with h and return an output with exactly len(x).
+
+        np.convolve(x, h, mode="same") returns max(len(x), len(h)).
+        This is not safe when the pulse h is longer than the waveform x.
+
+        This helper always returns a center-cropped convolution with length len(x).
+        """
+        x = np.asarray(x)
+        h = np.asarray(h)
+
+        if x.ndim != 1 or h.ndim != 1:
+            raise ValueError("_convolve_same_length expects 1-D arrays.")
+
+        if len(x) == 0:
+            return np.asarray([], dtype=np.result_type(x, h))
+
+        if len(h) == 0:
+            return np.zeros_like(x)
+
+        y_full = np.convolve(x, h, mode="full")
+
+        start = (len(y_full) - len(x)) // 2
+        stop = start + len(x)
+
+        y = y_full[start:stop]
+
+        if len(y) != len(x):
+            raise RuntimeError(
+                "Internal convolution cropping error: "
+                f"len(x)={len(x)}, len(h)={len(h)}, "
+                f"len(y_full)={len(y_full)}, len(y)={len(y)}."
+            )
+
+        return y
+
     # =========================================================================
     # CONTINUOUS-TIME RECONSTRUCTION
     # =========================================================================
 
     def reconstruct_continuous(
-        self,
-        recovered_samples: np.ndarray,
-        t: np.ndarray,
-        modulation_result: Optional[ModulationResult] = None,
-        **kwargs
+            self,
+            recovered_samples: np.ndarray,
+            t: np.ndarray,
+            modulation_result: Optional[ModulationResult] = None,
+            **kwargs
     ) -> np.ndarray:
         """
         Reconstruct a continuous-time waveform from recovered symbol-domain
-        samples using periodic sinc reconstruction.
-        """
+        samples using the project-wide core sinc reconstruction.
 
+        This function intentionally delegates sample-to-continuous sinc
+        interpolation to:
+
+            sfc.core.filters.sinc_reconstruct_from_samples
+
+        Therefore, this module does not implement a local sinc loop.
+
+        Parameters
+        ----------
+        recovered_samples : np.ndarray
+            Symbol-domain recovered samples with shape:
+
+                (symbols, periods, sensors)
+
+        t : np.ndarray
+            Dense time grid.
+
+        modulation_result : ModulationResult or None
+            If provided, symbol_times are read from modulation_result.
+            Otherwise, symbol_times are inferred from fc and the dense grid.
+
+        Returns
+        -------
+        np.ndarray
+            Reconstructed dense-time signal with shape:
+
+                (time, periods, sensors)
+        """
         _ = kwargs
 
         recovered_samples = np.asarray(recovered_samples, dtype=float)
+
         if recovered_samples.ndim != 3:
             raise ValueError(
                 "recovered_samples must have shape (symbols, periods, sensors)."
@@ -600,38 +701,24 @@ class PPMCore(ModulationCoreBase):
             symbol_times = np.asarray(modulation_result.symbol_times, dtype=float)
         else:
             symbol_times = np.arange(0.0, tau, self.Tc, dtype=float)
-            symbol_times = symbol_times[symbol_times < tau - 0.5 * dt + self.Tc]
+            symbol_times = symbol_times[symbol_times < tau + 0.5 * dt]
 
-        n_symbols, n_periods, n_sensors = recovered_samples.shape
+        n_symbols, _, _ = recovered_samples.shape
+
         if len(symbol_times) != n_symbols:
             raise ValueError(
                 f"recovered_samples has n_symbols={n_symbols}, "
                 f"but len(symbol_times)={len(symbol_times)}"
             )
 
-        x_rec = np.zeros((len(t), n_periods, n_sensors), dtype=float)
-
-        replica_ids = np.arange(
-            -self.periodic_replicas,
-            self.periodic_replicas + 1,
-            dtype=int
+        return sinc_reconstruct_from_samples(
+            x_samples=recovered_samples,
+            t_samples=symbol_times,
+            t_eval=t,
+            tau=tau,
+            sample_period=self.Tc,
+            periodic_replicas=self.periodic_replicas,
         )
-
-        for p in range(n_periods):
-            for s in range(n_sensors):
-                y = np.zeros(len(t), dtype=float)
-
-                for m in replica_ids:
-                    shifted_times = symbol_times + m * tau
-
-                    for k in range(n_symbols):
-                        y += recovered_samples[k, p, s] * np.sinc(
-                            (t - shifted_times[k]) / self.Tc
-                        )
-
-                x_rec[:, p, s] = y
-
-        return x_rec
 
 
 # =============================================================================
@@ -642,7 +729,6 @@ def _infer_dt(t: np.ndarray) -> float:
     """
     Infer the time step from a 1D grid.
     """
-
     if len(t) < 2:
         raise ValueError("Time vector must contain at least two samples.")
 
@@ -665,7 +751,6 @@ def _infer_tau(t: np.ndarray, dt: float) -> float:
 
         tau = t[-1] + dt
     """
-
     return float(t[-1] + dt)
 
 

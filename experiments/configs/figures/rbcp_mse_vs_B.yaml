@@ -95,8 +95,7 @@ dc:
 benchmark:
   enabled: true
   sampling_rate: 10.4
-  effective_rate_factor: 2.0
-  enforce_eq17_rate_matching: true
+  effective_rate_factor: 1.0
 
 # ----------------------------------------------------------------------
 # SFC / CHANNEL SETTINGS
@@ -108,7 +107,6 @@ channel:
 
   detection_mode: "threshold"
   threshold_factor: 0.5
-  score_threshold: 4     # default = L
 
 # ----------------------------------------------------------------------
 # RbCP_time SETTINGS
@@ -131,9 +129,9 @@ rbcp_time:
 sweep:
   B:
     # Range chosen to match the scale shown in Figure 5.
-    start: 5000
+    start: 500
     stop: 40001
-    step: 5000
+    step: 2000
 
 # ----------------------------------------------------------------------
 # MONTE CARLO / AVERAGING

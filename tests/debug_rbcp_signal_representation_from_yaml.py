@@ -70,7 +70,7 @@ from sfc.core.fourier import FourierCoefficientCore
 from sfc.core.phase_cof import PhaseCoefficientCore
 from sfc.core.quantization import quantize_ta_tb
 from sfc.core.reconstruction import recover_signal
-from sfc.core.nyquist import Nyquist
+from sfc.core.acquisition.nyquist import Nyquist
 from sfc.core.channel.SFCChannel import SFCChannel
 from sfc.core.system_parameters import (
     build_derived_system_parameters,
@@ -385,14 +385,13 @@ def run_debug_from_yaml(config_path):
     # -------------------------------------------------------------------------
     # 2. Band-limit each (period, sensor)
     # -------------------------------------------------------------------------
-    W_eff = 2 * params.N / params.tau
     x_filtered = np.zeros_like(x_raw)
 
     for p in range(n_periods):
         for s in range(S):
             x_filtered[:, p, s] = filter_periodic(
                 x_raw[:, p, s],
-                W_eff,
+                params.W,
                 Tt,
                 params.tau
             )

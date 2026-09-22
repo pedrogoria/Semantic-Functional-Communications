@@ -67,7 +67,7 @@ signal:
   distribution: "uniform"
 
   # Absolute-MSE convention adopted in the software side
-  peak_to_peak: 2.0
+  peak_to_peak: 12.0
 
   normalize_dft: true
   normalization_target: 3.9
@@ -97,7 +97,6 @@ channel:
 
   detection_mode: "threshold"
   threshold_factor: 0.5
-  score_threshold: 4
 
 # ----------------------------------------------------------------------
 # SEMANTIC-BASED ERROR DETECTION

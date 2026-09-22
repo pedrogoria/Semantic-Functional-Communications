@@ -63,7 +63,7 @@ power_model:
   #    - keep SNR fixed
   #    - derive N0(B) = P / (B * SNR)
   #
-  mode: "fixed_sensor_SNR_and_N0"
+  mode: "fixed_P_and_N0"
 
 
 # ----------------------------------------------------------------------
@@ -141,7 +141,7 @@ dc:
 # GLOBAL QUANTIZATION POLICY
 # ----------------------------------------------------------------------
 quantization:
-  force_power_of_two: true
+  force_power_of_two: false
   rounding_mode: "floor"
 
 
@@ -161,7 +161,7 @@ ppm:
   enabled: true
 
   # Ts = 1 / fs_msg is the transmission / quantization interval of one sample
-  fs_msg: 11
+  fs_msg: 12
 
   # Pulse duration Tp
   pulse_width: 0.01
@@ -171,13 +171,11 @@ ppm:
   #   "raised_cosine"
   pulse_type: "raised_cosine"
 
-  rolloff: 0.99
-  span: 12
+  rolloff: 0.01
+  span: 20
 
   eps_margin: 0.001
   rec_pulse: 0.0
-  interp_mode: "linear"
-  clip_recovered_to_unit_interval: true
 
 
 # ----------------------------------------------------------------------
@@ -207,8 +205,6 @@ channel:
 
   detection_mode: "threshold"
   threshold_factor: 0.5
-  score_threshold: 4
-
 
 # ----------------------------------------------------------------------
 # SWEEP PARAMETERS
@@ -225,7 +221,7 @@ sweep:
 # ----------------------------------------------------------------------
 monte_carlo:
   seed: 47
-  interactions: 1000
+  interactions: 100
 
 
 # ----------------------------------------------------------------------

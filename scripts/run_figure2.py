@@ -135,7 +135,7 @@ def generate_plot(df, cfg, output_dir, timestamp):
             df_bench["M_RbCP"],
             df_bench["benchmark_mse"],
             color="red",
-            linewidth=10,
+            linewidth=2,
             label="Benchmark"
         )
 

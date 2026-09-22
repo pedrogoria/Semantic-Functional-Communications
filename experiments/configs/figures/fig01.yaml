@@ -40,7 +40,7 @@ signal:
 
   # Time support
   T: 1.0
-  Tt: 0.001
+  Tt: 0.01
 
   # Signal amplitude adjustment
   peak_to_peak: 12.0

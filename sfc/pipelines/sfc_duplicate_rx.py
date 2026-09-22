@@ -1,12 +1,11 @@
 """
-sfc/pipelines/sfc_duplicate_rx.py
-
-Lean pipeline for reproducing Figure 4 of the manuscript.
+sfc/pipelines Figure 4 of the manuscript.sfc/pipelines/sfc_duplicate_rx.py
 
 Figure 4 target
 ---------------
 Average probability of receiving duplicate values (epsilon) versus B,
 including:
+
 1. theoretical upper bound from Lemma 5
 2. Monte Carlo with random signals, clean channel
 3. Monte Carlo with random signals, AWGN channel
@@ -20,13 +19,53 @@ of duration tau, the receiver estimates more than one value for the same
 parameter t_z^(s,n).
 
 In the event-matrix representation, this corresponds to:
+
     column_sum(event_id) > 1
+
 for at least one event_id.
 
 Important
 ---------
 This pipeline does NOT reconstruct the signals.
 Its sole objective is to evaluate epsilon(B).
+
+Physical-channel convention
+---------------------------
+This pipeline itself does not generate AWGN locally.
+
+Clean and AWGN propagation are delegated to:
+
+    sfc.core.channel.SFCChannel
+
+and, internally, to:
+
+    sfc.core.channel.physical_channel.PhysicalChannel
+
+The SFC physical channel must use the project-wide convention:
+
+    y = sqrt(E_chip) * superposed + n
+
+with:
+
+    n ~ CN(0, N0)
+
+Therefore, simulated SFC AWGN uses N0 directly at the
+matched-filter/resource-output level. It does NOT use B*N0 or B_s*N0 as the
+generated noise variance.
+
+Source-bandwidth convention
+---------------------------
+The source signal is filtered using the configured source bandwidth:
+
+    signal.W
+
+The pipeline must NOT redefine the filtering bandwidth from N using:
+
+    W_eff = 2 * N / tau
+
+The role of N is to define the number of representation harmonics.
+The role of W is to define the source-signal bandwidth used by the signal
+filter.
 
 Output columns
 --------------
@@ -39,14 +78,17 @@ Output columns
 - num_trials
 """
 
+from __future__ import annotations
+
 import copy
+
 import numpy as np
 import pandas as pd
 
+from sfc.core.channel.SFCChannel import SFCChannel
 from sfc.core.filters import filter_periodic
 from sfc.core.fourier import FourierCoefficientCore
 from sfc.core.phase_cof import PhaseCoefficientCore
-from sfc.core.channel.SFCChannel import SFCChannel
 from sfc.core.system_parameters import build_derived_system_parameters
 from sfc.core.theory import epsilon_upper_bound
 
@@ -76,7 +118,6 @@ def generate_sfc_duplicate_rx_data(cfg):
         - epsilon_uniform_awgn
         - num_trials
     """
-
     rng = np.random.default_rng(cfg["monte_carlo"]["seed"])
 
     print("[INFO] Starting sfc_duplicate_rx data generation")
@@ -89,10 +130,18 @@ def generate_sfc_duplicate_rx_data(cfg):
     print(f"[INFO] Trials per B = {cfg['duplicate_rx']['interactions']}")
 
     # -------------------------------------------------------------------------
-    # Sweep values of B
+    # Sweep values of B.
     # -------------------------------------------------------------------------
     b_cfg = cfg["sweep"]["B"]
-    b_values = np.arange(b_cfg["start"], b_cfg["stop"], b_cfg["step"])
+    b_start = float(b_cfg["start"])
+    b_stop = float(b_cfg["stop"])
+    b_step = float(b_cfg["step"])
+    include_stop = bool(b_cfg.get("include_stop", True))
+
+    if include_stop:
+        b_values = np.arange(b_start, b_stop + 0.5 * b_step, b_step)
+    else:
+        b_values = np.arange(b_start, b_stop, b_step)
 
     results = []
 
@@ -102,9 +151,10 @@ def generate_sfc_duplicate_rx_data(cfg):
 
         params = build_derived_system_parameters(cfg_B)
 
-        # Figure 4 explicitly uses N=3 in the manuscript; allow override
-        N = cfg_B["signal"].get("N_override", params.N)
-        S = params.S
+        # Figure 4 explicitly uses N=3 in the manuscript; allow YAML override.
+        N = int(cfg_B["signal"].get("N_override", params.N))
+        S = int(params.S)
+        n_trials = int(cfg_B["duplicate_rx"]["interactions"])
 
         print("\n[INFO] ------------------------------------------------------------")
         print(f"[INFO] B = {B:.1f} Hz")
@@ -112,46 +162,52 @@ def generate_sfc_duplicate_rx_data(cfg):
             f"[INFO] S = {params.S} | R = {params.R} | L = {params.L} | "
             f"tau = {params.tau:.3f} s | W = {params.W:.3f} Hz | N = {N}"
         )
-        print(f"[INFO] SNR_dB = {params.SNR_dB:.1f} | SNR = {params.SNR:.4e}")
+        print(f"[INFO] P = {params.P:.6e}")
+        print(f"[INFO] N0 = {params.N0:.6e}")
+        print(f"[INFO] SNR_dB = {params.SNR_dB:.6f} | SNR = {params.SNR:.6e}")
+        print(f"[INFO] SNR_per_sensor_dB = {params.SNR_per_sensor_dB}")
         print(f"[INFO] bandwidth_allocation = {params.bandwidth_allocation}")
         print(f"[INFO] B_per_sensor = {params.B_per_sensor}")
         print(f"[INFO] M_time = {params.M_time}")
         print(f"[INFO] 2*N*S = {2 * N * S}")
 
         # ---------------------------------------------------------------------
-        # One clean channel and one AWGN channel for this B-point
-        # Reused in all trials, keeping the same maps/codebook.
+        # One clean channel and one AWGN channel for this B-point.
+        #
+        # They reuse the same sensor-event map and reproducibility seed, so the
+        # selected fixed SFC maps/codebook are consistent for the current B.
+        #
+        # The AWGN channel delegates noise generation to PhysicalChannel, where
+        # N0 is used directly.
         # ---------------------------------------------------------------------
         sfc_channel_clean, sfc_channel_awgn = _build_sfc_channel_pair_for_B(
             cfg_B=cfg_B,
             N=N,
-            S=S
+            S=S,
         )
 
         # ---------------------------------------------------------------------
-        # Theoretical upper bound from Lemma 5
+        # Theoretical upper bound from Lemma 5.
         # ---------------------------------------------------------------------
         eps_upper = epsilon_upper_bound(
             M_time=params.M_time,
             N=N,
-            S=S
+            S=S,
         )
         print(f"[INFO] epsilon_upper_bound = {eps_upper:.6e}")
 
         # ---------------------------------------------------------------------
-        # Monte Carlo
+        # Monte Carlo.
         # ---------------------------------------------------------------------
-        n_trials = cfg_B["duplicate_rx"]["interactions"]
-
         eps_random_clean = np.nan
         eps_random_awgn = np.nan
         eps_uniform_clean = np.nan
         eps_uniform_awgn = np.nan
 
         # ----------------------------
-        # Random signals
+        # Random signals.
         # ----------------------------
-        if cfg_B["mode"].get("monte_carlo_random_signals", False):
+        if cfg_B.get("mode", {}).get("monte_carlo_random_signals", True):
             hits_clean = 0
             hits_awgn = 0
 
@@ -161,7 +217,7 @@ def generate_sfc_duplicate_rx_data(cfg):
                     rng=rng,
                     N=N,
                     sfc_channel_clean=sfc_channel_clean,
-                    sfc_channel_awgn=sfc_channel_awgn
+                    sfc_channel_awgn=sfc_channel_awgn,
                 )
 
                 hits_clean += int(dup_clean)
@@ -179,9 +235,9 @@ def generate_sfc_duplicate_rx_data(cfg):
             )
 
         # ----------------------------
-        # Uniform t
+        # Uniform t.
         # ----------------------------
-        if cfg_B["mode"].get("monte_carlo_uniform_t", False):
+        if cfg_B.get("mode", {}).get("monte_carlo_uniform_t", True):
             hits_clean = 0
             hits_awgn = 0
 
@@ -191,7 +247,7 @@ def generate_sfc_duplicate_rx_data(cfg):
                     rng=rng,
                     N=N,
                     sfc_channel_clean=sfc_channel_clean,
-                    sfc_channel_awgn=sfc_channel_awgn
+                    sfc_channel_awgn=sfc_channel_awgn,
                 )
 
                 hits_clean += int(dup_clean)
@@ -209,8 +265,8 @@ def generate_sfc_duplicate_rx_data(cfg):
             )
 
         results.append({
-            "B": B,
-            "epsilon_upper_bound": eps_upper,
+            "B": float(B),
+            "epsilon_upper_bound": float(eps_upper),
             "epsilon_random_clean": eps_random_clean,
             "epsilon_random_awgn": eps_random_awgn,
             "epsilon_uniform_clean": eps_uniform_clean,
@@ -234,7 +290,6 @@ def _build_sfc_channel_pair_for_B(cfg_B, N, S):
     The two channels reuse the same seed and sensor-event map, so the generated
     maps/codebook remain consistent for the current B.
     """
-
     def _make_cfg(base_cfg, channel_type):
         cfg_sfc = copy.deepcopy(base_cfg)
 
@@ -242,30 +297,37 @@ def _build_sfc_channel_pair_for_B(cfg_B, N, S):
             cfg_sfc["channel"] = {}
 
         cfg_sfc["channel"]["sensor_x_event"] = _build_sensor_x_event(S, N)
-        cfg_sfc["channel"]["collision_mode"] = cfg_sfc["channel"].get("collision_mode", "sum")
+        cfg_sfc["channel"]["collision_mode"] = cfg_sfc["channel"].get(
+            "collision_mode",
+            "sum",
+        )
         cfg_sfc["channel"]["type"] = channel_type
-        cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get("detection_mode", "threshold")
+        cfg_sfc["channel"]["detection_mode"] = cfg_sfc["channel"].get(
+            "detection_mode",
+            "threshold",
+        )
         cfg_sfc["channel"]["score_threshold"] = cfg_sfc["channel"].get(
             "score_threshold",
-            cfg_sfc["system"]["L"]
+            cfg_sfc["system"]["L"],
         )
 
         if "threshold" not in cfg_sfc["channel"]:
             cfg_sfc["channel"]["threshold_factor"] = cfg_sfc["channel"].get(
                 "threshold_factor",
-                0.5
+                0.5,
             )
 
-        # Compatibility with SFCChannel expected seed location
+        # Compatibility with SFCChannel expected seed location.
         if "reproducibility" not in cfg_sfc:
             cfg_sfc["reproducibility"] = {}
 
         if "seed" not in cfg_sfc["reproducibility"]:
             cfg_sfc["reproducibility"]["seed"] = cfg_B.get(
-                "reproducibility", {}
+                "reproducibility",
+                {},
             ).get(
                 "seed",
-                cfg_B.get("monte_carlo", {}).get("seed", 12345)
+                cfg_B.get("monte_carlo", {}).get("seed", 12345),
             )
 
         return cfg_sfc
@@ -292,100 +354,75 @@ def _trial_random_signals(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
     tuple(bool, bool)
         (duplicate_in_clean, duplicate_in_awgn)
     """
-
     params = build_derived_system_parameters(cfg)
 
-    # One period per duplicate test, consistent with "per tau seconds"
+    # One period per duplicate test, consistent with "per tau seconds".
     n_periods = 1
-    S = params.S
+    S = int(params.S)
     Tt = cfg["signal"]["Tt"]
     tau = params.tau
 
-    t = np.arange(0, tau, Tt)
+    t = np.arange(0.0, tau, Tt)
     n_time = len(t)
 
     # -------------------------------------------------------------------------
-    # 1. Generate S random signals
+    # 1. Generate S random signals.
     # -------------------------------------------------------------------------
-    dist = cfg["signal"]["distribution"]
-
-    if dist == "uniform":
-        x_raw = rng.uniform(-1, 1, size=(n_time, n_periods, S))
-    elif dist == "gaussian":
-        x_raw = rng.normal(0, 1, size=(n_time, n_periods, S))
-    else:
-        raise ValueError("Invalid distribution")
-
-    # -------------------------------------------------------------------------
-    # 2. Band-limit
-    # -------------------------------------------------------------------------
-    # Use the configured source bandwidth W.
-    # IMPORTANT:
-    #   W is a signal/source parameter from the YAML.
-    #   Do NOT redefine W from N.
-    #
-    # The relation between W and N should be handled when deriving N, e.g.:
-    #   N = floor(W * tau / 2)
-    #
-    # But once W is configured, filtering must use W directly.
-    W_filter = float(cfg["signal"].get("W", params.W))
-
-    if W_filter <= 0:
-        raise ValueError("signal.W must be positive.")
-
-    x_filtered = np.zeros_like(x_raw)
-
-    for p in range(n_periods):
-        for s in range(S):
-            x_filtered[:, p, s] = filter_periodic(
-                x_raw[:, p, s],
-                W_filter,
-                Tt,
-                tau
-            )
+    x_raw = _generate_random_signal_tensor(
+        cfg=cfg,
+        rng=rng,
+        n_time=n_time,
+        n_periods=n_periods,
+        S=S,
+    )
 
     # -------------------------------------------------------------------------
-    # 3. Peak-to-peak control (optional)
+    # 2. Band-limit using configured signal.W.
     # -------------------------------------------------------------------------
-    p2p_target = cfg["signal"]["peak_to_peak"]
-
-    if p2p_target != 0:
-        for s in range(S):
-            current_p2p = np.max(x_filtered[:, 0, s]) - np.min(x_filtered[:, 0, s])
-            if current_p2p != 0:
-                x_filtered[:, 0, s] = x_filtered[:, 0, s] * (p2p_target / current_p2p)
-
-    # -------------------------------------------------------------------------
-    # 4. DC handling
-    # -------------------------------------------------------------------------
-    dc_enabled = cfg.get("dc", {}).get("enabled", False)
-    x_zero_mean = np.zeros_like(x_filtered)
-
-    for s in range(S):
-        if not dc_enabled:
-            dc = Tt * np.sum(x_filtered[:, 0, s]) / tau
-            x_zero_mean[:, 0, s] = x_filtered[:, 0, s] - dc
-        else:
-            x_zero_mean[:, 0, s] = x_filtered[:, 0, s]
+    x_filtered = _filter_signal_tensor(
+        x_raw=x_raw,
+        cfg=cfg,
+        params=params,
+        tau=tau,
+        Tt=Tt,
+    )
 
     # -------------------------------------------------------------------------
-    # 5. Fourier coefficients
+    # 3. Peak-to-peak control.
+    # -------------------------------------------------------------------------
+    x_filtered = _apply_peak_to_peak_control(
+        x_filtered=x_filtered,
+        peak_to_peak=cfg["signal"].get("peak_to_peak", 0.0),
+    )
+
+    # -------------------------------------------------------------------------
+    # 4. DC handling.
+    # -------------------------------------------------------------------------
+    x_zero_mean = _apply_dc_handling(
+        x_filtered=x_filtered,
+        tau=tau,
+        Tt=Tt,
+        dc_enabled=cfg.get("dc", {}).get("enabled", False),
+    )
+
+    # -------------------------------------------------------------------------
+    # 5. Fourier coefficients.
     # -------------------------------------------------------------------------
     fourier_core = FourierCoefficientCore(
         T=tau,
         harmonics=N,
-        sensor_nodes=S
+        sensor_nodes=S,
     )
 
     an, bn, _ = fourier_core.calc_an_bn_dft(
         x_zero_mean,
         Tt,
-        normalize=cfg["signal"]["normalize_dft"],
-        norm=cfg["signal"]["normalization_target"]
+        normalize=cfg["signal"].get("normalize_dft", True),
+        norm=cfg["signal"].get("normalization_target", 3.99),
     )
 
     # -------------------------------------------------------------------------
-    # 6. ta/tb using PhaseCoefficientCore
+    # 6. ta/tb using PhaseCoefficientCore.
     # -------------------------------------------------------------------------
     phase_core = PhaseCoefficientCore(
         T=tau,
@@ -396,7 +433,7 @@ def _trial_random_signals(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
         bandwidth=params.B,
         detect_errors=False,
         periods=n_periods,
-        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
+        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001),
     )
 
     ta, tb = phase_core.calc_ta_tb(an, bn)
@@ -404,12 +441,12 @@ def _trial_random_signals(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
     tb = np.real(tb)
 
     # -------------------------------------------------------------------------
-    # 7. ta/tb -> events
+    # 7. ta/tb -> events.
     # -------------------------------------------------------------------------
     events = phase_core.ta_tb_to_events(ta, tb)
 
     # -------------------------------------------------------------------------
-    # 8. SFC channels
+    # 8. SFC channels.
     # -------------------------------------------------------------------------
     out_clean = sfc_channel_clean(events)
     out_awgn = sfc_channel_awgn(events)
@@ -418,7 +455,7 @@ def _trial_random_signals(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
     events_est_awgn = _extract_events_est(out_awgn)
 
     # -------------------------------------------------------------------------
-    # 9. Duplicate criterion
+    # 9. Duplicate criterion.
     # -------------------------------------------------------------------------
     dup_clean = _has_duplicate_reception(events_est_clean)
     dup_awgn = _has_duplicate_reception(events_est_awgn)
@@ -439,22 +476,21 @@ def _trial_uniform_t(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
     tuple(bool, bool)
         (duplicate_in_clean, duplicate_in_awgn)
     """
-
     params = build_derived_system_parameters(cfg)
 
     n_periods = 1
-    S = params.S
+    S = int(params.S)
     tau = params.tau
-    w0 = 2 * np.pi / tau
+    w0 = 2.0 * np.pi / tau
 
     # -------------------------------------------------------------------------
-    # 1. Generate ta/tb directly in canonical intervals
+    # 1. Generate ta/tb directly in canonical intervals.
     #
     # For each harmonic n:
     #   t_z^(s,n) ~ Uniform[-pi/(n w0), pi/(n w0)]
     # -------------------------------------------------------------------------
-    ta = np.zeros((n_periods, N, S))
-    tb = np.zeros((n_periods, N, S))
+    ta = np.zeros((n_periods, N, S), dtype=float)
+    tb = np.zeros((n_periods, N, S), dtype=float)
 
     for n_idx in range(N):
         n_h = n_idx + 1
@@ -465,7 +501,7 @@ def _trial_uniform_t(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
         tb[0, n_idx, :] = rng.uniform(lo, hi, size=S)
 
     # -------------------------------------------------------------------------
-    # 2. ta/tb -> events
+    # 2. ta/tb -> events.
     # -------------------------------------------------------------------------
     phase_core = PhaseCoefficientCore(
         T=tau,
@@ -476,13 +512,13 @@ def _trial_uniform_t(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
         bandwidth=params.B,
         detect_errors=False,
         periods=n_periods,
-        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001)
+        threshold_harmonics=cfg["signal"].get("threshold_harmonics", 0.001),
     )
 
     events = phase_core.ta_tb_to_events(ta, tb)
 
     # -------------------------------------------------------------------------
-    # 3. SFC channels
+    # 3. SFC channels.
     # -------------------------------------------------------------------------
     out_clean = sfc_channel_clean(events)
     out_awgn = sfc_channel_awgn(events)
@@ -491,12 +527,97 @@ def _trial_uniform_t(cfg, rng, N, sfc_channel_clean, sfc_channel_awgn):
     events_est_awgn = _extract_events_est(out_awgn)
 
     # -------------------------------------------------------------------------
-    # 4. Duplicate criterion
+    # 4. Duplicate criterion.
     # -------------------------------------------------------------------------
     dup_clean = _has_duplicate_reception(events_est_clean)
     dup_awgn = _has_duplicate_reception(events_est_awgn)
 
     return dup_clean, dup_awgn
+
+
+# =============================================================================
+# SIGNAL HELPERS
+# =============================================================================
+
+def _generate_random_signal_tensor(cfg, rng, n_time, n_periods, S):
+    """
+    Generate a random signal tensor with shape:
+
+        (time, periods, sensors)
+    """
+    dist = cfg["signal"]["distribution"]
+
+    if dist == "uniform":
+        return rng.uniform(-1.0, 1.0, size=(n_time, n_periods, S))
+
+    if dist == "gaussian":
+        return rng.normal(0.0, 1.0, size=(n_time, n_periods, S))
+
+    raise ValueError("signal.distribution must be 'uniform' or 'gaussian'.")
+
+
+def _filter_signal_tensor(x_raw, cfg, params, tau, Tt):
+    """
+    Band-limit each signal using configured signal.W.
+    """
+    W_filter = float(cfg["signal"].get("W", params.W))
+
+    if W_filter <= 0:
+        raise ValueError("signal.W must be positive.")
+
+    x_filtered = np.zeros_like(x_raw)
+
+    _, n_periods, S = x_raw.shape
+
+    for p in range(n_periods):
+        for s in range(S):
+            x_filtered[:, p, s] = filter_periodic(
+                x_raw[:, p, s],
+                W_filter,
+                Tt,
+                tau,
+            )
+
+    return x_filtered
+
+
+def _apply_peak_to_peak_control(x_filtered, peak_to_peak):
+    """
+    Apply peak-to-peak control independently per (period, sensor).
+    """
+    if peak_to_peak == 0:
+        return x_filtered
+
+    x_out = np.copy(x_filtered)
+    _, n_periods, S = x_filtered.shape
+
+    for p in range(n_periods):
+        for s in range(S):
+            current_p2p = np.max(x_filtered[:, p, s]) - np.min(x_filtered[:, p, s])
+            if current_p2p != 0:
+                x_out[:, p, s] = x_filtered[:, p, s] * (
+                    peak_to_peak / current_p2p
+                )
+
+    return x_out
+
+
+def _apply_dc_handling(x_filtered, tau, Tt, dc_enabled):
+    """
+    Remove DC component unless dc_enabled is True.
+    """
+    x_zero_mean = np.zeros_like(x_filtered)
+    _, n_periods, S = x_filtered.shape
+
+    for p in range(n_periods):
+        for s in range(S):
+            if not dc_enabled:
+                dc = Tt * np.sum(x_filtered[:, p, s]) / tau
+                x_zero_mean[:, p, s] = x_filtered[:, p, s] - dc
+            else:
+                x_zero_mean[:, p, s] = x_filtered[:, p, s]
+
+    return x_zero_mean
 
 
 # =============================================================================
@@ -514,9 +635,8 @@ def _build_sensor_x_event(S, N):
     Total number of event IDs:
         2 * N * S
     """
-
     num_event_ids = 2 * N * S
-    sensor_x_event = np.zeros((S, num_event_ids))
+    sensor_x_event = np.zeros((S, num_event_ids), dtype=float)
 
     for s in range(S):
         start = 2 * s * N
@@ -538,7 +658,6 @@ def _extract_events_est(channel_output):
     - np.ndarray directly
     - dict-like outputs containing "events_est"
     """
-
     if isinstance(channel_output, dict):
         if "events_est" not in channel_output:
             raise KeyError("SFC channel output dict does not contain 'events_est'")
@@ -572,13 +691,16 @@ def _has_duplicate_reception(events_est):
     bool
         True if there is a duplicate for at least one event ID.
     """
+    events_est = np.asarray(events_est, dtype=float)
 
-    assert len(events_est.shape) == 2, \
-        "events_est must have shape (event_slots_total, num_event_ids)"
+    if events_est.ndim != 2:
+        raise ValueError(
+            "events_est must have shape (event_slots_total, num_event_ids)."
+        )
 
     col_sums = np.sum(events_est, axis=0)
 
-    return np.any(col_sums > 1)
+    return bool(np.any(col_sums > 1))
 
 
 # =============================================================================
@@ -589,10 +711,15 @@ def save_dat_file(df, path, delimiter="\t"):
     """
     Save the figure dataset to a .dat-compatible tabular file.
     """
-
     df.to_csv(
         path,
         sep=delimiter,
         index=False,
-        float_format="%.8e"
+        float_format="%.8e",
     )
+
+
+__all__ = [
+    "generate_sfc_duplicate_rx_data",
+    "save_dat_file",
+]
